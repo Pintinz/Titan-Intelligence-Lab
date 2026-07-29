@@ -22,6 +22,7 @@ interface AuthFlowProps {
 export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
   const navigate = useNavigate()
   const [mode, setMode] = useState<AuthMode>(initialMode)
+  const [prevMode, setPrevMode] = useState<AuthMode>(initialMode)
   const [agree, setAgree] = useState(false)
 
   const loginForm = useForm<LoginValues>({ resolver: zodResolver(loginSchema) })
@@ -64,6 +65,7 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
   }
 
   const toggleMode = (newMode: AuthMode) => {
+    setPrevMode(mode)
     setMode(newMode)
     setAgree(false)
     if (newMode === 'login') {
@@ -73,6 +75,9 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
     }
   }
 
+  const isTransitioningToSignup = prevMode === 'login' && mode === 'signup'
+  const isTransitioningToLogin = prevMode === 'signup' && mode === 'login'
+
   return (
     <AuthCard>
       <div className="relative">
@@ -80,7 +85,12 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
         <div
           className={cn(
             'transition-all duration-300 ease-in-out',
-            isLoginMode ? 'opacity-100 visible' : 'opacity-0 invisible absolute inset-0'
+            isLoginMode
+              ? cn(
+                  'opacity-100 visible',
+                  isTransitioningToLogin && 'animate-form-morph-in-left'
+                )
+              : 'opacity-0 invisible absolute inset-0'
           )}
         >
           <AuthFormHeader
@@ -88,8 +98,8 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
             subtitle="See every match through intelligence."
           />
 
-          <form onSubmit={loginForm.handleSubmit(handleLogin)} className="space-y-4 animate-card-entrance" style={{ animationDelay: '100ms' }} noValidate>
-            <div className="space-y-1.5">
+          <form onSubmit={loginForm.handleSubmit(handleLogin)} className="space-y-4" noValidate>
+            <div className="space-y-1.5 animate-field-stagger" style={{ animationDelay: '50ms' }}>
               <Label htmlFor="login-email">Email</Label>
               <Input
                 id="login-email"
@@ -108,7 +118,7 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
               )}
             </div>
 
-            <div className="space-y-1.5">
+            <div className="space-y-1.5 animate-field-stagger" style={{ animationDelay: '100ms' }}>
               <div className="flex items-center justify-between">
                 <Label htmlFor="login-password">Password</Label>
                 <a href="/forgot-password" className="text-xs text-accent-primary hover:text-accent-primary-hover transition-colors">
@@ -132,7 +142,7 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
               )}
             </div>
 
-            <div className="flex items-center gap-2 text-sm">
+            <div className="flex items-center gap-2 text-sm animate-field-stagger" style={{ animationDelay: '150ms' }}>
               <input
                 type="checkbox"
                 id="login-remember"
@@ -147,14 +157,15 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
 
             <Button
               type="submit"
-              className="w-full"
+              className="w-full animate-field-stagger"
+              style={{ animationDelay: '200ms' }}
               disabled={loginForm.formState.isSubmitting}
             >
               {loginForm.formState.isSubmitting ? 'Signing in…' : 'Sign in'}
             </Button>
           </form>
 
-          <div className="space-y-3 animate-card-entrance" style={{ animationDelay: '150ms' }}>
+          <div className="space-y-3 animate-field-stagger" style={{ animationDelay: '250ms' }}>
             <div className="relative">
               <div className="absolute inset-0 flex items-center">
                 <div className="w-full border-t border-border-default/20" />
@@ -167,7 +178,7 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
             <GoogleSignInButton disabled={loginForm.formState.isSubmitting} />
           </div>
 
-          <p className="text-center text-sm text-text-secondary animate-card-entrance" style={{ animationDelay: '200ms' }}>
+          <p className="text-center text-sm text-text-secondary animate-field-stagger" style={{ animationDelay: '350ms' }}>
             Don't have an account?{' '}
             <button
               type="button"
@@ -183,7 +194,12 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
         <div
           className={cn(
             'transition-all duration-300 ease-in-out',
-            !isLoginMode ? 'opacity-100 visible' : 'opacity-0 invisible absolute inset-0'
+            !isLoginMode
+              ? cn(
+                  'opacity-100 visible',
+                  isTransitioningToSignup && 'animate-form-morph-in-right'
+                )
+              : 'opacity-0 invisible absolute inset-0'
           )}
         >
           <AuthFormHeader
@@ -191,8 +207,8 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
             subtitle="See every match through intelligence."
           />
 
-          <form onSubmit={signupForm.handleSubmit(handleSignup)} className="space-y-4 animate-card-entrance" style={{ animationDelay: '100ms' }} noValidate>
-            <div className="space-y-1.5">
+          <form onSubmit={signupForm.handleSubmit(handleSignup)} className="space-y-4" noValidate>
+            <div className="space-y-1.5 animate-field-stagger" style={{ animationDelay: '50ms' }}>
               <Label htmlFor="signup-email">Email</Label>
               <Input
                 id="signup-email"
@@ -211,7 +227,7 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
               )}
             </div>
 
-            <div className="space-y-1.5">
+            <div className="space-y-1.5 animate-field-stagger" style={{ animationDelay: '100ms' }}>
               <Label htmlFor="signup-password">Password</Label>
               <Input
                 id="signup-password"
@@ -230,7 +246,7 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
               )}
             </div>
 
-            <div className="space-y-1.5">
+            <div className="space-y-1.5 animate-field-stagger" style={{ animationDelay: '150ms' }}>
               <Label htmlFor="signup-confirm">Confirm Password</Label>
               <Input
                 id="signup-confirm"
@@ -249,7 +265,7 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
               )}
             </div>
 
-            <div className="flex items-start gap-2 text-sm">
+            <div className="flex items-start gap-2 text-sm animate-field-stagger" style={{ animationDelay: '200ms' }}>
               <input
                 type="checkbox"
                 id="signup-agree"
@@ -267,14 +283,15 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
 
             <Button
               type="submit"
-              className="w-full"
+              className="w-full animate-field-stagger"
+              style={{ animationDelay: '250ms' }}
               disabled={signupForm.formState.isSubmitting || !agree}
             >
               {signupForm.formState.isSubmitting ? 'Creating account…' : 'Create account'}
             </Button>
           </form>
 
-          <div className="space-y-3 animate-card-entrance" style={{ animationDelay: '150ms' }}>
+          <div className="space-y-3 animate-field-stagger" style={{ animationDelay: '300ms' }}>
             <div className="relative">
               <div className="absolute inset-0 flex items-center">
                 <div className="w-full border-t border-border-default/20" />
@@ -287,7 +304,7 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
             <GoogleSignInButton disabled={signupForm.formState.isSubmitting} />
           </div>
 
-          <p className="text-center text-sm text-text-secondary animate-card-entrance" style={{ animationDelay: '200ms' }}>
+          <p className="text-center text-sm text-text-secondary animate-field-stagger" style={{ animationDelay: '350ms' }}>
             Already have an account?{' '}
             <button
               type="button"

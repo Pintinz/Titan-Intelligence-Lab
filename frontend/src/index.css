@@ -128,3 +128,153 @@
   from { opacity: 0; transform: translateX(16px); }
   to { opacity: 1; transform: translateX(0); }
 }
+
+/* Premium motion language for Milestone 10.3 */
+@keyframes card-entrance {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes confidence-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+@keyframes live-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 84, 104, 0.7); }
+  50% { box-shadow: 0 0 0 4px rgba(255, 84, 104, 0); }
+}
+
+@keyframes live-indicator-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes feed-event-enter {
+  from { opacity: 0; transform: translateX(-4px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes confidence-bar-fill {
+  from { width: 0%; }
+  to { width: 100%; }
+}
+
+@keyframes shimmer-loading {
+  0% { background-position: -1000px 0; }
+  100% { background-position: 1000px 0; }
+}
+
+@keyframes intelligence-rail-slide {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes bounce-subtle {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-2px); }
+}
+
+/* Form morphing animations */
+@keyframes form-morph-in-right {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes form-morph-in-left {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes form-morph-out {
+  from { opacity: 1; transform: translateX(0); }
+  to { opacity: 0; transform: translateX(-4px); }
+}
+
+@keyframes field-entrance-stagger {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes button-success-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.02); }
+}
+
+@layer components {
+  .animate-card-entrance {
+    animation: card-entrance var(--motion-duration-base) var(--motion-easing-decelerate);
+  }
+
+  .animate-confidence-pulse {
+    animation: confidence-pulse 2s ease-in-out infinite;
+  }
+
+  .animate-live-pulse {
+    animation: live-pulse 2s infinite;
+  }
+
+  .animate-live-indicator {
+    animation: live-indicator-pulse 1.5s ease-in-out infinite;
+  }
+
+  .animate-feed-event {
+    animation: feed-event-enter var(--motion-duration-base) var(--motion-easing-decelerate);
+  }
+
+  .animate-shimmer {
+    background: linear-gradient(
+      90deg,
+      var(--color-bg-secondary) 0%,
+      var(--color-border-default) 50%,
+      var(--color-bg-secondary) 100%
+    );
+    background-size: 1000px 100%;
+    animation: shimmer-loading 2s infinite;
+  }
+
+  .animate-bounce-subtle {
+    animation: bounce-subtle 2s ease-in-out infinite;
+  }
+
+  /* Form morphing utilities */
+  .animate-form-morph-in-right {
+    animation: form-morph-in-right 300ms var(--motion-easing-decelerate);
+  }
+
+  .animate-form-morph-in-left {
+    animation: form-morph-in-left 300ms var(--motion-easing-decelerate);
+  }
+
+  .animate-form-morph-out {
+    animation: form-morph-out 300ms var(--motion-easing-decelerate);
+  }
+
+  .animate-field-stagger {
+    animation: field-entrance-stagger var(--motion-duration-base) var(--motion-easing-decelerate) backwards;
+  }
+
+  .animate-button-success {
+    animation: button-success-pulse 500ms ease-in-out;
+  }
+
+  /* Transition utilities for common interactions */
+  .transition-smooth {
+    transition: all var(--motion-duration-base) var(--motion-easing-standard);
+  }
+
+  .transition-fast {
+    transition: all var(--motion-duration-fast) var(--motion-easing-standard);
+  }
+
+  .transition-slow {
+    transition: all var(--motion-duration-slow) var(--motion-easing-standard);
+  }
+
+  /* Color transitions */
+  .transition-colors-smooth {
+    transition: color var(--motion-duration-base) var(--motion-easing-standard),
+                background-color var(--motion-duration-base) var(--motion-easing-standard),
+                border-color var(--motion-duration-base) var(--motion-easing-standard);
+  }
+}
