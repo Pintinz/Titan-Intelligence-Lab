@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { SportShell } from '@/components/layout/sport-shell'
+import { SPORT_SLUGS } from '@/lib/hooks/use-sport'
 import SportHubPage from './sport-hub-page'
 import MatchListPage from './match-list-page'
 import PredictionLabPage from './prediction-lab-page'
@@ -163,5 +164,29 @@ describe('PredictionLabPage', () => {
       entity_id: 'fx-1',
       subject_ref: 'fx-1',
     })
+  })
+})
+
+// Phase 3: the Football Intelligence Center built in Phase 2 is generic and sport-parameterized,
+// not football-specific — "only market types differ by sport" (brief). These tests prove that
+// claim across all four real sports rather than assuming it from football alone.
+describe('Sport Intelligence Center genericity (Phase 3)', () => {
+  it.each(SPORT_SLUGS)('$label: SportShell resolves the :sport param and shows the right label', ({ slug, label }) => {
+    renderAtSport(`/app/${slug}`, <div />)
+    expect(screen.getByText(label)).toBeInTheDocument()
+  })
+
+  it.each(SPORT_SLUGS)('$label: SportHubPage fetches fixtures with the correct backend SportCode, not football', async ({ slug, code, label }) => {
+    vi.mocked(sportsApi.listFixtures).mockResolvedValue([])
+    renderAtSport(`/app/${slug}`, <SportHubPage />)
+    await waitFor(() => expect(screen.getByText('No fixtures under coverage')).toBeInTheDocument())
+    expect(sportsApi.listFixtures).toHaveBeenCalledWith(code, { limit: 12 })
+    expect(screen.getAllByText(new RegExp(label, 'i')).length).toBeGreaterThan(0)
+  })
+
+  it.each(SPORT_SLUGS)('$label: Prediction Laboratory requests production markets scoped to this sport', async ({ slug, code }) => {
+    vi.mocked(marketsApi.list).mockResolvedValue([])
+    renderAtSport(`/app/${slug}/lab`, <PredictionLabPage />)
+    await waitFor(() => expect(marketsApi.list).toHaveBeenCalledWith({ sport_code: code, status: 'production' }))
   })
 })
