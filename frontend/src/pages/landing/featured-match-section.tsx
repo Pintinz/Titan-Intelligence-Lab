@@ -3,7 +3,8 @@ import { ArrowRight } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { ConfidenceTelemetry } from '@/components/domain/confidence-telemetry'
-import { Section, SectionHeading, IllustrativeTag, LiveDot } from './section-primitives'
+import { LiveDot } from '@/components/ui/live-dot'
+import { Section, SectionHeading, IllustrativeTag } from './section-primitives'
 import { FEATURED_MATCHES } from './sample-data'
 
 function formatKickoff(iso: string) {

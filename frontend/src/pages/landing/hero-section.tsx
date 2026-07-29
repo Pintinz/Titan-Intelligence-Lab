@@ -1,7 +1,8 @@
 import { Link } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { ConfidenceTelemetry } from '@/components/domain/confidence-telemetry'
-import { LiveDot, IllustrativeTag } from './section-primitives'
+import { LiveDot } from '@/components/ui/live-dot'
+import { IllustrativeTag } from './section-primitives'
 import { FEATURED_MATCHES } from './sample-data'
 
 const heroMatch = FEATURED_MATCHES[0]

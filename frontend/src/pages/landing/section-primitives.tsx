@@ -50,15 +50,6 @@ export function IllustrativeTag() {
   )
 }
 
-export function LiveDot() {
-  return (
-    <span className="relative inline-flex size-1.5">
-      <span className="absolute inline-flex size-full animate-ping rounded-full bg-live opacity-60 motion-reduce:animate-none" />
-      <span className="relative inline-flex size-1.5 rounded-full bg-live" />
-    </span>
-  )
-}
-
 export function Hairline({ className }: { className?: string }) {
   return <div className={cn('h-px w-full bg-border-subtle', className)} aria-hidden="true" />
 }

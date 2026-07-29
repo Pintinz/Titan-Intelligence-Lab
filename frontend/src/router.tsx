@@ -6,6 +6,19 @@ import { ProtectedRoute } from '@/routes/protected-route'
 import { RoleRoute } from '@/routes/role-route'
 import { AppShell } from '@/components/layout/app-shell'
 import { MarketingShell } from '@/components/layout/marketing-shell'
+import { SportShell } from '@/components/layout/sport-shell'
+import SportHubPage from '@/pages/sports/sport-hub-page'
+import MatchListPage from '@/pages/sports/match-list-page'
+import MatchDetailPage from '@/pages/sports/match-detail-page'
+import TeamListPage from '@/pages/sports/team-list-page'
+import TeamDetailPage from '@/pages/sports/team-detail-page'
+import PlayerListPage from '@/pages/sports/player-list-page'
+import PlayerDetailPage from '@/pages/sports/player-detail-page'
+import CompetitionListPage from '@/pages/sports/competition-list-page'
+import CompetitionDetailPage from '@/pages/sports/competition-detail-page'
+import PredictionLabPage from '@/pages/sports/prediction-lab-page'
+import SportNewsPage from '@/pages/sports/sport-news-page'
+import SportCommunityPage from '@/pages/sports/sport-community-page'
 
 // -- Milestone 10.2 reconstruction: every route below renders RebuildingPage until its phase
 // lands (see the phased plan). Route paths reflect the NEW information architecture — four Sport
@@ -58,10 +71,27 @@ export const router = createBrowserRouter([
     children: [
       { index: true, element: <RebuildingPage title="Dashboard" phase="a later phase" /> },
 
-      { path: 'football', element: <RebuildingPage title="Football Intelligence" phase="Phase 2" /> },
-      { path: 'basketball', element: <RebuildingPage title="Basketball Intelligence" phase="Phase 3" /> },
-      { path: 'baseball', element: <RebuildingPage title="Baseball Intelligence" phase="Phase 3" /> },
-      { path: 'table-tennis', element: <RebuildingPage title="Table Tennis Intelligence" phase="Phase 3" /> },
+      {
+        // One generic shell serves every Sport Intelligence Center — "only market types differ
+        // by sport" (brief). Football is verified in Phase 2; Basketball/Baseball/Table Tennis
+        // reuse this exact tree in Phase 3, nothing sport-specific hardcoded here.
+        path: ':sport',
+        element: <SportShell />,
+        children: [
+          { index: true, element: <SportHubPage /> },
+          { path: 'matches', element: <MatchListPage /> },
+          { path: 'matches/:matchId', element: <MatchDetailPage /> },
+          { path: 'teams', element: <TeamListPage /> },
+          { path: 'teams/:teamId', element: <TeamDetailPage /> },
+          { path: 'players', element: <PlayerListPage /> },
+          { path: 'players/:playerId', element: <PlayerDetailPage /> },
+          { path: 'competitions', element: <CompetitionListPage /> },
+          { path: 'competitions/:competitionId', element: <CompetitionDetailPage /> },
+          { path: 'lab', element: <PredictionLabPage /> },
+          { path: 'news', element: <SportNewsPage /> },
+          { path: 'community', element: <SportCommunityPage /> },
+        ],
+      },
 
       { path: 'news', element: <RebuildingPage title="News Intelligence" phase="Phase 4" /> },
       { path: 'learning', element: <RebuildingPage title="Learning Intelligence" phase="Phase 4" /> },

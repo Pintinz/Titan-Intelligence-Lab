@@ -22,3 +22,11 @@ Object.defineProperty(window, 'matchMedia', {
     dispatchEvent: () => false,
   }),
 })
+
+// jsdom doesn't implement the Pointer Events capture API or scrollIntoView — Radix Select's
+// internals call these on open/close regardless of environment, so every test that interacts
+// with a Select would otherwise throw a TypeError unrelated to the thing being tested.
+Element.prototype.hasPointerCapture ??= () => false
+Element.prototype.setPointerCapture ??= () => {}
+Element.prototype.releasePointerCapture ??= () => {}
+Element.prototype.scrollIntoView ??= () => {}
