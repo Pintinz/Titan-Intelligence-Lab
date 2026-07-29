@@ -28,6 +28,11 @@
   --color-accent-secondary: var(--color-accent-secondary);
   --color-accent-secondary-muted: var(--color-accent-secondary-muted);
 
+  --color-premium: var(--color-premium);
+  --color-premium-muted: var(--color-premium-muted);
+  --color-live: var(--color-live);
+  --color-live-muted: var(--color-live-muted);
+
   --color-success: var(--color-semantic-success);
   --color-success-muted: var(--color-semantic-success-muted);
   --color-warning: var(--color-semantic-warning);
@@ -47,7 +52,7 @@
   --radius-full: var(--radius-full);
 
   --font-display: var(--font-display);
-  --font-heading: var(--font-heading);
+  --font-telemetry: var(--font-telemetry);
   --font-body: var(--font-body);
   --font-mono: var(--font-mono);
 
@@ -118,4 +123,8 @@
 @keyframes popover-content-in {
   from { opacity: 0; transform: translateY(-4px) scale(0.98); }
   to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: translateX(0); }
 }

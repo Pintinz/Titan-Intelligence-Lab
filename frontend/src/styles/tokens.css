@@ -1,135 +1,163 @@
 /*
-  TitanIQ Design Tokens — docs/ui_design_system.md §2.
-  Dark is the primary/default mode (data-dense dashboards read best dark); light is a first-class
-  second mode. Toggled via a `data-theme` attribute on <html> (see src/stores/theme-store.ts) —
-  never `prefers-color-scheme` alone, since dark stays the default even on a light-OS machine.
-  Every component consumes these variables (via the Tailwind theme extension in tailwind.config.ts)
-  — no hard-coded hex/px values in component code.
+  TitanIQ Design Tokens v2 — Milestone 10.2 reconstruction.
+
+  One app-wide system (retires the Milestone 10.1 `.titan-landing`-scoped duplicate — the
+  landing page's Bloomberg/Apple-HIG/F1 direction is promoted here as the platform's only
+  visual language, not a page-local experiment anymore).
+
+  Dark is the primary/default mode; light is a first-class second mode; high-contrast is an
+  explicit opt-in. Toggled via `data-theme` on <html> (src/stores/theme-store.ts) — never
+  `prefers-color-scheme` alone, since dark stays default regardless of OS theme.
+
+  Signature-color discipline: `--color-accent-primary` (signal teal) is the ONE brand hue used
+  for every interactive element AND for high-confidence intelligence — Bloomberg/F1 both build
+  identity from a single livery color, not a chrome-blue plus a separate "smart" color. Amber
+  marks medium confidence/warning. Violet is reserved and rare — peak-confidence and premium-tier
+  moments only. Crimson (`--color-live`) is reserved and rare in the other direction — live/alert
+  status only, never confidence, never everyday error UI (that stays a calmer `--color-danger`).
 */
 
 :root,
 [data-theme="dark"] {
-  /* color.background.* — graphite scale, not pure black (avoids OLED smear + harsh contrast) */
-  --color-bg-primary: #0a0e14;
-  --color-bg-secondary: #10151d;
-  --color-bg-elevated: #171d27;
-  --color-bg-overlay: rgba(6, 9, 14, 0.72);
-  --color-border-subtle: #1f2733;
-  --color-border-default: #2a3341;
+  /* color.background.* — carbon scale, not pure black (avoids OLED smear + harsh contrast) */
+  --color-bg-primary: #06080d;
+  --color-bg-secondary: #0d131d;
+  --color-bg-elevated: #121a26;
+  --color-bg-overlay: rgba(4, 6, 10, 0.75);
+  --color-border-subtle: #1e2733;
+  --color-border-default: #2b3648;
   --color-border-strong: #3a4658;
 
   /* color.text.* */
-  --color-text-primary: #eef1f5;
-  --color-text-secondary: #a7b0bf;
-  --color-text-muted: #6b7585;
-  --color-text-inverse: #0a0e14;
+  --color-text-primary: #eef2f8;
+  --color-text-secondary: #97a2b5;
+  --color-text-muted: #5b6577;
+  --color-text-inverse: #06080d;
 
-  /* color.accent.* — "Titan Blue" indigo primary, warm amber secondary for premium/highlight use */
-  --color-accent-primary: #4f7dfb;
-  --color-accent-primary-hover: #6c93fc;
-  --color-accent-primary-muted: rgba(79, 125, 251, 0.16);
-  --color-accent-secondary: #d9a441;
-  --color-accent-secondary-muted: rgba(217, 164, 65, 0.16);
+  /* color.accent.* — signal teal is the one brand/interactive hue; amber is the secondary
+     (premium surface fills, medium-confidence, warning) */
+  --color-accent-primary: #17e6b8;
+  --color-accent-primary-hover: #3eecc4;
+  --color-accent-primary-muted: rgba(23, 230, 184, 0.16);
+  --color-accent-secondary: #f2b134;
+  --color-accent-secondary-muted: rgba(242, 177, 52, 0.16);
+
+  /* color.premium.* — violet, reserved for peak-confidence/premium-tier moments only, never
+     general chrome; scarcity is what makes it read as premium */
+  --color-premium: #9b8cff;
+  --color-premium-muted: rgba(155, 140, 255, 0.16);
+
+  /* color.live.* — crimson, reserved for live-match/alert status only; never reused for
+     confidence or everyday error UI (that stays the muted color.semantic.danger below) */
+  --color-live: #ff5468;
+  --color-live-muted: rgba(255, 84, 104, 0.16);
 
   /* color.semantic.* — muted, analytical tones; never neon/gambling red-green */
   --color-semantic-success: #3fb27f;
   --color-semantic-success-muted: rgba(63, 178, 127, 0.14);
-  --color-semantic-warning: #d9a441;
-  --color-semantic-warning-muted: rgba(217, 164, 65, 0.14);
+  --color-semantic-warning: #f2b134;
+  --color-semantic-warning-muted: rgba(242, 177, 52, 0.14);
   --color-semantic-danger: #d9615a;
   --color-semantic-danger-muted: rgba(217, 97, 90, 0.14);
   --color-semantic-info: #4f9fd9;
   --color-semantic-info-muted: rgba(79, 159, 217, 0.14);
 
-  /* color.confidence.* — a reliability signal, deliberately distinct from semantic success/danger */
-  --color-confidence-high: #3fa3b2;
-  --color-confidence-medium: #b58a3f;
-  --color-confidence-low: #6b7585;
+  /* color.confidence.* — a reliability signal, deliberately distinct from semantic success/danger.
+     High confidence IS the brand teal (the signature ConfidenceTelemetry component uses this
+     scale everywhere confidence appears, not just landing). */
+  --color-confidence-high: #17e6b8;
+  --color-confidence-medium: #f2b134;
+  --color-confidence-low: #5b6577;
 
   --shadow-elevation-1: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-elevation-2: 0 4px 12px rgba(0, 0, 0, 0.45);
   --shadow-elevation-3: 0 12px 32px rgba(0, 0, 0, 0.5);
 
-  /* color.glass.* — translucent surfaces for hero/overlay treatments (Milestone 10A) */
-  --color-bg-glass: rgba(23, 29, 39, 0.55);
-  --color-bg-glass-strong: rgba(23, 29, 39, 0.78);
+  /* color.glass.* — translucent surfaces for hero/overlay treatments */
+  --color-bg-glass: rgba(18, 26, 38, 0.55);
+  --color-bg-glass-strong: rgba(18, 26, 38, 0.78);
   --color-border-glass: rgba(255, 255, 255, 0.08);
   --blur-glass-sm: 8px;
   --blur-glass-md: 16px;
   --blur-glass-lg: 24px;
 
-  /* gradient.* — brand/hero motion surfaces, built only from existing accent/confidence tokens */
-  --gradient-brand: linear-gradient(135deg, var(--color-accent-primary) 0%, #7b5fe0 100%);
+  /* gradient.* — built only from existing tokens above, no new hues invented */
+  --gradient-brand: linear-gradient(135deg, var(--color-accent-primary) 0%, var(--color-premium) 100%);
   --gradient-brand-subtle: linear-gradient(
     135deg,
     var(--color-accent-primary-muted) 0%,
-    rgba(123, 95, 224, 0.12) 100%
+    var(--color-premium-muted) 100%
   );
-  --gradient-mesh-hero: radial-gradient(at 20% 20%, rgba(79, 125, 251, 0.25) 0px, transparent 50%),
-    radial-gradient(at 80% 0%, rgba(217, 164, 65, 0.18) 0px, transparent 50%),
-    radial-gradient(at 50% 100%, rgba(63, 163, 178, 0.15) 0px, transparent 50%);
+  --gradient-mesh-hero: radial-gradient(at 20% 20%, rgba(23, 230, 184, 0.22) 0px, transparent 50%),
+    radial-gradient(at 80% 0%, rgba(155, 140, 255, 0.16) 0px, transparent 50%),
+    radial-gradient(at 50% 100%, rgba(242, 177, 52, 0.12) 0px, transparent 50%);
   --gradient-confidence-high: linear-gradient(90deg, var(--color-confidence-high), transparent);
 }
 
 [data-theme="light"] {
   --color-bg-primary: #ffffff;
-  --color-bg-secondary: #f6f7f9;
+  --color-bg-secondary: #f5f7f8;
   --color-bg-elevated: #ffffff;
   --color-bg-overlay: rgba(15, 18, 24, 0.4);
-  --color-border-subtle: #e6e8ec;
-  --color-border-default: #d7dae1;
-  --color-border-strong: #b9bfc9;
+  --color-border-subtle: #e4e8eb;
+  --color-border-default: #d5dade;
+  --color-border-strong: #b6bec4;
 
-  --color-text-primary: #10151d;
-  --color-text-secondary: #454e5c;
-  --color-text-muted: #767f8c;
+  --color-text-primary: #0c1116;
+  --color-text-secondary: #48525e;
+  --color-text-muted: #717983;
   --color-text-inverse: #ffffff;
 
-  --color-accent-primary: #3a63d1;
-  --color-accent-primary-hover: #2c4fb3;
-  --color-accent-primary-muted: rgba(58, 99, 209, 0.1);
-  --color-accent-secondary: #a97a1f;
-  --color-accent-secondary-muted: rgba(169, 122, 31, 0.1);
+  /* Darker/more saturated teal for AA contrast on white — same pattern as every other accent
+     below: light mode always deepens the hue rather than reusing the dark-mode value verbatim. */
+  --color-accent-primary: #0e8f72;
+  --color-accent-primary-hover: #0b7660;
+  --color-accent-primary-muted: rgba(14, 143, 114, 0.1);
+  --color-accent-secondary: #a06f10;
+  --color-accent-secondary-muted: rgba(160, 111, 16, 0.1);
+
+  --color-premium: #6a58e0;
+  --color-premium-muted: rgba(106, 88, 224, 0.1);
+
+  --color-live: #d43f52;
+  --color-live-muted: rgba(212, 63, 82, 0.1);
 
   --color-semantic-success: #1f8f5f;
   --color-semantic-success-muted: rgba(31, 143, 95, 0.1);
-  --color-semantic-warning: #a97a1f;
-  --color-semantic-warning-muted: rgba(169, 122, 31, 0.1);
+  --color-semantic-warning: #a06f10;
+  --color-semantic-warning-muted: rgba(160, 111, 16, 0.1);
   --color-semantic-danger: #c4433c;
   --color-semantic-danger-muted: rgba(196, 67, 60, 0.1);
   --color-semantic-info: #2d7fb3;
   --color-semantic-info-muted: rgba(45, 127, 179, 0.1);
 
-  --color-confidence-high: #237e8c;
-  --color-confidence-medium: #92691f;
-  --color-confidence-low: #767f8c;
+  --color-confidence-high: #0e8f72;
+  --color-confidence-medium: #a06f10;
+  --color-confidence-low: #717983;
 
   --shadow-elevation-1: 0 1px 2px rgba(16, 21, 29, 0.06);
   --shadow-elevation-2: 0 4px 12px rgba(16, 21, 29, 0.08);
   --shadow-elevation-3: 0 12px 32px rgba(16, 21, 29, 0.12);
 
   --color-bg-glass: rgba(255, 255, 255, 0.6);
-  --color-bg-glass-strong: rgba(255, 255, 255, 0.82);
+  --color-bg-glass-strong: rgba(255, 255, 255, 0.84);
   --color-border-glass: rgba(16, 21, 29, 0.06);
 
-  --gradient-brand: linear-gradient(135deg, var(--color-accent-primary) 0%, #5b46b0 100%);
+  --gradient-brand: linear-gradient(135deg, var(--color-accent-primary) 0%, var(--color-premium) 100%);
   --gradient-brand-subtle: linear-gradient(
     135deg,
     var(--color-accent-primary-muted) 0%,
-    rgba(91, 70, 176, 0.08) 100%
+    var(--color-premium-muted) 100%
   );
-  --gradient-mesh-hero: radial-gradient(at 20% 20%, rgba(58, 99, 209, 0.12) 0px, transparent 50%),
-    radial-gradient(at 80% 0%, rgba(169, 122, 31, 0.1) 0px, transparent 50%),
-    radial-gradient(at 50% 100%, rgba(35, 126, 140, 0.08) 0px, transparent 50%);
+  --gradient-mesh-hero: radial-gradient(at 20% 20%, rgba(14, 143, 114, 0.1) 0px, transparent 50%),
+    radial-gradient(at 80% 0%, rgba(106, 88, 224, 0.08) 0px, transparent 50%),
+    radial-gradient(at 50% 100%, rgba(160, 111, 16, 0.08) 0px, transparent 50%);
   --gradient-confidence-high: linear-gradient(90deg, var(--color-confidence-high), transparent);
 }
 
 /*
-  High-contrast mode — WCAG-AA+ variant for users who need stronger separation than the
-  standard dark/light palettes provide. Extends the same [data-theme] attribute mechanism
-  (src/stores/theme-store.ts) rather than introducing a second theming system: widened
-  border/text contrast, near-solid glass surfaces (translucency itself reduces contrast, so
-  high-contrast mode intentionally opts out of it), no gradients on interactive surfaces.
+  High-contrast — WCAG-AA+ variant for users who need stronger separation than dark/light give.
+  Same `data-theme` mechanism, an explicit opt-in from Settings (not part of the quick toggle).
 */
 [data-theme="high-contrast"] {
   --color-bg-primary: #000000;
@@ -145,11 +173,17 @@
   --color-text-muted: #b8b8b8;
   --color-text-inverse: #000000;
 
-  --color-accent-primary: #7ea2ff;
-  --color-accent-primary-hover: #9db6ff;
-  --color-accent-primary-muted: rgba(126, 162, 255, 0.28);
+  --color-accent-primary: #4df0ce;
+  --color-accent-primary-hover: #75f4d9;
+  --color-accent-primary-muted: rgba(77, 240, 206, 0.28);
   --color-accent-secondary: #ffcf6b;
   --color-accent-secondary-muted: rgba(255, 207, 107, 0.28);
+
+  --color-premium: #c3b8ff;
+  --color-premium-muted: rgba(195, 184, 255, 0.28);
+
+  --color-live: #ff8a95;
+  --color-live-muted: rgba(255, 138, 149, 0.28);
 
   --color-semantic-success: #5fe0a3;
   --color-semantic-success-muted: rgba(95, 224, 163, 0.22);
@@ -160,7 +194,7 @@
   --color-semantic-info: #7ec4ff;
   --color-semantic-info-muted: rgba(126, 196, 255, 0.22);
 
-  --color-confidence-high: #6fd7e8;
+  --color-confidence-high: #4df0ce;
   --color-confidence-medium: #ffcf6b;
   --color-confidence-low: #b8b8b8;
 
@@ -199,12 +233,17 @@
   --radius-lg: 16px;
   --radius-full: 9999px;
 
-  /* typography.{display,heading,body,mono} — self-hosted via @fontsource (src/styles/fonts.css),
-     not a Google Fonts CDN link, so the PWA keeps working fully offline. Space Grotesk pairs with
-     IBM Plex Mono (both technical/geometric grotesque-derived faces) for the display/heading
-     layer; Inter remains the body face. */
+  /* typography — three roles, used with restraint (self-hosted via @fontsource, fonts.css, so
+     the PWA keeps working fully offline):
+     display   — Space Grotesk: headlines, section titles, hero numerals. General-purpose,
+                 legible at heading sizes.
+     telemetry — Barlow Condensed: condensed broadcast-tower numerals — live scorelines, kickoff
+                 countdowns, confidence sector-bar labels. Used only where a number is "live";
+                 never body copy, never general headings (too tight/loud at prose-adjacent sizes).
+     body      — Inter: everything else — nav, forms, tables, descriptions.
+     mono      — IBM Plex Mono: stats, market keys, model/version ids, timestamps. */
   --font-display: "Space Grotesk", "Inter", system-ui, sans-serif;
-  --font-heading: "Space Grotesk", "Inter", system-ui, sans-serif;
+  --font-telemetry: "Barlow Condensed", "Inter", system-ui, sans-serif;
   --font-body: "Inter", system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
 
@@ -216,7 +255,7 @@
   --motion-easing-decelerate: cubic-bezier(0, 0, 0.2, 1);
   --motion-easing-accelerate: cubic-bezier(0.4, 0, 1, 1);
 
-  /* grid / breakpoints (mirrored in tailwind.config.ts screens) */
+  /* grid / breakpoints (Tailwind v4 defaults) */
   --breakpoint-sm: 640px;
   --breakpoint-md: 768px;
   --breakpoint-lg: 1024px;
@@ -230,32 +269,4 @@
     --motion-duration-base: 0ms;
     --motion-duration-slow: 0ms;
   }
-}
-
-/*
-  Per-dashboard accent personality (Milestone 10A) — a `data-dashboard-accent` attribute on a
-  page's root element scopes a small accent-hue override, same attribute-driven repaint pattern
-  as the dark/light/high-contrast themes above (ADR-060), just scoped to a page subtree instead
-  of <html>. Each override reuses existing color tokens (no new hues invented) so it stays inside
-  the established palette rather than introducing arbitrary per-page colors.
-*/
-[data-dashboard-accent="executive"] {
-  --color-accent-primary: #4f7dfb;
-  --color-accent-primary-hover: #6c93fc;
-}
-[data-dashboard-accent="prediction"] {
-  --color-accent-primary: var(--color-confidence-high);
-  --color-accent-primary-hover: var(--color-confidence-high);
-}
-[data-dashboard-accent="kg"] {
-  --color-accent-primary: #7b5fe0;
-  --color-accent-primary-hover: #9683e8;
-}
-[data-dashboard-accent="ml"] {
-  --color-accent-primary: var(--color-accent-secondary);
-  --color-accent-primary-hover: var(--color-accent-secondary);
-}
-[data-dashboard-accent="admin"] {
-  --color-accent-primary: var(--color-semantic-info);
-  --color-accent-primary-hover: var(--color-semantic-info);
 }

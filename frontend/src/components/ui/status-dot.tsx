@@ -1,20 +1,36 @@
 import { cn } from '@/lib/cn'
 
-export type StatusTone = 'success' | 'warning' | 'danger' | 'info' | 'neutral'
+export type StatusDotTone = 'live' | 'success' | 'warning' | 'danger' | 'neutral'
 
-const TONE_CLASS: Record<StatusTone, string> = {
+const toneClass: Record<StatusDotTone, string> = {
+  live: 'bg-live',
   success: 'bg-success',
   warning: 'bg-warning',
   danger: 'bg-danger',
-  info: 'bg-info',
   neutral: 'bg-text-muted',
 }
 
-export function StatusDot({ tone, label, className }: { tone: StatusTone; label?: string; className?: string }) {
+/** A single status pixel. `pulse` is reserved for genuinely live state, never decorative. */
+export function StatusDot({
+  tone = 'neutral',
+  pulse = false,
+  className,
+}: {
+  tone?: StatusDotTone
+  pulse?: boolean
+  className?: string
+}) {
   return (
-    <span className={cn('inline-flex items-center gap-1.5', className)}>
-      <span className={cn('h-1.5 w-1.5 rounded-full', TONE_CLASS[tone])} aria-hidden="true" />
-      {label && <span className="text-xs text-text-secondary">{label}</span>}
+    <span className={cn('relative inline-flex size-2', className)}>
+      {pulse && (
+        <span
+          className={cn(
+            'absolute inline-flex size-full animate-ping rounded-full opacity-60 motion-reduce:animate-none',
+            toneClass[tone],
+          )}
+        />
+      )}
+      <span className={cn('relative inline-flex size-2 rounded-full', toneClass[tone])} />
     </span>
   )
 }

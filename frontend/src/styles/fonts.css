@@ -1,12 +1,15 @@
 /*
-  Self-hosted fonts (Milestone 10A) — @fontsource packages, not a Google Fonts CDN link, so
-  the app keeps working fully offline under the existing vite-plugin-pwa config. Only the
-  weight subsets actually referenced by --font-display/--font-heading/--font-body
-  (src/styles/tokens.css) are imported.
+  Self-hosted fonts — @fontsource packages, not a Google Fonts CDN link, so the app keeps
+  working fully offline under the existing vite-plugin-pwa config. Only the weight subsets
+  actually referenced by --font-display/--font-telemetry/--font-body (src/styles/tokens.css)
+  are imported.
 */
 @import "@fontsource/space-grotesk/500.css";
 @import "@fontsource/space-grotesk/600.css";
 @import "@fontsource/space-grotesk/700.css";
+@import "@fontsource/barlow-condensed/500.css";
+@import "@fontsource/barlow-condensed/600.css";
+@import "@fontsource/barlow-condensed/700.css";
 @import "@fontsource/inter/400.css";
 @import "@fontsource/inter/500.css";
 @import "@fontsource/inter/600.css";

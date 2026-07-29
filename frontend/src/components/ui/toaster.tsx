@@ -1,21 +1,14 @@
 import * as ToastPrimitive from '@radix-ui/react-toast'
-import { AlertTriangle, CheckCircle2, Info, X } from 'lucide-react'
-import { useToastStore } from '@/stores/toast-store'
+import { X } from 'lucide-react'
+import { useToastStore, type ToastVariant } from '@/stores/toast-store'
 import { cn } from '@/lib/cn'
 
-const VARIANT_ICON = {
-  default: Info,
-  success: CheckCircle2,
-  warning: AlertTriangle,
-  danger: AlertTriangle,
-} as const
-
-const VARIANT_CLASS = {
-  default: 'border-border-default text-text-primary',
-  success: 'border-success/40 text-success',
-  warning: 'border-warning/40 text-warning',
-  danger: 'border-danger/40 text-danger',
-} as const
+const variantRail: Record<ToastVariant, string> = {
+  default: 'before:bg-accent-primary',
+  success: 'before:bg-success',
+  warning: 'before:bg-warning',
+  danger: 'before:bg-danger',
+}
 
 export function Toaster() {
   const toasts = useToastStore((s) => s.toasts)
@@ -23,36 +16,33 @@ export function Toaster() {
 
   return (
     <ToastPrimitive.Provider swipeDirection="right">
-      {toasts.map((t) => {
-        const Icon = VARIANT_ICON[t.variant]
-        return (
-          <ToastPrimitive.Root
-            key={t.id}
-            duration={5000}
-            onOpenChange={(open) => {
-              if (!open) dismiss(t.id)
-            }}
-            className={cn(
-              'grid grid-cols-[auto_1fr_auto] items-start gap-3 rounded-lg border bg-bg-elevated p-4 shadow-[var(--shadow-elevation-2)]',
-              VARIANT_CLASS[t.variant],
-            )}
+      {toasts.map((t) => (
+        <ToastPrimitive.Root
+          key={t.id}
+          duration={5000}
+          onOpenChange={(open) => !open && dismiss(t.id)}
+          className={cn(
+            'relative overflow-hidden rounded-md border border-border-default bg-bg-elevated py-3 pl-4 pr-8 shadow-[var(--shadow-elevation-3)]',
+            "before:absolute before:inset-y-0 before:left-0 before:w-[3px] before:content-['']",
+            variantRail[t.variant],
+            'data-[state=open]:animate-[toast-in_var(--motion-duration-base)_var(--motion-easing-decelerate)]',
+          )}
+        >
+          <ToastPrimitive.Title className="text-sm font-medium text-text-primary">{t.title}</ToastPrimitive.Title>
+          {t.description && (
+            <ToastPrimitive.Description className="mt-1 text-xs text-text-secondary">
+              {t.description}
+            </ToastPrimitive.Description>
+          )}
+          <ToastPrimitive.Close
+            aria-label="Dismiss notification"
+            className="absolute right-2 top-2 text-text-muted hover:text-text-primary"
           >
-            <Icon className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-            <div>
-              <ToastPrimitive.Title className="text-sm font-medium text-text-primary">{t.title}</ToastPrimitive.Title>
-              {t.description && (
-                <ToastPrimitive.Description className="mt-0.5 text-sm text-text-secondary">
-                  {t.description}
-                </ToastPrimitive.Description>
-              )}
-            </div>
-            <ToastPrimitive.Close className="rounded p-0.5 text-text-muted hover:text-text-primary" aria-label="Dismiss">
-              <X className="h-3.5 w-3.5" />
-            </ToastPrimitive.Close>
-          </ToastPrimitive.Root>
-        )
-      })}
-      <ToastPrimitive.Viewport className="fixed bottom-0 right-0 z-[100] flex w-full max-w-sm flex-col gap-2 p-6 outline-none" />
+            <X className="size-3.5" />
+          </ToastPrimitive.Close>
+        </ToastPrimitive.Root>
+      ))}
+      <ToastPrimitive.Viewport className="fixed bottom-4 right-4 z-[100] flex w-80 flex-col gap-2 outline-none" />
     </ToastPrimitive.Provider>
   )
 }
