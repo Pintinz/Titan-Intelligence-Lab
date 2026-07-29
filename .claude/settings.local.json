@@ -171,7 +171,9 @@
       "Bash(curl -s http://localhost:8000/api/v1/health)",
       "Read(//tmp/**)",
       "Bash(echo \"exit=$?\")",
-      "Bash(.venv/Scripts/python.exe scripts/seed_local_market.py)"
+      "Bash(.venv/Scripts/python.exe scripts/seed_local_market.py)",
+      "Bash(npx vite *)",
+      "Bash(npx vitest *)"
     ]
   }
 }

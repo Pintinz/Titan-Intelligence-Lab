@@ -7,6 +7,11 @@ import { RoleRoute } from '@/routes/role-route'
 import { AppShell } from '@/components/layout/app-shell'
 import { MarketingShell } from '@/components/layout/marketing-shell'
 import { SportShell } from '@/components/layout/sport-shell'
+import { OpsShell } from '@/components/layout/ops-shell'
+import ExecutiveDashboard from '@/pages/ops/executive-dashboard'
+import ProviderManagement from '@/pages/ops/provider-management'
+import FeatureFlags from '@/pages/ops/feature-flags'
+import PlannedModule from '@/pages/ops/planned-module'
 import SportHubPage from '@/pages/sports/sport-hub-page'
 import MatchListPage from '@/pages/sports/match-list-page'
 import MatchDetailPage from '@/pages/sports/match-detail-page'
@@ -103,12 +108,23 @@ export const router = createBrowserRouter([
       { path: 'graph', element: <RebuildingPage title="Knowledge Graph" phase="Phase 7" /> },
 
       {
-        path: 'ops/*',
+        path: 'ops',
         element: (
           <RoleRoute minRole="administrator">
-            <RebuildingPage title="Operations Center" phase="Phase 6" />
+            <OpsShell />
           </RoleRoute>
         ),
+        children: [
+          { index: true, element: <ExecutiveDashboard /> },
+          { path: 'providers', element: <ProviderManagement /> },
+          { path: 'flags', element: <FeatureFlags /> },
+          { path: 'pipeline', element: <RebuildingPage title="Data Pipeline" phase="Phase 7" /> },
+          { path: 'features', element: <RebuildingPage title="Feature Store" phase="Phase 7" /> },
+          { path: 'markets', element: <RebuildingPage title="Prediction Engine" phase="Phase 7" /> },
+          { path: 'ml', element: <RebuildingPage title="ML Operations" phase="Phase 7" /> },
+          { path: 'graph', element: <RebuildingPage title="Knowledge Graph" phase="Phase 7" /> },
+          { path: 'planned/:module', element: <PlannedModule /> },
+        ],
       },
 
       { path: 'settings', element: <RebuildingPage title="Settings" phase="Phase 7" /> },
