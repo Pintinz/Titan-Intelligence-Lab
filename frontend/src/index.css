@@ -1,0 +1,121 @@
+@import "tailwindcss";
+@import "./styles/tokens.css";
+@import "./styles/fonts.css";
+
+/*
+  Tailwind v4 theme mapping — every color/radius/font utility below resolves through a CSS
+  variable from tokens.css at paint time, so `bg-bg-primary`, `text-accent-primary`, etc. repaint
+  automatically when [data-theme] flips between dark/light — no JS re-render needed for color.
+*/
+@theme {
+  --color-bg-primary: var(--color-bg-primary);
+  --color-bg-secondary: var(--color-bg-secondary);
+  --color-bg-elevated: var(--color-bg-elevated);
+  --color-bg-overlay: var(--color-bg-overlay);
+
+  --color-border-subtle: var(--color-border-subtle);
+  --color-border-default: var(--color-border-default);
+  --color-border-strong: var(--color-border-strong);
+
+  --color-text-primary: var(--color-text-primary);
+  --color-text-secondary: var(--color-text-secondary);
+  --color-text-muted: var(--color-text-muted);
+  --color-text-inverse: var(--color-text-inverse);
+
+  --color-accent-primary: var(--color-accent-primary);
+  --color-accent-primary-hover: var(--color-accent-primary-hover);
+  --color-accent-primary-muted: var(--color-accent-primary-muted);
+  --color-accent-secondary: var(--color-accent-secondary);
+  --color-accent-secondary-muted: var(--color-accent-secondary-muted);
+
+  --color-success: var(--color-semantic-success);
+  --color-success-muted: var(--color-semantic-success-muted);
+  --color-warning: var(--color-semantic-warning);
+  --color-warning-muted: var(--color-semantic-warning-muted);
+  --color-danger: var(--color-semantic-danger);
+  --color-danger-muted: var(--color-semantic-danger-muted);
+  --color-info: var(--color-semantic-info);
+  --color-info-muted: var(--color-semantic-info-muted);
+
+  --color-confidence-high: var(--color-confidence-high);
+  --color-confidence-medium: var(--color-confidence-medium);
+  --color-confidence-low: var(--color-confidence-low);
+
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-full: var(--radius-full);
+
+  --font-display: var(--font-display);
+  --font-heading: var(--font-heading);
+  --font-body: var(--font-body);
+  --font-mono: var(--font-mono);
+
+  --shadow-elevation-1: var(--shadow-elevation-1);
+  --shadow-elevation-2: var(--shadow-elevation-2);
+  --shadow-elevation-3: var(--shadow-elevation-3);
+
+  --color-bg-glass: var(--color-bg-glass);
+  --color-bg-glass-strong: var(--color-bg-glass-strong);
+  --color-border-glass: var(--color-border-glass);
+  --blur-glass-sm: var(--blur-glass-sm);
+  --blur-glass-md: var(--blur-glass-md);
+  --blur-glass-lg: var(--blur-glass-lg);
+
+  --gradient-brand: var(--gradient-brand);
+  --gradient-brand-subtle: var(--gradient-brand-subtle);
+  --gradient-mesh-hero: var(--gradient-mesh-hero);
+  --gradient-confidence-high: var(--gradient-confidence-high);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border-default);
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  html[data-theme="light"] {
+    color-scheme: light;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--color-bg-primary);
+    color: var(--color-text-primary);
+    font-family: var(--font-body);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent-primary);
+    outline-offset: 2px;
+  }
+}
+
+/* Radix data-state-driven enter/exit keyframes (Dialog/Popover) — Radix keeps the element
+   mounted through its exit animation via its own Presence primitive, so these key off
+   data-state rather than needing a JS animation library for basic overlay/content motion. */
+@keyframes overlay-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes overlay-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes dialog-content-in {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(0.96); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+@keyframes dialog-content-out {
+  from { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  to { opacity: 0; transform: translate(-50%, -50%) scale(0.96); }
+}
+@keyframes popover-content-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}

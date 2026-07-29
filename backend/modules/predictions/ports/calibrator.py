@@ -1,0 +1,30 @@
+"""Probability Calibration port (Milestone 9 Part 4 "Probability Calibration Engine").
+
+Kept separate from `PredictorPort`: a predictor scores a market; a calibrator maps that
+predictor's raw output onto a well-calibrated probability using that *model's own* observed
+outcome history (docs/prediction_markets.md — "Probability Calibration Method" per market
+record). Swappable independently — e.g. a future isotonic-regression adapter implements this
+same port without touching any `PredictorPort` implementation.
+"""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+from modules.predictions.domain.value_objects import ModelId
+
+
+class CalibratorPort(Protocol):
+    async def calibrate(self, model_id: ModelId, raw_probability: float) -> float:
+        """Maps a predictor's raw [0, 1] probability estimate onto a calibrated probability for
+        ``model_id``, using whatever calibration parameters `fit()` has previously produced for
+        that model. Returns ``raw_probability`` unchanged if no calibration has been fitted yet
+        (identity mapping is itself a valid, honestly-scoped calibration — docs/decisions.md
+        ADR-008 mock-first/adapter-swap posture applies equally to "no data yet")."""
+        ...
+
+    async def fit(self, model_id: ModelId, samples: list[tuple[float, bool]]) -> None:
+        """Fits/refits ``model_id``'s calibration parameters from ``samples`` — each a
+        (raw_probability, actual_outcome) pair drawn from `PredictionOutcome` history. Called by
+        `ModelRegistryService` whenever enough new outcomes have accumulated to re-calibrate."""
+        ...

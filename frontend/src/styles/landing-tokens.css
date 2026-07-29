@@ -1,0 +1,146 @@
+/*
+  TitanIQ Landing — Milestone 10 redesign design tokens.
+
+  Scoped under `.titan-landing` rather than merged into the global tokens.css/index.css
+  `@theme` block. This is a deliberate boundary: the rest of the authenticated app (dashboard,
+  Prediction/Match/Team Centers, Admin Center, etc.) keeps using the Milestone 10 "Titan Blue"
+  system untouched, so nothing here can regress it. Once this visual language is validated on the
+  landing page, promoting it platform-wide (per the brief's "every page" ambition) is a follow-up
+  milestone with its own review — not bundled into this first page.
+
+  Direction: Bloomberg Terminal precision + Apple HIG restraint + Formula 1 broadcast-graphics
+  energy. See the design plan in chat for the full rationale. Values are plain CSS custom
+  properties consumed via Tailwind arbitrary-value utilities (e.g. `bg-[var(--tl-void)]`), not
+  registered into the global `@theme`, so no new global utility names are introduced.
+*/
+
+@import "@fontsource/barlow-condensed/500.css";
+@import "@fontsource/barlow-condensed/600.css";
+@import "@fontsource/barlow-condensed/700.css";
+
+.titan-landing {
+  /* -- Surface scale — carbon, not pure black (avoids OLED smear / harsh contrast) ------------ */
+  --tl-void: #06080d;
+  --tl-carbon: #0d131d;
+  --tl-carbon-raised: #121a26;
+  --tl-steel-line: #1e2733;
+  --tl-steel-line-strong: #2b3648;
+
+  /* -- Ink -------------------------------------------------------------------------------------- */
+  --tl-ink: #eef2f8;
+  --tl-ink-dim: #97a2b5;
+  --tl-ink-faint: #5b6577;
+
+  /* -- Telemetry accent system --------------------------------------------------------------------
+     Four named accents double as the Confidence Telemetry scale (see confidence-telemetry.tsx,
+     the page's signature element) — borrowed from F1 broadcast sector-timing color grammar
+     (purple = best-in-class, green = strong, yellow = caution) remapped onto TitanIQ's own
+     confidence philosophy: a reliability signal, never a good/bad judgement (docs/design_system.md
+     already establishes this split for the rest of the app; this palette makes it literal). */
+  --tl-signal: #17e6b8; /* high confidence — electric teal-green, not generic SaaS/indigo blue */
+  --tl-signal-dim: rgba(23, 230, 184, 0.14);
+  --tl-violet: #9b8cff; /* peak intelligence — the rarest, most saturated tier */
+  --tl-violet-dim: rgba(155, 140, 255, 0.16);
+  --tl-amber: #f2b134; /* medium confidence / caution */
+  --tl-amber-dim: rgba(242, 177, 52, 0.14);
+  --tl-crimson: #ff5468; /* live / alert only — never used for confidence */
+  --tl-crimson-dim: rgba(255, 84, 104, 0.14);
+
+  /* -- Typography ------------------------------------------------------------------------------
+     Display: Barlow Condensed — tight, heavy, broadcast lower-third energy (F1 timing towers,
+     driver boards), used uppercase with wide tracking, sparingly, never for body copy.
+     Body: Inter — restrained legibility for dense analytical copy (Apple HIG register).
+     Mono: IBM Plex Mono (already self-hosted app-wide) — stats, odds-style numbers, timestamps. */
+  --tl-font-display: "Barlow Condensed", "Inter", system-ui, sans-serif;
+  --tl-font-body: "Inter", system-ui, sans-serif;
+  --tl-font-mono: "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
+
+  /* -- Motion — same durations as the app-wide system, reduced-motion handled below ------------- */
+  --tl-duration-fast: 120ms;
+  --tl-duration-base: 220ms;
+  --tl-duration-slow: 480ms;
+  --tl-ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --tl-ease-out: cubic-bezier(0, 0, 0.2, 1);
+
+  background: var(--tl-void);
+  color: var(--tl-ink);
+  font-family: var(--tl-font-body);
+}
+
+.titan-landing .tl-display {
+  font-family: var(--tl-font-display);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.titan-landing .tl-eyebrow {
+  font-family: var(--tl-font-display);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 0.75rem;
+  color: var(--tl-ink-dim);
+}
+
+.titan-landing .tl-mono {
+  font-family: var(--tl-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* On-brand focus ring — overrides the app-wide Titan Blue `:focus-visible` (index.css) only
+   within this scope, so keyboard navigation stays WCAG-AA visible but matches the new palette. */
+.titan-landing :focus-visible {
+  outline: 2px solid var(--tl-signal);
+  outline-offset: 2px;
+}
+
+/* Ticker marquee — pure CSS transform loop, paused on hover/focus-within and fully disabled
+   under reduced motion (see below). Kept off the main thread cost of a JS animation loop. */
+@keyframes tl-marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+.titan-landing .tl-marquee-track {
+  animation: tl-marquee 38s linear infinite;
+}
+.titan-landing .tl-marquee-track:hover,
+.titan-landing .tl-marquee-track:focus-within {
+  animation-play-state: paused;
+}
+
+@keyframes tl-pulse-travel {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+.titan-landing .tl-pulse-travel {
+  animation: tl-pulse-travel 2.6s var(--tl-ease-standard) infinite;
+}
+
+@keyframes tl-live-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.titan-landing .tl-live-dot {
+  animation: tl-live-dot 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .titan-landing .tl-marquee-track,
+  .titan-landing .tl-pulse-travel,
+  .titan-landing .tl-live-dot {
+    animation: none !important;
+  }
+}

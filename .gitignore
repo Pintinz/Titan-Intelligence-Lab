@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+coverage/
+test-results/
+
+# Python build/test artifacts
+.coverage
+catboost_info/
+
+# Local dev database
+dev.db
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
