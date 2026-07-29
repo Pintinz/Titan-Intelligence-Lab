@@ -12,6 +12,9 @@ import ExecutiveDashboard from '@/pages/ops/executive-dashboard'
 import ProviderManagement from '@/pages/ops/provider-management'
 import FeatureFlags from '@/pages/ops/feature-flags'
 import PlannedModule from '@/pages/ops/planned-module'
+import SettingsPage from '@/pages/settings-page'
+import SignupPage from '@/pages/signup-page'
+import KnowledgeGraphPage from '@/pages/knowledge-graph-page'
 import SportHubPage from '@/pages/sports/sport-hub-page'
 import MatchListPage from '@/pages/sports/match-list-page'
 import MatchDetailPage from '@/pages/sports/match-detail-page'
@@ -65,7 +68,7 @@ export const router = createBrowserRouter([
     ],
   },
   { path: '/login', element: <LoginPage /> },
-  { path: '/signup', element: <RebuildingPage title="Sign up" phase="Phase 7" /> },
+  { path: '/signup', element: <SignupPage /> },
   { path: '/forgot-password', element: <RebuildingPage title="Forgot password" phase="Phase 7" /> },
   { path: '/reset-password', element: <RebuildingPage title="Reset password" phase="Phase 7" /> },
   { path: '/auth/callback', element: <RebuildingPage title="Signing in…" phase="Phase 7" /> },
@@ -105,7 +108,7 @@ export const router = createBrowserRouter([
       { path: 'learning', element: <LearningIntelligencePage /> },
       { path: 'insights', element: <InsightsPage /> },
       { path: 'analytics', element: <RebuildingPage title="Analytics" phase="Phase 7" /> },
-      { path: 'graph', element: <RebuildingPage title="Knowledge Graph" phase="Phase 7" /> },
+      { path: 'graph', element: <KnowledgeGraphPage /> },
 
       {
         path: 'ops',
@@ -127,7 +130,7 @@ export const router = createBrowserRouter([
         ],
       },
 
-      { path: 'settings', element: <RebuildingPage title="Settings" phase="Phase 7" /> },
+      { path: 'settings', element: <SettingsPage /> },
       { path: 'settings/organization', element: <RebuildingPage title="Organization Settings" phase="Phase 7" /> },
       { path: 'billing', element: <RebuildingPage title="Billing" phase="Phase 7" /> },
       { path: 'notifications', element: <RebuildingPage title="Notifications" phase="Phase 7" /> },
