@@ -1,5 +1,6 @@
 import { createBrowserRouter } from 'react-router-dom'
 import LoginPage from '@/pages/login-page'
+import LandingPage from '@/pages/landing-page'
 import { RebuildingPage } from '@/pages/rebuilding-page'
 import { ProtectedRoute } from '@/routes/protected-route'
 import { RoleRoute } from '@/routes/role-route'
@@ -28,10 +29,12 @@ const devShellPreviewRoute = import.meta.env.DEV
 
 export const router = createBrowserRouter([
   ...devShellPreviewRoute,
+  // Landing owns its own nav/footer (a full-bleed hero wants more control than the boxed
+  // MarketingShell header gives it) — the simpler utility marketing pages below still share it.
+  { path: '/', element: <LandingPage /> },
   {
     element: <MarketingShell />,
     children: [
-      { path: '/', element: <RebuildingPage title="Landing" phase="Phase 1" /> },
       { path: '/pricing', element: <RebuildingPage title="Pricing" phase="Phase 7" /> },
       { path: '/methodology', element: <RebuildingPage title="Methodology" phase="Phase 7" /> },
       { path: '/docs', element: <RebuildingPage title="Docs" phase="Phase 7" /> },
