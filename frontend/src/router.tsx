@@ -19,6 +19,8 @@ import CompetitionDetailPage from '@/pages/sports/competition-detail-page'
 import PredictionLabPage from '@/pages/sports/prediction-lab-page'
 import SportNewsPage from '@/pages/sports/sport-news-page'
 import SportCommunityPage from '@/pages/sports/sport-community-page'
+import NewsIntelligencePage from '@/pages/intelligence/news-intelligence-page'
+import LearningIntelligencePage from '@/pages/intelligence/learning-intelligence-page'
 
 // -- Milestone 10.2 reconstruction: every route below renders RebuildingPage until its phase
 // lands (see the phased plan). Route paths reflect the NEW information architecture — four Sport
@@ -93,8 +95,8 @@ export const router = createBrowserRouter([
         ],
       },
 
-      { path: 'news', element: <RebuildingPage title="News Intelligence" phase="Phase 4" /> },
-      { path: 'learning', element: <RebuildingPage title="Learning Intelligence" phase="Phase 4" /> },
+      { path: 'news', element: <NewsIntelligencePage /> },
+      { path: 'learning', element: <LearningIntelligencePage /> },
       { path: 'insights', element: <RebuildingPage title="TitanIQ Insights" phase="Phase 5" /> },
       { path: 'analytics', element: <RebuildingPage title="Analytics" phase="Phase 7" /> },
       { path: 'graph', element: <RebuildingPage title="Knowledge Graph" phase="Phase 7" /> },
