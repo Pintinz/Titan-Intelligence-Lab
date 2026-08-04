@@ -43,6 +43,11 @@ class MarketDefinitionModel(Base):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     deprecated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Milestone 9.2 additive fields — see modules.predictions.domain.market_outcome_registry.
+    outcome_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    allowed_values: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    resolver_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    gemini_prompt_template: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class FeatureMarketMappingModel(Base):
@@ -103,6 +108,12 @@ class PredictionModel(Base):
     status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
     generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     data_freshness: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Universal Probability Engine (2026-08-02) — see modules.predictions.domain.entities.Prediction
+    # docstring for the CLASSIFICATION-vs-REGRESSION field-group split these five columns store.
+    probability_distribution: Mapped[dict] = mapped_column(JSON, default=dict)
+    confidence_interval_low: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence_interval_high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    expected_error: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class PredictionOutcomeModel(Base):

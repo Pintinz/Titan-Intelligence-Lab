@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +28,7 @@ from modules.sports.domain.entities import Competition, Fixture, Player, Season,
 from modules.sports.domain.value_objects import (
     CompetitionId,
     FixtureId,
+    FixtureStatus,
     PlayerId,
     SeasonStatus,
     SportCode,
@@ -55,6 +56,18 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _closeness_to_now(scheduled_at: datetime, now: datetime) -> float:
+    """Absolute distance from `now`, in seconds. Sorting fixtures by this (ascending) surfaces
+    whatever's happening soonest (an imminent kickoff) or most recently finished first, which is
+    what a match feed's default "closest start" ordering should mean for a list that naturally
+    mixes upcoming and just-finished fixtures — a plain chronological sort would otherwise bury
+    next week's match under a fixture from three seasons ago (or vice versa, depending on
+    direction). `scheduled_at` may be naive here (SQLite/aiosqlite drops tzinfo on read-back,
+    docs/decisions.md ADR-007) — assumed to share `now`'s awareness before comparing."""
+    aware_scheduled_at = scheduled_at if scheduled_at.tzinfo is not None else scheduled_at.replace(tzinfo=now.tzinfo)
+    return abs((aware_scheduled_at - now).total_seconds())
+
+
 def _parse_sport_code(value: str) -> SportCode:
     try:
         return SportCode(value)
@@ -67,6 +80,32 @@ def _parse_uuid(value: str, label: str) -> uuid.UUID:
         return uuid.UUID(value)
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid {label}: {value}") from None
+
+
+def _parse_fixture_status(value: str) -> FixtureStatus:
+    try:
+        return FixtureStatus(value)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Unrecognized status '{value}'") from None
+
+
+def _parse_date_query(value: str, label: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid {label}, expected YYYY-MM-DD: {value}") from None
+
+
+def _fixture_in_date_range(scheduled_at: datetime, date_from: date | None, date_to: date | None, now: datetime) -> bool:
+    """Inclusive day-range check against `scheduled_at`'s own tz (see `_closeness_to_now` for the
+    same naive-datetime-from-SQLite caveat)."""
+    aware_scheduled_at = scheduled_at if scheduled_at.tzinfo is not None else scheduled_at.replace(tzinfo=now.tzinfo)
+    scheduled_date = aware_scheduled_at.astimezone(now.tzinfo).date()
+    if date_from is not None and scheduled_date < date_from:
+        return False
+    if date_to is not None and scheduled_date > date_to:
+        return False
+    return True
 
 
 async def _get_sport_or_404(session: AsyncSession, sport_code: str):
@@ -96,6 +135,7 @@ def _serialize_competition(c: Competition) -> dict:
         "type": c.type.value,
         "country": c.country,
         "tier": c.tier,
+        "logo_url": c.logo_url,
     }
 
 
@@ -107,6 +147,7 @@ def _serialize_team_summary(t: Team, venue_name: str | None) -> dict:
         "short_name": t.short_name,
         "country": t.country,
         "venue_name": venue_name,
+        "logo_url": t.logo_url,
     }
 
 
@@ -122,22 +163,36 @@ def _serialize_player_summary(p: Player, team_name: str | None) -> dict:
     }
 
 
-async def _serialize_fixture(session: AsyncSession, fixture: Fixture, competition_name: str) -> dict:
+async def _serialize_fixture(session: AsyncSession, fixture: Fixture, competition: Competition | None) -> dict:
     teams = SqlAlchemyTeamRepository(session=session)
     venues = SqlAlchemyVenueRepository(session=session)
     home = await teams.get(fixture.home_team_id)
     away = await teams.get(fixture.away_team_id)
     venue = await venues.get(fixture.venue_id) if fixture.venue_id else None
+    home_score, away_score = fixture.home_score, fixture.away_score
+    sport = await SqlAlchemySportRepository(session=session).get(competition.sport_id) if competition else None
     return {
         "id": str(fixture.id),
         "season_id": str(fixture.season_id),
-        "competition_name": competition_name,
-        "home_team": {"id": str(home.id), "name": home.name, "short_name": home.short_name} if home else None,
-        "away_team": {"id": str(away.id), "name": away.name, "short_name": away.short_name} if away else None,
+        "sport_code": sport.code.value if sport else None,
+        "competition_id": str(competition.id) if competition else None,
+        "competition_name": competition.name if competition else "Unknown",
+        "competition_logo_url": competition.logo_url if competition else None,
+        "competition_tier": competition.tier if competition else None,
+        "home_team": (
+            {"id": str(home.id), "name": home.name, "short_name": home.short_name, "logo_url": home.logo_url}
+            if home else None
+        ),
+        "away_team": (
+            {"id": str(away.id), "name": away.name, "short_name": away.short_name, "logo_url": away.logo_url}
+            if away else None
+        ),
         "venue_name": venue.name if venue else None,
         "scheduled_at": fixture.scheduled_at.isoformat(),
         "status": fixture.status.value,
-        "final_state": None,
+        "final_state": (
+            {"home": home_score, "away": away_score} if home_score is not None or away_score is not None else None
+        ),
     }
 
 
@@ -213,8 +268,9 @@ async def get_competition_fixtures(
         return envelope([], meta={"count": 0})
 
     fixtures = await SqlAlchemyFixtureRepository(session=session).list_by_season(season.id)
-    fixtures = sorted(fixtures, key=lambda f: f.scheduled_at, reverse=True)[:limit]
-    data = [await _serialize_fixture(session, f, competition.name) for f in fixtures]
+    now = _now()
+    fixtures = sorted(fixtures, key=lambda f: _closeness_to_now(f.scheduled_at, now))[:limit]
+    data = [await _serialize_fixture(session, f, competition) for f in fixtures]
     return envelope(data, meta={"count": len(data), "season_id": str(season.id)})
 
 
@@ -274,7 +330,7 @@ async def get_team_fixtures(
     for fixture in fixtures:
         season = await seasons.get(fixture.season_id)
         competition = await competitions.get(season.competition_id) if season else None
-        data.append(await _serialize_fixture(session, fixture, competition.name if competition else "Unknown"))
+        data.append(await _serialize_fixture(session, fixture, competition))
     return envelope(data, meta={"count": len(data)})
 
 
@@ -320,21 +376,29 @@ async def get_fixture(fixture_id: str, session: AsyncSession = Depends(get_sessi
         raise HTTPException(status_code=404, detail="fixture not found")
     season = await SqlAlchemySeasonRepository(session=session).get(fixture.season_id)
     competition = await SqlAlchemyCompetitionRepository(session=session).get(season.competition_id) if season else None
-    return envelope(await _serialize_fixture(session, fixture, competition.name if competition else "Unknown"))
+    return envelope(await _serialize_fixture(session, fixture, competition))
 
 
 @router.get("/{sport_code}/fixtures")
 async def list_sport_fixtures(
     sport_code: str,
     competition_id: str | None = Query(default=None),
+    status: str | None = Query(default=None, description="scheduled | live | completed | postponed | cancelled"),
+    date_from: str | None = Query(default=None, description="Inclusive, YYYY-MM-DD"),
+    date_to: str | None = Query(default=None, description="Inclusive, YYYY-MM-DD"),
+    search: str | None = Query(default=None, description="Matches home/away team name or competition name"),
     limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
     _user: User = Depends(get_current_user),
 ):
-    """Cross-competition fixture browse for Match Center's default view. Bounded N+1 (competitions
-    -> current season -> fixtures) rather than a single join — acceptable at this data volume,
-    matching the naive-composition style already used elsewhere (e.g. SemanticSearchService), and
-    a caller can always scope down via `competition_id` to avoid it."""
+    """Cross-competition fixture browse for Match Center's default view and the Matches/Live
+    discovery pages. Bounded N+1 (competitions -> current season -> fixtures) rather than a single
+    join — acceptable at this data volume, matching the naive-composition style already used
+    elsewhere (e.g. SemanticSearchService), and a caller can always scope down via
+    `competition_id` to avoid it. `status`/`date_from`/`date_to` filter in-memory on the already
+    -fetched season fixtures for the same reason; `meta.total` reflects the true filtered count
+    (pre-pagination) so callers can build real "N of M" / has-more UI."""
     sport = await _get_sport_or_404(session, sport_code)
     competitions_repo = SqlAlchemyCompetitionRepository(session=session)
     seasons_repo = SqlAlchemySeasonRepository(session=session)
@@ -346,16 +410,47 @@ async def list_sport_fixtures(
     else:
         competitions = await competitions_repo.list_by_sport(sport.id)
 
-    all_fixtures: list[tuple[Fixture, str]] = []
+    all_fixtures: list[tuple[Fixture, Competition]] = []
     for competition in competitions:
         seasons = await seasons_repo.list_by_competition(competition.id)
         season = _pick_current_season(seasons)
         if season is None:
             continue
         fixtures = await fixtures_repo.list_by_season(season.id)
-        all_fixtures.extend((f, competition.name) for f in fixtures)
+        all_fixtures.extend((f, competition) for f in fixtures)
 
-    all_fixtures.sort(key=lambda pair: pair[0].scheduled_at, reverse=True)
-    all_fixtures = all_fixtures[:limit]
-    data = await asyncio.gather(*(_serialize_fixture(session, f, name) for f, name in all_fixtures))
-    return envelope(list(data), meta={"count": len(data)})
+    parsed_status = _parse_fixture_status(status) if status is not None else None
+    if parsed_status is not None:
+        all_fixtures = [(f, c) for f, c in all_fixtures if f.status is parsed_status]
+
+    parsed_date_from = _parse_date_query(date_from, "date_from") if date_from is not None else None
+    parsed_date_to = _parse_date_query(date_to, "date_to") if date_to is not None else None
+    now = _now()
+    if parsed_date_from is not None or parsed_date_to is not None:
+        all_fixtures = [
+            (f, c) for f, c in all_fixtures if _fixture_in_date_range(f.scheduled_at, parsed_date_from, parsed_date_to, now)
+        ]
+
+    all_fixtures.sort(key=lambda pair: _closeness_to_now(pair[0].scheduled_at, now))
+
+    if search:
+        needle = search.strip().lower()
+        teams_repo = SqlAlchemyTeamRepository(session=session)
+        matched: list[tuple[Fixture, Competition]] = []
+        for f, c in all_fixtures:
+            home = await teams_repo.get(f.home_team_id)
+            away = await teams_repo.get(f.away_team_id)
+            haystack = " ".join(
+                part for part in (home.name if home else None, away.name if away else None, c.name) if part
+            ).lower()
+            if needle in haystack:
+                matched.append((f, c))
+        all_fixtures = matched
+
+    total = len(all_fixtures)
+    page = all_fixtures[offset : offset + limit]
+    data = await asyncio.gather(*(_serialize_fixture(session, f, c) for f, c in page))
+    return envelope(
+        list(data),
+        meta={"count": len(data), "total": total, "offset": offset, "limit": limit, "has_more": offset + limit < total},
+    )

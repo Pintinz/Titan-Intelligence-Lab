@@ -27,6 +27,7 @@ class EntityKind(str, Enum):
     TEAM_STATISTICS = "team_statistics"
     LINEUP = "lineup"
     STANDING = "standing"
+    ODDS = "odds"
 
 
 class SyncStatus(str, Enum):

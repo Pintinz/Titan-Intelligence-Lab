@@ -18,6 +18,7 @@ import asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from modules.admin.infrastructure.persistence.models import Base as AdminBase
+from modules.alerts.infrastructure.persistence.models import Base as AlertsBase
 from modules.billing.infrastructure.persistence.models import Base as BillingBase
 from modules.features.infrastructure.persistence.models import Base as FeaturesBase
 from modules.identity.infrastructure.persistence.models import Base as IdentityBase
@@ -28,10 +29,12 @@ from modules.predictions.infrastructure.persistence.models import Base as Predic
 from modules.sports.infrastructure.persistence.database import get_database_settings
 from modules.sports.infrastructure.persistence.models import Base as SportsBase
 from modules.tenancy.infrastructure.persistence.models import Base as TenancyBase
+from modules.watchlist.infrastructure.persistence.models import Base as WatchlistBase
 from modules.webhooks.infrastructure.persistence.models import Base as WebhooksBase
 
 ALL_BASES = [
     AdminBase,
+    AlertsBase,
     BillingBase,
     FeaturesBase,
     IdentityBase,
@@ -41,11 +44,13 @@ ALL_BASES = [
     PredictionsBase,
     SportsBase,
     TenancyBase,
+    WatchlistBase,
     WebhooksBase,
 ]
 
 SCHEMA_TRANSLATE_MAP = {
     "admin": None,
+    "alerts": None,
     "billing": None,
     "features": None,
     "identity": None,
@@ -55,6 +60,7 @@ SCHEMA_TRANSLATE_MAP = {
     "predictions": None,
     "sports": None,
     "tenancy": None,
+    "watchlist": None,
     "webhooks": None,
 }
 

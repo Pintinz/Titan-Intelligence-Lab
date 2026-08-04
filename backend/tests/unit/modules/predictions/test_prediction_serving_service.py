@@ -47,6 +47,12 @@ class _EmptyRetrievalPort:
 
 
 @dataclass
+class _EmptyTeamNamesResolver:
+    async def team_names_for_match(self, subject_ref: str) -> tuple[str, ...]:
+        return ()
+
+
+@dataclass
 class _FakeTextIntelligenceProvider:
     provider_key: str = "fake"
 
@@ -80,7 +86,7 @@ def engine(market_repo, model_repo, mapping_service, feature_value_repo, predict
     predictors.register_many(WeightedLogisticPredictor.SUPPORTED_KINDS, WeightedLogisticPredictor())
     retrieval_service = IntelligenceRetrievalService(
         news=_EmptyRetrievalPort(), community=_EmptyRetrievalPort(), knowledge_graph=_EmptyRetrievalPort(),
-        ai_reports=_EmptyRetrievalPort(),
+        ai_reports=_EmptyRetrievalPort(), team_names=_EmptyTeamNamesResolver(),
     )
     explainability_engine = ExplainabilityEngine(retrieval=retrieval_service, text_intelligence=_FakeTextIntelligenceProvider())
     return PredictionEngine(

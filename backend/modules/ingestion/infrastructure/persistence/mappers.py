@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from modules.ingestion.domain.entities import (
+    CompetitionFixtureSourcePreference,
     DataQualityReport,
     ProviderRefIndexEntry,
     SyncCheckpoint,
@@ -17,6 +18,7 @@ from modules.ingestion.domain.value_objects import (
     TimelineEventType,
 )
 from modules.ingestion.infrastructure.persistence.models import (
+    CompetitionFixtureSourceModel,
     DataQualityReportModel,
     ProviderRefIndexModel,
     SyncCheckpointModel,
@@ -100,6 +102,24 @@ def ref_index_to_domain(model: ProviderRefIndexModel) -> ProviderRefIndexEntry:
 def ref_index_to_model(entity: ProviderRefIndexEntry, model: ProviderRefIndexModel | None = None) -> ProviderRefIndexModel:
     model = model or ProviderRefIndexModel(provider=entity.provider, external_id=entity.external_id, entity_kind=entity.entity_kind.value)
     model.entity_id = entity.entity_id
+    return model
+
+
+def fixture_source_to_domain(model: CompetitionFixtureSourceModel) -> CompetitionFixtureSourcePreference:
+    return CompetitionFixtureSourcePreference(
+        competition_id=model.competition_id, preferred_provider_key=model.preferred_provider_key,
+        provider_competition_ref=model.provider_competition_ref, notes=model.notes, updated_at=model.updated_at,
+    )
+
+
+def fixture_source_to_model(
+    entity: CompetitionFixtureSourcePreference, model: CompetitionFixtureSourceModel | None = None
+) -> CompetitionFixtureSourceModel:
+    model = model or CompetitionFixtureSourceModel(competition_id=entity.competition_id)
+    model.preferred_provider_key = entity.preferred_provider_key
+    model.provider_competition_ref = entity.provider_competition_ref
+    model.notes = entity.notes
+    model.updated_at = entity.updated_at
     return model
 
 

@@ -23,6 +23,14 @@ STATISTICS_INTERVAL_SECONDS = 1800
 LIVE_FIXTURES_INTERVAL_SECONDS = 30
 PROVIDER_HEALTH_CHECK_INTERVAL_SECONDS = 300
 PROVIDER_POLL_INTERVAL_SECONDS = 900
+# Retraining is a heavy, dataset-build-plus-multi-algorithm-training operation — a 6-hour cadence
+# (matching HISTORICAL_IMPORT_INTERVAL_SECONDS's order of magnitude) is enough to catch drift or
+# staleness promptly without hammering the training pipeline for markets that rarely need it.
+SCHEDULED_RETRAINING_CHECK_INTERVAL_SECONDS = 6 * 3600
+# Calibration fitting is cheap (reads outcome history, fits a small logistic regression) compared
+# to retraining — an hourly cadence (matching STANDINGS_INTERVAL_SECONDS) keeps calibrated
+# confidence tracking newly-completed fixtures promptly without the training-pipeline cost.
+SCHEDULED_CALIBRATION_CHECK_INTERVAL_SECONDS = 3600
 
 
 def compute_adaptive_interval(base_interval_seconds: int, quota_remaining_pct: float) -> int:
@@ -56,5 +64,22 @@ BEAT_SCHEDULE = {
     },
     "sync-live-fixtures-football-epl": {
         "task": "ingestion.sync_live_fixtures", "schedule": timedelta(seconds=LIVE_FIXTURES_INTERVAL_SECONDS),
+    },
+    # Milestone 11B — Provider Registry health monitoring (docs/admin_center.md §2a), the follow-
+    # up ADR-011 flagged as needing Celery beat rather than a new scheduler.
+    "check-all-provider-health": {
+        "task": "admin.check_all_provider_health", "schedule": timedelta(seconds=PROVIDER_HEALTH_CHECK_INTERVAL_SECONDS),
+    },
+    # Audit fix (2026-08-02) — RetrainingScheduler/AutomaticModelSelectionService both already
+    # existed but were only reachable via a manual Ops Center button; this is the automatic half.
+    "check-scheduled-retraining": {
+        "task": "predictions.check_scheduled_retraining",
+        "schedule": timedelta(seconds=SCHEDULED_RETRAINING_CHECK_INTERVAL_SECONDS),
+    },
+    # Audit fix (2026-08-02) — CalibratorPort.fit() had zero real call sites; every "calibrated"
+    # probability was actually the unfitted identity transform. This is the missing caller.
+    "check-scheduled-calibration": {
+        "task": "predictions.check_scheduled_calibration",
+        "schedule": timedelta(seconds=SCHEDULED_CALIBRATION_CHECK_INTERVAL_SECONDS),
     },
 }

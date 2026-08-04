@@ -1,0 +1,348 @@
+/*
+  TitanIQ Infinity Design Tokens — Phase 11.0 (Foundation).
+
+  A PARALLEL token system. Nothing in this file overrides or replaces anything in
+  `tokens.css` — every custom property here is prefixed `--infinity-*`, a distinct
+  namespace from the existing `--color-*`/`--space-*`/etc. tokens every shipped page
+  already reads. Loading this file changes nothing visually anywhere until a component
+  is written to consume `--infinity-*` variables specifically (see components/infinity/).
+
+  This is deliberate: the brief asks to "redesign every design token," but several
+  existing pages (Landing, Match Intelligence, Football Intelligence, Operations Center,
+  TitanIQ Assistant) are explicitly out of scope for this phase. The only way to satisfy
+  both is additive coexistence, not in-place replacement — confirmed with the user before
+  writing this file. `tokens.css` is removed only once every page has migrated (a future
+  phase), per the brief's own "Legacy Removal" section.
+
+  ---
+
+  DIRECTION CONTRACT
+
+  THESIS: TitanIQ predicts by showing its evidence, the way a match official reviews a
+  decision — not a black-box score, a reviewable one. The category default this refuses
+  is "AI dashboard with a confidence bar"; the opposite rut it also refuses is generic
+  dark-terminal-plus-neon-accent.
+
+  OWN-WORLD: Broadcast officiating-review technology — goal-line tech, ball-tracking
+  overlays, VAR freeze-frame review panels, offside-line graphics. Cool broadcast-monitor
+  black (not pure black), one electric "review" cyan as the single signal color, hairline
+  borders with corner-tick calibration marks (camera-calibration crosshairs, not rounded
+  card chrome), uppercase tracked micro-labels like broadcast lower-thirds, monospace
+  telemetry numerals. Fourteen domain hues form one calibrated wheel at matched
+  saturation/lightness so no domain color reads as an afterthought.
+
+  STORY: A user opens any TitanIQ surface and reads it the way they'd read a review
+  overlay during a match — here is the call, here is the evidence, here is how confident
+  the system is, and here is why. Trust comes from legibility of the reasoning, not from
+  polish alone.
+
+  FIRST VIEWPORT: N/A — this phase ships no page. The "first viewport" is the showcase
+  route (dev-only, unlinked from navigation) that renders every primitive for review.
+
+  FORM: No new-work.md surface-concept roll was run — there is no first surface to seed a
+  composition for in a tokens-and-primitives phase. The world above was chosen directly
+  and disclosed as a substitution, per the skill's own transparency rule for exactly this
+  case (foundation work with no shipped viewport).
+
+  FINISH: unreviewed and undocumented is unfinished; this build ends with the finish
+  review, the verdict, and DESIGN_INFINITY.md.
+*/
+
+:root {
+  /* ============================================================================
+     GROUND — broadcast-monitor black, cool cast (blue-cyan undertone, not warm/neutral).
+     Four steps: page ground, panel, elevated panel, highest (modal/popover).
+     ============================================================================ */
+  --infinity-ground-0: #05070a;
+  --infinity-ground-1: #0a0e14;
+  --infinity-ground-2: #10151d;
+  --infinity-ground-3: #161d27;
+
+  --infinity-border-hairline: #1c242f;
+  --infinity-border-default: #29323f;
+  --infinity-border-strong: #3c4759;
+  --infinity-border-signal: rgba(0, 209, 255, 0.4);
+
+  --infinity-text-primary: #eef3f8;
+  --infinity-text-secondary: #98a4b5;
+  /* #77849a, not the visually "quieter" #5c6779 first drafted — that one only reached
+     3.38:1 on --infinity-ground-1, failing WCAG AA (4.5:1) for the small text every
+     InfinityLabel/metadata/timestamp renders it as. Found by testing rendered contrast
+     in-browser, not by eyeballing the swatch. */
+  --infinity-text-muted: #77849a;
+  --infinity-text-inverse: #05070a;
+
+  /* ============================================================================
+     SIGNAL — the one review-technology accent. Electric cyan, bluer and colder than
+     the legacy brand teal (#17e6b8) by design: this is a different world, not a
+     re-tint of the old one.
+     ============================================================================ */
+  --infinity-signal: #00d1ff;
+  --infinity-signal-hover: #3ddcff;
+  --infinity-signal-muted: rgba(0, 209, 255, 0.14);
+  --infinity-signal-strong: rgba(0, 209, 255, 0.32);
+
+  /* ============================================================================
+     DOMAIN WHEEL — 14 hues, one calibrated system: identical saturation (72%) and
+     lightness (58%) in dark mode, hue is the only variable. Reads as one wheel, not
+     14 unrelated picks. Signal cyan (194°) is deliberately skipped on the wheel so no
+     domain color is mistaken for the interactive/primary accent.
+     ============================================================================ */
+  --infinity-domain-football: hsl(142 72% 46%);
+  --infinity-domain-basketball: hsl(28 82% 56%);
+  --infinity-domain-baseball: hsl(4 68% 56%);
+  --infinity-domain-table-tennis: hsl(74 62% 50%);
+  --infinity-domain-predictions: hsl(194 100% 46%);
+  /* = signal; predictions is the product's core act */
+  --infinity-domain-knowledge-graph: hsl(258 68% 66%);
+  --infinity-domain-learning: hsl(166 62% 48%);
+  --infinity-domain-news: hsl(38 78% 56%);
+  --infinity-domain-community: hsl(322 62% 60%);
+  --infinity-domain-operations: hsl(212 48% 56%);
+  --infinity-domain-infrastructure: hsl(220 16% 56%);
+  --infinity-domain-alerts: hsl(354 78% 58%);
+  --infinity-domain-security: hsl(246 52% 62%);
+
+  /* Confidence is a 3-step scale, not a single hue — high reuses signal cyan (a
+     high-confidence call and "the product working correctly" should look identical). */
+  --infinity-confidence-high: #00d1ff;
+  --infinity-confidence-medium: #e8b23d;
+  --infinity-confidence-low: #5c6779;
+  --infinity-confidence-high-muted: rgba(0, 209, 255, 0.14);
+  --infinity-confidence-medium-muted: rgba(232, 178, 61, 0.14);
+  --infinity-confidence-low-muted: rgba(92, 103, 121, 0.14);
+
+  /* ============================================================================
+     SEMANTIC — status, distinct from domain/confidence. Muted/analytical, never
+     gambling red-green.
+     ============================================================================ */
+  --infinity-success: #35b27a;
+  --infinity-success-muted: rgba(53, 178, 122, 0.14);
+  --infinity-warning: #e8b23d;
+  --infinity-warning-muted: rgba(232, 178, 61, 0.14);
+  --infinity-danger: #e0564f;
+  --infinity-danger-muted: rgba(224, 86, 79, 0.14);
+  --infinity-info: #4fa3e0;
+  --infinity-info-muted: rgba(79, 163, 224, 0.14);
+  --infinity-live: #ff3b5c;
+  --infinity-live-muted: rgba(255, 59, 92, 0.16);
+
+  /* ============================================================================
+     GLASS / ELEVATION — broadcast-bezel elevation: flatter than the legacy system at
+     rest (hairline only), glow appears only on signal-bearing or live surfaces —
+     elevation communicates "this is live/active", not generic depth.
+     ============================================================================ */
+  --infinity-elevation-0: none;
+  --infinity-elevation-1: 0 1px 0 var(--infinity-border-hairline);
+  --infinity-elevation-2: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --infinity-elevation-signal: 0 0 0 1px var(--infinity-border-signal), 0 0 24px rgba(0, 209, 255, 0.12);
+  --infinity-elevation-live: 0 0 0 1px rgba(255, 59, 92, 0.4), 0 0 24px rgba(255, 59, 92, 0.14);
+
+  --infinity-glass-bg: rgba(16, 21, 29, 0.6);
+  --infinity-glass-bg-strong: rgba(16, 21, 29, 0.82);
+  --infinity-glass-border: rgba(255, 255, 255, 0.07);
+  --infinity-blur-sm: 8px;
+  --infinity-blur-md: 16px;
+  --infinity-blur-lg: 28px;
+
+  /* ============================================================================
+     TYPOGRAPHY SCALE — reuses the three already-installed, already-fitting typefaces
+     (Space Grotesk/Barlow Condensed/Inter — see fonts.css) rather than adding new font
+     files: Operate-mode surfaces are "well served by system stacks and workhorse UI
+     faces" and the existing three already carry the broadcast/precision character this
+     world wants. What's new is the ROLE SCALE — nine named roles with concrete
+     size/line-height/tracking, replacing ad hoc Tailwind text-* usage. Telemetry
+     numerals use the system monospace stack (zero added network weight, matches
+     "fast first paint" in Performance).
+     ============================================================================ */
+  --infinity-font-display: var(--font-display);
+  --infinity-font-telemetry: var(--font-telemetry);
+  --infinity-font-body: var(--font-body);
+  --infinity-font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace;
+
+  --infinity-text-display-2xl: 600 3.5rem/1.05 var(--infinity-font-display);
+  --infinity-text-display-2xl-tracking: -0.02em;
+  --infinity-text-display-xl: 600 2.5rem/1.1 var(--infinity-font-display);
+  --infinity-text-display-xl-tracking: -0.015em;
+  --infinity-text-section-title: 600 1.375rem/1.25 var(--infinity-font-display);
+  --infinity-text-section-title-tracking: -0.01em;
+  --infinity-text-card-title: 600 0.9375rem/1.35 var(--infinity-font-display);
+  --infinity-text-body: 400 0.9375rem/1.55 var(--infinity-font-body);
+  --infinity-text-body-sm: 400 0.8125rem/1.5 var(--infinity-font-body);
+  --infinity-text-metadata: 500 0.6875rem/1.4 var(--infinity-font-body);
+  --infinity-text-metadata-tracking: 0.08em;
+  /* uppercase */
+  --infinity-text-stat-lg: 600 2rem/1 var(--infinity-font-telemetry);
+  --infinity-text-stat-md: 600 1.25rem/1 var(--infinity-font-telemetry);
+  --infinity-text-telemetry: 500 0.8125rem/1 var(--infinity-font-mono);
+  --infinity-text-code: 400 0.8125rem/1.5 var(--infinity-font-mono);
+
+  /* ============================================================================
+     SPACING / GRID — 4px base (matches legacy scale for muscle-memory continuity
+     across a codebase that will run both systems side by side for a while), extended
+     with two large section-rhythm steps and ultrawide container caps.
+     ============================================================================ */
+  --infinity-space-1: 4px;
+  --infinity-space-2: 8px;
+  --infinity-space-3: 12px;
+  --infinity-space-4: 16px;
+  --infinity-space-5: 20px;
+  --infinity-space-6: 24px;
+  --infinity-space-8: 32px;
+  --infinity-space-10: 40px;
+  --infinity-space-12: 48px;
+  --infinity-space-16: 64px;
+  --infinity-space-20: 80px;
+
+  --infinity-container-lg: 1280px;
+  --infinity-container-xl: 1440px;
+  --infinity-container-ultrawide: 1800px;
+
+  --infinity-radius-sm: 4px;
+  /* review-panel corners stay tighter than legacy's 6px — closer to broadcast chrome */
+  --infinity-radius-md: 8px;
+  --infinity-radius-lg: 12px;
+  /* xl/2xl are for the discovery-surface card language (Matches/Live/Mission Control) —
+     softer and rounder than the review-panel/telemetry shell used in Match Intelligence,
+     because a card you're scanning to pick a match reads differently than a panel you're
+     scanning for evidence. Broadcast-chrome corner ticks stay reserved for the latter. */
+  --infinity-radius-xl: 20px;
+  --infinity-radius-2xl: 24px;
+  --infinity-radius-full: 9999px;
+
+  /* ============================================================================
+     MOTION — named for what it communicates, not just duration. "Snap" = an
+     instant state change (a call is confirmed); "hold" = a deliberate pause before
+     revealing (review-panel evidence); "sweep" = a scan/loading motion (ball-tracking
+     reticle); "scrub" = smooth timeline seeking.
+     ============================================================================ */
+  --infinity-motion-snap: 100ms cubic-bezier(0.2, 0, 0, 1);
+  --infinity-motion-base: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  --infinity-motion-hold: 420ms cubic-bezier(0.16, 1, 0.3, 1);
+  --infinity-motion-scrub: 320ms cubic-bezier(0.4, 0, 0.2, 1);
+  --infinity-motion-sweep-duration: 1600ms;
+
+  --infinity-breakpoint-sm: 640px;
+  --infinity-breakpoint-md: 768px;
+  --infinity-breakpoint-lg: 1024px;
+  --infinity-breakpoint-xl: 1280px;
+  --infinity-breakpoint-2xl: 1536px;
+  --infinity-breakpoint-ultrawide: 1920px;
+}
+
+[data-theme="light"] {
+  --infinity-ground-0: #ffffff;
+  --infinity-ground-1: #f4f6f8;
+  --infinity-ground-2: #ffffff;
+  --infinity-ground-3: #ffffff;
+
+  --infinity-border-hairline: #e6e9ed;
+  --infinity-border-default: #d4d9df;
+  --infinity-border-strong: #b3bac3;
+  --infinity-border-signal: rgba(0, 130, 168, 0.45);
+
+  --infinity-text-primary: #0b1016;
+  --infinity-text-secondary: #4a5563;
+  /* Same AA fix as dark theme above — #74808f only reached 3.71:1. */
+  --infinity-text-muted: #5c6572;
+  --infinity-text-inverse: #ffffff;
+
+  --infinity-signal: #0082a8;
+  --infinity-signal-hover: #006c8b;
+  --infinity-signal-muted: rgba(0, 130, 168, 0.1);
+  --infinity-signal-strong: rgba(0, 130, 168, 0.22);
+
+  /* Light mode: same hues, deepened lightness/chroma for AA contrast on white —
+     same discipline the legacy tokens.css already uses. */
+  --infinity-domain-football: hsl(142 62% 34%);
+  --infinity-domain-basketball: hsl(28 74% 42%);
+  --infinity-domain-baseball: hsl(4 60% 46%);
+  --infinity-domain-table-tennis: hsl(74 52% 34%);
+  --infinity-domain-predictions: hsl(194 100% 32%);
+  --infinity-domain-knowledge-graph: hsl(258 56% 50%);
+  --infinity-domain-learning: hsl(166 56% 34%);
+  --infinity-domain-news: hsl(38 68% 38%);
+  --infinity-domain-community: hsl(322 52% 44%);
+  --infinity-domain-operations: hsl(212 44% 42%);
+  --infinity-domain-infrastructure: hsl(220 14% 42%);
+  --infinity-domain-alerts: hsl(354 68% 44%);
+  --infinity-domain-security: hsl(246 46% 48%);
+
+  --infinity-confidence-high: #0082a8;
+  --infinity-confidence-medium: #93690f;
+  --infinity-confidence-low: #74808f;
+  --infinity-confidence-high-muted: rgba(0, 130, 168, 0.1);
+  --infinity-confidence-medium-muted: rgba(147, 105, 15, 0.1);
+  --infinity-confidence-low-muted: rgba(116, 128, 143, 0.1);
+
+  --infinity-success: #1d7a52;
+  --infinity-success-muted: rgba(29, 122, 82, 0.1);
+  --infinity-warning: #93690f;
+  --infinity-warning-muted: rgba(147, 105, 15, 0.1);
+  --infinity-danger: #b8382f;
+  --infinity-danger-muted: rgba(184, 56, 47, 0.1);
+  --infinity-info: #1f6ea3;
+  --infinity-info-muted: rgba(31, 110, 163, 0.1);
+  --infinity-live: #c81d3f;
+  --infinity-live-muted: rgba(200, 29, 63, 0.1);
+
+  --infinity-elevation-1: 0 1px 0 var(--infinity-border-hairline);
+  --infinity-elevation-2: 0 8px 24px rgba(16, 21, 29, 0.1);
+  --infinity-elevation-signal: 0 0 0 1px var(--infinity-border-signal), 0 0 20px rgba(0, 130, 168, 0.08);
+  --infinity-elevation-live: 0 0 0 1px rgba(200, 29, 63, 0.35), 0 0 20px rgba(200, 29, 63, 0.1);
+
+  --infinity-glass-bg: rgba(255, 255, 255, 0.66);
+  --infinity-glass-bg-strong: rgba(255, 255, 255, 0.88);
+  --infinity-glass-border: rgba(11, 16, 22, 0.06);
+}
+
+[data-theme="high-contrast"] {
+  --infinity-ground-0: #000000;
+  --infinity-ground-1: #0a0a0a;
+  --infinity-ground-2: #141414;
+  --infinity-ground-3: #1a1a1a;
+
+  --infinity-border-hairline: #3d3d3d;
+  --infinity-border-default: #5f5f5f;
+  --infinity-border-strong: #8c8c8c;
+  --infinity-border-signal: rgba(77, 224, 255, 0.7);
+
+  --infinity-text-primary: #ffffff;
+  --infinity-text-secondary: #e8e8e8;
+  --infinity-text-muted: #bababa;
+  --infinity-text-inverse: #000000;
+
+  --infinity-signal: #4de0ff;
+  --infinity-signal-hover: #7ce8ff;
+  --infinity-signal-muted: rgba(77, 224, 255, 0.28);
+  --infinity-signal-strong: rgba(77, 224, 255, 0.45);
+
+  --infinity-confidence-high: #4de0ff;
+  --infinity-confidence-medium: #ffd166;
+  --infinity-confidence-low: #bababa;
+
+  --infinity-success: #5fe0a3;
+  --infinity-warning: #ffd166;
+  --infinity-danger: #ff8a82;
+  --infinity-info: #7ec4ff;
+  --infinity-live: #ff8a95;
+
+  --infinity-elevation-1: 0 0 0 1px var(--infinity-border-default);
+  --infinity-elevation-2: 0 0 0 1px var(--infinity-border-strong);
+  --infinity-elevation-signal: 0 0 0 2px var(--infinity-signal);
+  --infinity-elevation-live: 0 0 0 2px var(--infinity-live);
+
+  --infinity-glass-bg: rgba(10, 10, 10, 0.95);
+  --infinity-glass-bg-strong: rgba(10, 10, 10, 0.98);
+  --infinity-glass-border: var(--infinity-border-strong);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --infinity-motion-snap: 0ms;
+    --infinity-motion-base: 0ms;
+    --infinity-motion-hold: 0ms;
+    --infinity-motion-scrub: 0ms;
+    --infinity-motion-sweep-duration: 0ms;
+  }
+}

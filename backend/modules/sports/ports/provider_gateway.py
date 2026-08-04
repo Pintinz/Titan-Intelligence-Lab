@@ -24,6 +24,7 @@ class ProviderTeamRecord:
     short_name: str
     country: str | None
     venue_name: str | None = None
+    logo_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,17 @@ class ProviderFixtureRecord:
     competition_ref: str
     season_label: str
     venue_name: str | None = None
+    # Raw provider status code (e.g. API-Sports' "NS"/"1H"/"FT"/"PST"/"CANC" family, shared across
+    # its football/basketball/baseball products) — normalized into FixtureStatus by
+    # modules.sports.domain.contracts.fixture.normalize_provider_fixture_status, not here, so the
+    # gateway stays a thin "ask the provider, get normalized-shape data back" layer per this
+    # file's own docstring. None means the provider didn't report a status (reconciliation keeps
+    # whatever status the fixture already has).
+    status: str | None = None
+    # Final score, when the provider has reported one (typically once status is finished). None
+    # for a fixture that hasn't been played yet, or whose provider doesn't report goals.
+    home_score: int | None = None
+    away_score: int | None = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +80,20 @@ class ProviderTeamStatisticsRecord:
 
 
 @dataclass(frozen=True)
+class ProviderOddsRecord:
+    """One fixture's pre-match win-market odds, decimal format (> 1.0). ``draw`` is ``None``
+    for a sport with no draw outcome (basketball, baseball, table tennis) — only football
+    populates it today. At least one of the three is present whenever a real record is
+    returned; ``fetch_odds`` returns ``None`` entirely rather than an all-``None`` record when
+    a provider has no line for this fixture yet."""
+
+    fixture_ref: ProviderRef
+    home_win: float | None = None
+    draw: float | None = None
+    away_win: float | None = None
+
+
+@dataclass(frozen=True)
 class ProviderLineupSlotRecord:
     player_ref: ProviderRef
     role: str  # "starter" | "substitute" — kept a plain string here and mapped to the
@@ -87,10 +113,10 @@ class ProviderLineupRecord:
 class SportsDataProviderPort(Protocol):
     provider_key: str
 
-    async def fetch_teams(self, competition_ref: str) -> list[ProviderTeamRecord]: ...
+    async def fetch_teams(self, competition_ref: str, season_label: str | None = None) -> list[ProviderTeamRecord]: ...
 
     async def fetch_fixtures(
-        self, competition_ref: str, season_label: str
+        self, competition_ref: str, season_label: str, now: datetime
     ) -> list[ProviderFixtureRecord]: ...
 
     async def fetch_countries(self) -> list[ProviderCountryRecord]: ...
@@ -104,6 +130,13 @@ class SportsDataProviderPort(Protocol):
     async def fetch_team_statistics(self, fixture_ref: ProviderRef) -> list[ProviderTeamStatisticsRecord]: ...
 
     async def fetch_lineups(self, fixture_ref: ProviderRef) -> list[ProviderLineupRecord]: ...
+
+    async def fetch_odds(self, fixture_ref: ProviderRef) -> ProviderOddsRecord | None:
+        """Pre-match win-market odds for one fixture, or ``None`` if the provider has no line
+        for it yet (fixture too far out, market not offered, etc.) — a real absence, not an
+        error, matching ``fetch_lineups``' "no data source yet" contract for the sports that
+        genuinely don't have one."""
+        ...
 
 
 class ITableTennisProvider(SportsDataProviderPort, Protocol):

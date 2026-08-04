@@ -12,12 +12,15 @@ from modules.features.application.feature_store_service import FeatureStoreServi
 from modules.predictions.application.windowed_feature_engineering_service import (
     baseball_form_calculator,
     basketball_form_calculator,
+    football_fixture_expected_goals_calculator,
+    football_fixture_form_differential_calculator,
+    football_fixture_stat_differential_calculators,
     football_form_calculator,
     table_tennis_form_calculator,
 )
-from modules.features.domain.value_objects import FeatureKey
-from modules.sports.domain.entities import TeamStatistics
-from modules.sports.domain.value_objects import EntityId, MatchId, TeamId
+from modules.features.domain.value_objects import EntityType, FeatureKey
+from modules.sports.domain.entities import Fixture, TeamStatistics
+from modules.sports.domain.value_objects import EntityId, FixtureId, FixtureStatus, MatchId, SeasonId, TeamId
 
 T0 = datetime(2026, 7, 26, tzinfo=timezone.utc)
 
@@ -103,9 +106,35 @@ def store(feature_definition_repo, feature_value_repo):
     )
 
 
+@dataclass
+class InMemoryFixtureRepository:
+    store: list = field(default_factory=list)  # list[Fixture]
+
+    def add_completed(self, home_team_id, away_team_id, home_score, away_score, scheduled_at):
+        self.store.append(
+            Fixture(
+                id=FixtureId(uuid4()), season_id=SeasonId(uuid4()), home_team_id=home_team_id,
+                away_team_id=away_team_id, venue_id=None, scheduled_at=scheduled_at,
+                status=FixtureStatus.COMPLETED, home_score=home_score, away_score=away_score,
+            )
+        )
+
+    async def list_recent_by_team(self, team_id, before, limit=10):
+        matches = [
+            f for f in sorted(self.store, key=lambda f: f.scheduled_at, reverse=True)
+            if (f.home_team_id == team_id or f.away_team_id == team_id) and f.scheduled_at < before
+        ]
+        return matches[:limit]
+
+
 @pytest.fixture
 def team_statistics_repo():
     return InMemoryTeamStatisticsRepository()
+
+
+@pytest.fixture
+def fixtures_repo():
+    return InMemoryFixtureRepository()
 
 
 @pytest.mark.asyncio
@@ -198,6 +227,88 @@ async def test_ensure_registered_is_idempotent(registration, store, team_statist
 
 
 @pytest.mark.asyncio
+async def test_fixture_form_differential_joins_home_and_away_team_form(registration, store, team_statistics_repo):
+    calculator = football_fixture_form_differential_calculator(registration, store, team_statistics_repo, window=2)
+    home_id, away_id = TeamId(uuid4()), TeamId(uuid4())
+    team_statistics_repo.add(home_id, {"shots_on_target": 8}, T0.replace(day=20))
+    team_statistics_repo.add(home_id, {"shots_on_target": 6}, T0.replace(day=21))
+    team_statistics_repo.add(away_id, {"shots_on_target": 2}, T0.replace(day=20))
+    team_statistics_repo.add(away_id, {"shots_on_target": 4}, T0.replace(day=21))
+
+    await calculator.ensure_registered(T0)
+    value = await calculator.compute_and_write("fixture-1", home_id, away_id, T0.replace(day=25))
+
+    assert value.value == pytest.approx(7.0 - 3.0)
+    assert value.entity_type == EntityType.FIXTURE
+    assert value.entity_id == "fixture-1"
+    assert value.feature_key.value == "football.fixture.form_shots_on_target_diff_last2"
+
+
+@pytest.mark.asyncio
+async def test_fixture_form_differential_returns_none_when_either_side_has_no_data(
+    registration, store, team_statistics_repo
+):
+    calculator = football_fixture_form_differential_calculator(registration, store, team_statistics_repo)
+    home_id, away_id = TeamId(uuid4()), TeamId(uuid4())
+    team_statistics_repo.add(home_id, {"shots_on_target": 8}, T0.replace(day=20))
+    # away side has no statistics at all
+
+    await calculator.ensure_registered(T0)
+    value = await calculator.compute_and_write("fixture-1", home_id, away_id, T0.replace(day=25))
+
+    assert value is None
+
+
+@pytest.mark.asyncio
+async def test_stat_differential_calculators_covers_shots_on_target_plus_the_five_newly_wired_stats(
+    registration, store, team_statistics_repo
+):
+    """Universal Probability Engine follow-up (2026-08-03): the already-synced-but-previously-
+    unused TeamStatistics fields (possession/shots_total/corners/fouls) plus cards (newly synced
+    by the same change) all get a real fixture-level differential feature now, built the same way
+    shots_on_target already was — not just shots_on_target alone."""
+    calculators = football_fixture_stat_differential_calculators(registration, store, team_statistics_repo, window=5)
+
+    stat_keys = {c.stat_key for c in calculators}
+    assert stat_keys == {
+        "shots_on_target", "possession_pct", "shots_total", "corners", "fouls", "cards_yellow",
+    }
+    feature_keys = {c.feature_key for c in calculators}
+    assert feature_keys == {
+        "football.fixture.form_shots_on_target_diff_last5",
+        "football.fixture.form_possession_pct_diff_last5",
+        "football.fixture.form_shots_total_diff_last5",
+        "football.fixture.form_corners_diff_last5",
+        "football.fixture.form_fouls_diff_last5",
+        "football.fixture.form_cards_yellow_diff_last5",
+    }
+    # The shots_on_target entry must be identical in shape to the original single-calculator
+    # factory — this is additive, not a divergent reimplementation.
+    original = football_fixture_form_differential_calculator(registration, store, team_statistics_repo, window=5)
+    shots_calculator = next(c for c in calculators if c.stat_key == "shots_on_target")
+    assert shots_calculator.feature_key == original.feature_key
+
+
+@pytest.mark.asyncio
+async def test_stat_differential_calculator_computes_a_new_stat_correctly(registration, store, team_statistics_repo):
+    """One representative new stat (possession) proves the generic calculator genuinely reads
+    the right `stat_set` key end-to-end, not just that it was constructed with the right name."""
+    calculators = football_fixture_stat_differential_calculators(registration, store, team_statistics_repo, window=2)
+    possession_calculator = next(c for c in calculators if c.stat_key == "possession_pct")
+    home_id, away_id = TeamId(uuid4()), TeamId(uuid4())
+    team_statistics_repo.add(home_id, {"possession_pct": 60.0}, T0.replace(day=20))
+    team_statistics_repo.add(home_id, {"possession_pct": 58.0}, T0.replace(day=21))
+    team_statistics_repo.add(away_id, {"possession_pct": 40.0}, T0.replace(day=20))
+    team_statistics_repo.add(away_id, {"possession_pct": 42.0}, T0.replace(day=21))
+
+    await possession_calculator.ensure_registered(T0)
+    value = await possession_calculator.compute_and_write("fixture-1", home_id, away_id, T0.replace(day=25))
+
+    assert value.value == pytest.approx(59.0 - 41.0)
+    assert value.feature_key.value == "football.fixture.form_possession_pct_diff_last2"
+
+
+@pytest.mark.asyncio
 async def test_compute_and_write_raises_if_ensure_registered_was_never_called(registration, store, team_statistics_repo):
     from modules.features.application.feature_store_service import FeatureNotFoundError
 
@@ -207,3 +318,59 @@ async def test_compute_and_write_raises_if_ensure_registered_was_never_called(re
 
     with pytest.raises(FeatureNotFoundError):
         await calculator.compute_and_write(team_id, T0.replace(day=25))
+
+
+@pytest.mark.asyncio
+async def test_expected_goals_calculator_averages_each_sides_own_goals_scored(registration, store, fixtures_repo):
+    calculator = football_fixture_expected_goals_calculator(registration, store, fixtures_repo, window=2)
+    home_id, away_id = TeamId(uuid4()), TeamId(uuid4())
+    # home_id scored 3 then 1 (as home both times) -> average 2.0
+    fixtures_repo.add_completed(home_id, TeamId(uuid4()), home_score=3, away_score=0, scheduled_at=T0.replace(day=20))
+    fixtures_repo.add_completed(home_id, TeamId(uuid4()), home_score=1, away_score=1, scheduled_at=T0.replace(day=21))
+    # away_id scored 2 as away (away_score counts), then 4 as home (home_score counts) -> average 3.0
+    fixtures_repo.add_completed(TeamId(uuid4()), away_id, home_score=0, away_score=2, scheduled_at=T0.replace(day=20))
+    fixtures_repo.add_completed(away_id, TeamId(uuid4()), home_score=4, away_score=0, scheduled_at=T0.replace(day=21))
+
+    await calculator.ensure_registered(T0)
+    home_value, away_value = await calculator.compute_and_write("fixture-1", home_id, away_id, T0.replace(day=25))
+
+    assert home_value.value == pytest.approx(2.0)
+    assert home_value.entity_type == EntityType.FIXTURE
+    assert home_value.entity_id == "fixture-1"
+    assert home_value.feature_key.value == "football.fixture.expected_home_goals"
+    assert away_value.value == pytest.approx(3.0)
+    assert away_value.feature_key.value == "football.fixture.expected_away_goals"
+
+
+@pytest.mark.asyncio
+async def test_expected_goals_calculator_ignores_incomplete_and_scoreless_fixtures(registration, store, fixtures_repo):
+    calculator = football_fixture_expected_goals_calculator(registration, store, fixtures_repo, window=5)
+    home_id, away_id = TeamId(uuid4()), TeamId(uuid4())
+    fixtures_repo.add_completed(home_id, TeamId(uuid4()), home_score=2, away_score=0, scheduled_at=T0.replace(day=20))
+    # a SCHEDULED (not yet played) fixture with no score must not count
+    fixtures_repo.store.append(
+        Fixture(
+            id=FixtureId(uuid4()), season_id=SeasonId(uuid4()), home_team_id=home_id, away_team_id=TeamId(uuid4()),
+            venue_id=None, scheduled_at=T0.replace(day=22), status=FixtureStatus.SCHEDULED,
+        )
+    )
+
+    await calculator.ensure_registered(T0)
+    home_value, away_value = await calculator.compute_and_write("fixture-1", home_id, away_id, T0.replace(day=25))
+
+    assert home_value.value == pytest.approx(2.0)  # only the one completed, scored match counted
+    assert away_value is None  # away_id has no completed fixtures at all
+
+
+@pytest.mark.asyncio
+async def test_expected_goals_calculator_returns_none_tuple_when_neither_side_has_history(
+    registration, store, fixtures_repo
+):
+    calculator = football_fixture_expected_goals_calculator(registration, store, fixtures_repo)
+    home_id, away_id = TeamId(uuid4()), TeamId(uuid4())
+
+    await calculator.ensure_registered(T0)
+    home_value, away_value = await calculator.compute_and_write("fixture-1", home_id, away_id, T0)
+
+    assert home_value is None
+    assert away_value is None

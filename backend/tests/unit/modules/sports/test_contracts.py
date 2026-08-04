@@ -1,7 +1,9 @@
 import pytest
 
+from modules.sports.domain.contracts.fixture import normalize_provider_fixture_status
 from modules.sports.domain.contracts.participant import RosterRules
 from modules.sports.domain.contracts.statistics import StatisticFieldSpec, StatisticSchema
+from modules.sports.domain.value_objects import FixtureStatus
 
 
 def test_roster_rules_rejects_min_greater_than_max():
@@ -54,3 +56,35 @@ def test_statistic_schema_valid_payload_has_no_errors():
     errors = schema.validate({"goals": 2, "assists": 1})
 
     assert errors == []
+
+
+@pytest.mark.parametrize("raw", [None, ""])
+def test_normalize_provider_fixture_status_defaults_to_scheduled_for_missing_status(raw):
+    assert normalize_provider_fixture_status(raw) is FixtureStatus.SCHEDULED
+
+
+@pytest.mark.parametrize("raw", ["NS", "TBD", "ns"])
+def test_normalize_provider_fixture_status_recognizes_not_started_codes(raw):
+    assert normalize_provider_fixture_status(raw) is FixtureStatus.SCHEDULED
+
+
+@pytest.mark.parametrize("raw", ["FT", "AET", "PEN", "ft"])
+def test_normalize_provider_fixture_status_recognizes_finished_codes(raw):
+    assert normalize_provider_fixture_status(raw) is FixtureStatus.COMPLETED
+
+
+@pytest.mark.parametrize("raw", ["PST", "SUSP", "INT"])
+def test_normalize_provider_fixture_status_recognizes_postponed_codes(raw):
+    assert normalize_provider_fixture_status(raw) is FixtureStatus.POSTPONED
+
+
+@pytest.mark.parametrize("raw", ["CANC", "ABD"])
+def test_normalize_provider_fixture_status_recognizes_cancelled_codes(raw):
+    assert normalize_provider_fixture_status(raw) is FixtureStatus.CANCELLED
+
+
+@pytest.mark.parametrize("raw", ["1H", "2H", "HT", "LIVE", "Q1", "IN5"])
+def test_normalize_provider_fixture_status_falls_back_to_live_for_unrecognized_in_progress_codes(raw):
+    # Unenumerated in-progress-shaped codes (basketball quarters, baseball innings, ...) must
+    # still classify as LIVE rather than silently reverting to SCHEDULED.
+    assert normalize_provider_fixture_status(raw) is FixtureStatus.LIVE

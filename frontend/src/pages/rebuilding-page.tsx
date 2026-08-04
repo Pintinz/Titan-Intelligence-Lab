@@ -20,7 +20,7 @@ export function RebuildingPage({ title, phase }: { title: string; phase: string 
         </p>
       </div>
       <Button asChild variant="secondary" size="sm">
-        <Link to="/app">Back to Dashboard</Link>
+        <Link to="/app">Back to Home</Link>
       </Button>
     </div>
   )

@@ -1,7 +1,11 @@
+from datetime import datetime, timezone
+
 import pytest
 
 from modules.sports.domain.value_objects import ProviderRef
 from modules.sports.infrastructure.providers.mock_provider import MockSportsDataProvider
+
+NOW = datetime(2026, 7, 26, tzinfo=timezone.utc)
 
 
 @pytest.fixture
@@ -52,20 +56,22 @@ async def test_fetch_standings_ranks_every_team_once(provider):
 
 @pytest.mark.asyncio
 async def test_fetch_team_statistics_returns_home_and_away(provider):
-    fixtures = await provider.fetch_fixtures("39", "2026")
+    fixtures = await provider.fetch_fixtures("39", "2026", NOW)
 
     stats = await provider.fetch_team_statistics(fixtures[0].external_ref)
 
     assert len(stats) == 2
     assert stats[0].team_ref != stats[1].team_ref
     for record in stats:
-        assert set(record.stat_set) == {"possession_pct", "shots_total", "shots_on_target", "corners", "fouls"}
+        assert set(record.stat_set) == {
+            "possession_pct", "shots_total", "shots_on_target", "corners", "fouls", "cards_yellow", "cards_red",
+        }
 
 
 @pytest.mark.asyncio
 async def test_fetch_team_statistics_matches_sport_schema_for_basketball():
     provider = MockSportsDataProvider(provider_key="mock_basketball", sport_code="basketball")
-    fixtures = await provider.fetch_fixtures("12", "2026")
+    fixtures = await provider.fetch_fixtures("12", "2026", NOW)
 
     stats = await provider.fetch_team_statistics(fixtures[0].external_ref)
 
@@ -74,7 +80,7 @@ async def test_fetch_team_statistics_matches_sport_schema_for_basketball():
 
 @pytest.mark.asyncio
 async def test_fetch_lineups_returns_two_teams_with_14_slots_each(provider):
-    fixtures = await provider.fetch_fixtures("39", "2026")
+    fixtures = await provider.fetch_fixtures("39", "2026", NOW)
 
     lineups = await provider.fetch_lineups(fixtures[0].external_ref)
 
@@ -92,8 +98,8 @@ async def test_fetch_lineups_formation_only_set_for_football():
     football = MockSportsDataProvider(provider_key="mock_football", sport_code="football")
     basketball = MockSportsDataProvider(provider_key="mock_basketball", sport_code="basketball")
 
-    football_fixtures = await football.fetch_fixtures("39", "2026")
-    basketball_fixtures = await basketball.fetch_fixtures("12", "2026")
+    football_fixtures = await football.fetch_fixtures("39", "2026", NOW)
+    basketball_fixtures = await basketball.fetch_fixtures("12", "2026", NOW)
 
     football_lineups = await football.fetch_lineups(football_fixtures[0].external_ref)
     basketball_lineups = await basketball.fetch_lineups(basketball_fixtures[0].external_ref)
@@ -109,7 +115,7 @@ async def test_table_tennis_mock_supports_full_expanded_protocol():
     teams = await provider.fetch_teams("wtt")
     players = await provider.fetch_players(teams[0].external_ref)
     standings = await provider.fetch_standings("wtt", "2026")
-    fixtures = await provider.fetch_fixtures("wtt", "2026")
+    fixtures = await provider.fetch_fixtures("wtt", "2026", NOW)
     stats = await provider.fetch_team_statistics(fixtures[0].external_ref)
 
     assert len(players) == 15

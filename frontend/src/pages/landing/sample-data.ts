@@ -19,6 +19,7 @@ import type {
 export interface FeaturedMatch {
   fixture: FixtureSummaryDto
   sportLabel: string
+  sportSlug: string
   market: string
   pick: string
   confidence: ConfidenceBreakdownDto
@@ -29,19 +30,18 @@ export interface FeaturedMatch {
   rail: 'live' | 'scheduled'
 }
 
-function confidenceOf(overall: number): ConfidenceBreakdownDto {
+function confidenceOf(composite: number): ConfidenceBreakdownDto {
   return {
-    overall,
-    data_quality: Math.min(0.98, overall + 0.08),
-    feature_completeness: Math.min(0.97, overall + 0.05),
-    model_certainty: overall,
-    historical_accuracy: Math.min(0.95, overall + 0.02),
-    sample_size_adequacy: Math.min(0.96, overall + 0.06),
-    market_liquidity: Math.max(0.4, overall - 0.1),
-    temporal_relevance: 0.94,
-    ensemble_agreement: Math.min(0.97, overall + 0.04),
-    calibration_quality: Math.min(0.96, overall + 0.03),
-    volatility_penalty: Math.max(0.05, 0.3 - overall * 0.2),
+    feature_quality: Math.min(0.98, composite + 0.08),
+    feature_freshness: Math.min(0.97, composite + 0.05),
+    historical_accuracy: Math.min(0.95, composite + 0.02),
+    knowledge_graph_completeness: Math.min(0.96, composite + 0.06),
+    news_reliability: Math.max(0.4, composite - 0.1),
+    community_reliability: 0.94,
+    data_completeness: Math.min(0.97, composite + 0.04),
+    model_reliability: Math.min(0.96, composite + 0.03),
+    prediction_stability: Math.max(0.05, 0.7 + composite * 0.2),
+    composite,
   }
 }
 
@@ -50,15 +50,20 @@ export const FEATURED_MATCHES: FeaturedMatch[] = [
     fixture: {
       id: 'illustrative-fx-1',
       season_id: 'illustrative-season-1',
+      sport_code: 'football',
+      competition_id: null,
       competition_name: 'Premier League',
-      home_team: { id: 't1', name: 'Arsenal', short_name: 'ARS' },
-      away_team: { id: 't2', name: 'Chelsea', short_name: 'CHE' },
+      competition_logo_url: null,
+      competition_tier: 1,
+      home_team: { id: 't1', name: 'Arsenal', short_name: 'ARS', logo_url: null },
+      away_team: { id: 't2', name: 'Chelsea', short_name: 'CHE', logo_url: null },
       venue_name: 'Emirates Stadium',
       scheduled_at: new Date(Date.now() + 3 * 3600_000).toISOString(),
       status: 'scheduled',
       final_state: null,
     },
     sportLabel: 'Football',
+    sportSlug: 'football',
     market: 'Both Teams to Score',
     pick: 'Yes',
     confidence: confidenceOf(0.81),
@@ -72,15 +77,20 @@ export const FEATURED_MATCHES: FeaturedMatch[] = [
     fixture: {
       id: 'illustrative-fx-2',
       season_id: 'illustrative-season-2',
+      sport_code: 'basketball',
+      competition_id: null,
       competition_name: 'NBA',
-      home_team: { id: 't3', name: 'Boston Celtics', short_name: 'BOS' },
-      away_team: { id: 't4', name: 'Denver Nuggets', short_name: 'DEN' },
+      competition_logo_url: null,
+      competition_tier: 1,
+      home_team: { id: 't3', name: 'Boston Celtics', short_name: 'BOS', logo_url: null },
+      away_team: { id: 't4', name: 'Denver Nuggets', short_name: 'DEN', logo_url: null },
       venue_name: 'TD Garden',
       scheduled_at: new Date(Date.now() - 40 * 60_000).toISOString(),
       status: 'live',
       final_state: null,
     },
     sportLabel: 'Basketball',
+    sportSlug: 'basketball',
     market: 'Point Spread',
     pick: 'Celtics -4.5',
     confidence: confidenceOf(0.74),
@@ -94,15 +104,20 @@ export const FEATURED_MATCHES: FeaturedMatch[] = [
     fixture: {
       id: 'illustrative-fx-3',
       season_id: 'illustrative-season-3',
+      sport_code: 'baseball',
+      competition_id: null,
       competition_name: 'MLB',
-      home_team: { id: 't5', name: 'Los Angeles Dodgers', short_name: 'LAD' },
-      away_team: { id: 't6', name: 'San Francisco Giants', short_name: 'SF' },
+      competition_logo_url: null,
+      competition_tier: 1,
+      home_team: { id: 't5', name: 'Los Angeles Dodgers', short_name: 'LAD', logo_url: null },
+      away_team: { id: 't6', name: 'San Francisco Giants', short_name: 'SF', logo_url: null },
       venue_name: 'Dodger Stadium',
       scheduled_at: new Date(Date.now() + 6 * 3600_000).toISOString(),
       status: 'scheduled',
       final_state: null,
     },
     sportLabel: 'Baseball',
+    sportSlug: 'baseball',
     market: 'Total Runs',
     pick: 'Under 7.5',
     confidence: confidenceOf(0.88),
@@ -116,15 +131,20 @@ export const FEATURED_MATCHES: FeaturedMatch[] = [
     fixture: {
       id: 'illustrative-fx-4',
       season_id: 'illustrative-season-4',
+      sport_code: 'table_tennis',
+      competition_id: null,
       competition_name: 'ITTF World Tour',
-      home_team: { id: 't7', name: 'W. Zhang', short_name: 'ZHA' },
-      away_team: { id: 't8', name: 'T. Ito', short_name: 'ITO' },
+      competition_logo_url: null,
+      competition_tier: null,
+      home_team: { id: 't7', name: 'W. Zhang', short_name: 'ZHA', logo_url: null },
+      away_team: { id: 't8', name: 'T. Ito', short_name: 'ITO', logo_url: null },
       venue_name: null,
       scheduled_at: new Date(Date.now() + 90 * 60_000).toISOString(),
       status: 'scheduled',
       final_state: null,
     },
     sportLabel: 'Table Tennis',
+    sportSlug: 'table-tennis',
     market: 'Match Handicap',
     pick: 'Zhang -2.5 sets',
     confidence: confidenceOf(0.69),
@@ -152,7 +172,9 @@ export const NEWS_ITEMS: Array<{
       title: 'Chelsea reshuffles back line after fitness scare',
       url: '#',
       published_at: new Date(Date.now() - 5 * 3600_000).toISOString(),
-      entities: ['Chelsea', 'Premier League'],
+      language: 'en',
+      version: 1,
+      status: 'published',
     },
     summary:
       'Two defenders cleared late in training, changing the expected starting shape for the away trip to Arsenal.',
@@ -169,7 +191,9 @@ export const NEWS_ITEMS: Array<{
       title: 'Nuggets downgrade starting center to out',
       url: '#',
       published_at: new Date(Date.now() - 90 * 60_000).toISOString(),
-      entities: ['Denver Nuggets', 'NBA'],
+      language: 'en',
+      version: 1,
+      status: 'published',
     },
     summary: "Pregame status moved from questionable to out, removing Denver's primary interior defender.",
     predictionImpact: 'Point Spread model re-weighted rim-protection features within the hour.',
@@ -185,7 +209,9 @@ export const NEWS_ITEMS: Array<{
       title: 'Dry forecast confirmed for Dodger Stadium',
       url: '#',
       published_at: new Date(Date.now() - 8 * 3600_000).toISOString(),
-      entities: ['Los Angeles Dodgers', 'San Francisco Giants', 'MLB'],
+      language: 'en',
+      version: 1,
+      status: 'published',
     },
     summary: 'Updated weather data rules out the wind pattern that historically inflates scoring at this park.',
     predictionImpact: 'Total Runs Under confidence held steady — weather feature contributed no penalty.',
@@ -197,10 +223,10 @@ export const NEWS_ITEMS: Array<{
 ]
 
 export const COMMUNITY_TOPICS: CommunityTopicDto[] = [
-  { id: 'illustrative-ct-1', platform: 'community', title: 'Arsenal vs Chelsea', volume: 2340, sentiment_score: 0.31 },
-  { id: 'illustrative-ct-2', platform: 'community', title: 'Celtics vs Nuggets', volume: 1180, sentiment_score: 0.18 },
-  { id: 'illustrative-ct-3', platform: 'community', title: 'Dodgers vs Giants', volume: 860, sentiment_score: 0.05 },
-  { id: 'illustrative-ct-4', platform: 'community', title: 'Zhang vs Ito', volume: 410, sentiment_score: 0.22 },
+  { id: 'illustrative-ct-1', platform: 'community', topic_label: 'Arsenal vs Chelsea', related_entity_refs: [], post_count: 2340, momentum: 0.31 },
+  { id: 'illustrative-ct-2', platform: 'community', topic_label: 'Celtics vs Nuggets', related_entity_refs: [], post_count: 1180, momentum: 0.18 },
+  { id: 'illustrative-ct-3', platform: 'community', topic_label: 'Dodgers vs Giants', related_entity_refs: [], post_count: 860, momentum: 0.05 },
+  { id: 'illustrative-ct-4', platform: 'community', topic_label: 'Zhang vs Ito', related_entity_refs: [], post_count: 410, momentum: 0.22 },
 ]
 
 export const INTELLIGENCE_FEED: Array<{ id: string; text: string; timestamp: string; kind: 'learning' | 'kg' | 'news' | 'confidence' }> = [

@@ -23,6 +23,7 @@ from modules.sports.ports.provider_gateway import (
     ProviderFixtureRecord,
     ProviderLineupRecord,
     ProviderLineupSlotRecord,
+    ProviderOddsRecord,
     ProviderPlayerRecord,
     ProviderStandingRecord,
     ProviderTeamRecord,
@@ -30,6 +31,13 @@ from modules.sports.ports.provider_gateway import (
 )
 
 ApiKeyGetter = Callable[[], Awaitable[str]]
+
+
+def _as_float(value: object) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 class ProviderRequestError(RuntimeError):
@@ -54,12 +62,28 @@ class _ApiSportsHttpAdapterBase:
                 headers={"x-apisports-key": api_key},
             )
             response.raise_for_status()
-            return response.json()
+            payload = response.json()
         except (httpx.HTTPError, ValueError) as exc:
             raise ProviderRequestError(f"{self.provider_key} request to {path} failed: {exc}") from exc
 
+        # API-SPORTS reports plan/parameter problems (wrong season, league not on this plan,
+        # rate limit, ...) inside a 200 response's `errors` field, not via HTTP status — an
+        # empty `response` array with a populated `errors` field looks identical to "genuinely
+        # no results" unless this is checked explicitly, which silently produced 0-record syncs
+        # with no diagnostic before this.
+        errors = payload.get("errors")
+        if errors:
+            raise ProviderRequestError(f"{self.provider_key} request to {path} rejected by provider: {errors}")
+        return payload
+
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    async def fetch_odds(self, fixture_ref: ProviderRef) -> ProviderOddsRecord | None:
+        """No documented odds endpoint for this sport's API-SPORTS product yet — same honest
+        gap as ``ApiBasketballAdapter``/``ApiBaseballAdapter``'s ``fetch_lineups``. Only
+        ``ApiFootballAdapter`` overrides this with a real implementation."""
+        return None
 
     async def fetch_countries(self) -> list[ProviderCountryRecord]:
         """``/countries`` is identical in shape across every API-SPORTS product
@@ -77,8 +101,8 @@ class ApiFootballAdapter(_ApiSportsHttpAdapterBase):
     provider_key = "api_football"
     _base_url = "https://v3.football.api-sports.io"
 
-    async def fetch_teams(self, competition_ref: str) -> list[ProviderTeamRecord]:
-        payload = await self._get("/teams", {"league": competition_ref, "season": datetime.now().year})
+    async def fetch_teams(self, competition_ref: str, season_label: str | None = None) -> list[ProviderTeamRecord]:
+        payload = await self._get("/teams", {"league": competition_ref, "season": season_label or str(datetime.now().year)})
         records = []
         for entry in payload.get("response", []):
             team = entry.get("team", {})
@@ -90,12 +114,13 @@ class ApiFootballAdapter(_ApiSportsHttpAdapterBase):
                     short_name=team.get("code") or team.get("name", "")[:3].upper(),
                     country=team.get("country"),
                     venue_name=venue.get("name"),
+                    logo_url=team.get("logo"),
                 )
             )
         return records
 
     async def fetch_fixtures(
-        self, competition_ref: str, season_label: str
+        self, competition_ref: str, season_label: str, now: datetime
     ) -> list[ProviderFixtureRecord]:
         payload = await self._get("/fixtures", {"league": competition_ref, "season": season_label})
         records = []
@@ -103,6 +128,7 @@ class ApiFootballAdapter(_ApiSportsHttpAdapterBase):
             fixture = entry.get("fixture", {})
             teams = entry.get("teams", {})
             league = entry.get("league", {})
+            goals = entry.get("goals") or {}
             home, away = teams.get("home", {}), teams.get("away", {})
             records.append(
                 ProviderFixtureRecord(
@@ -113,6 +139,9 @@ class ApiFootballAdapter(_ApiSportsHttpAdapterBase):
                     competition_ref=str(league.get("id", competition_ref)),
                     season_label=str(league.get("season", season_label)),
                     venue_name=(fixture.get("venue") or {}).get("name"),
+                    status=(fixture.get("status") or {}).get("short"),
+                    home_score=goals.get("home"),
+                    away_score=goals.get("away"),
                 )
             )
         return records
@@ -166,6 +195,8 @@ class ApiFootballAdapter(_ApiSportsHttpAdapterBase):
         "Shots on Goal": "shots_on_target",
         "Corner Kicks": "corners",
         "Fouls": "fouls",
+        "Yellow Cards": "cards_yellow",
+        "Red Cards": "cards_red",
     }
 
     async def fetch_team_statistics(self, fixture_ref: ProviderRef) -> list[ProviderTeamStatisticsRecord]:
@@ -222,13 +253,32 @@ class ApiFootballAdapter(_ApiSportsHttpAdapterBase):
             )
         return records
 
+    async def fetch_odds(self, fixture_ref: ProviderRef) -> ProviderOddsRecord | None:
+        """``/odds?fixture={id}`` returns one entry per bookmaker, each with a ``bets`` array —
+        bet id/name ``"Match Winner"`` (1X2) is the standard three-way win market every
+        bookmaker on this endpoint offers. Takes the first bookmaker's line rather than
+        averaging across bookmakers — good enough for a market-efficiency signal, and avoids
+        second-guessing which bookmaker is most liquid/representative."""
+        payload = await self._get("/odds", {"fixture": fixture_ref.external_id})
+        for entry in payload.get("response", []):
+            for bookmaker in entry.get("bookmakers", []):
+                for bet in bookmaker.get("bets", []):
+                    if bet.get("name") != "Match Winner":
+                        continue
+                    values = {v.get("value"): v.get("odd") for v in bet.get("values", [])}
+                    home, draw, away = _as_float(values.get("Home")), _as_float(values.get("Draw")), _as_float(values.get("Away"))
+                    if home is None and draw is None and away is None:
+                        continue
+                    return ProviderOddsRecord(fixture_ref=fixture_ref, home_win=home, draw=draw, away_win=away)
+        return None
+
 
 class ApiBasketballAdapter(_ApiSportsHttpAdapterBase):
     provider_key = "api_basketball"
     _base_url = "https://v1.basketball.api-sports.io"
 
-    async def fetch_teams(self, competition_ref: str) -> list[ProviderTeamRecord]:
-        payload = await self._get("/teams", {"league": competition_ref, "season": datetime.now().year})
+    async def fetch_teams(self, competition_ref: str, season_label: str | None = None) -> list[ProviderTeamRecord]:
+        payload = await self._get("/teams", {"league": competition_ref, "season": season_label or str(datetime.now().year)})
         records = []
         for team in payload.get("response", []):
             records.append(
@@ -242,7 +292,7 @@ class ApiBasketballAdapter(_ApiSportsHttpAdapterBase):
         return records
 
     async def fetch_fixtures(
-        self, competition_ref: str, season_label: str
+        self, competition_ref: str, season_label: str, now: datetime
     ) -> list[ProviderFixtureRecord]:
         payload = await self._get("/games", {"league": competition_ref, "season": season_label})
         records = []
@@ -257,6 +307,7 @@ class ApiBasketballAdapter(_ApiSportsHttpAdapterBase):
                     scheduled_at=datetime.fromisoformat(game["date"]) if game.get("date") else datetime.now(),
                     competition_ref=competition_ref,
                     season_label=season_label,
+                    status=(game.get("status") or {}).get("short"),
                 )
             )
         return records
@@ -337,8 +388,8 @@ class ApiBaseballAdapter(_ApiSportsHttpAdapterBase):
     provider_key = "api_baseball"
     _base_url = "https://v1.baseball.api-sports.io"
 
-    async def fetch_teams(self, competition_ref: str) -> list[ProviderTeamRecord]:
-        payload = await self._get("/teams", {"league": competition_ref, "season": datetime.now().year})
+    async def fetch_teams(self, competition_ref: str, season_label: str | None = None) -> list[ProviderTeamRecord]:
+        payload = await self._get("/teams", {"league": competition_ref, "season": season_label or str(datetime.now().year)})
         records = []
         for team in payload.get("response", []):
             records.append(
@@ -352,7 +403,7 @@ class ApiBaseballAdapter(_ApiSportsHttpAdapterBase):
         return records
 
     async def fetch_fixtures(
-        self, competition_ref: str, season_label: str
+        self, competition_ref: str, season_label: str, now: datetime
     ) -> list[ProviderFixtureRecord]:
         payload = await self._get("/games", {"league": competition_ref, "season": season_label})
         records = []
@@ -367,6 +418,7 @@ class ApiBaseballAdapter(_ApiSportsHttpAdapterBase):
                     scheduled_at=datetime.fromisoformat(game["date"]) if game.get("date") else datetime.now(),
                     competition_ref=competition_ref,
                     season_label=season_label,
+                    status=(game.get("status") or {}).get("short"),
                 )
             )
         return records

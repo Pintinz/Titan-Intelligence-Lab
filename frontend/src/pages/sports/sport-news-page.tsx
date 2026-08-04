@@ -55,15 +55,14 @@ export default function SportNewsPage() {
                 {new Date(article.published_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
               </p>
               <p className="mt-1 font-display text-sm font-semibold text-text-primary">{article.title}</p>
-              {article.entities.length > 0 && (
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {article.entities.map((entity) => (
-                    <span key={entity} className="rounded-full border border-border-default px-2 py-0.5 text-[10px] text-text-muted">
-                      {entity}
-                    </span>
-                  ))}
-                </div>
-              )}
+              <a
+                href={article.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-2 inline-block text-xs font-medium text-accent-primary hover:text-accent-primary-hover"
+              >
+                Read original source →
+              </a>
             </Card>
           ))}
         </div>

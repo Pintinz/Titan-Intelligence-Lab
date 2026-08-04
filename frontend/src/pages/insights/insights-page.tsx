@@ -1,249 +1,375 @@
-import { useState } from 'react'
-import { useMutation, useQuery } from '@tanstack/react-query'
-import { Sparkles, ArrowUp, History, GitCompare, MessageCircle } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
+import { Sparkles, ArrowUp, GitCompare, MessageCircle, Waypoints, X, Users, CircleDot } from 'lucide-react'
 import { sportsApi, SPORT_OPTIONS, type SportCode } from '@/lib/api/sports'
-import { marketsApi } from '@/lib/api/markets'
-import { predictionsApi } from '@/lib/api/predictions'
-import { intelligenceApi } from '@/lib/api/intelligence'
-import { Card } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
-import { Checkbox } from '@/components/ui/checkbox'
-import { Skeleton } from '@/components/ui/skeleton'
-import { ErrorState } from '@/components/ui/error-state'
-import { EmptyState } from '@/components/ui/empty-state'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { ConfidenceTelemetry } from '@/components/domain/confidence-telemetry'
-import { PredictionPanel } from '@/components/domain/prediction-panel'
+import { InfinityPanel, InfinityLabel } from '@/components/infinity/primitives/panel'
+import { InfinityButton } from '@/components/infinity/primitives/button'
+import { InfinityInput, InfinitySearchInput } from '@/components/infinity/primitives/input'
+import { InfinitySkeleton } from '@/components/infinity/primitives/skeleton'
+import { InfinityEmptyState } from '@/components/infinity/primitives/empty-state'
+import { HistoryTurn, CompareTurn, PulseTurn, RelationshipsTurn, NoteTurn, EvidencePanel } from './insights-turns'
 
-const SUGGESTED = [
-  { icon: History, label: 'See a team\'s prediction history', anchor: '#explore' },
-  { icon: GitCompare, label: 'Compare two predictions side by side', anchor: '#compare' },
-  { icon: MessageCircle, label: "Check today's community pulse", anchor: '#pulse' },
-]
+export type PinnedKind = 'team' | 'fixture'
+
+export interface PinnedEntity {
+  kind: PinnedKind
+  id: string
+  label: string
+}
+
+interface Selection {
+  id: string
+  label: string
+}
+
+type Turn =
+  | { id: number; kind: 'history'; entity: PinnedEntity }
+  | { id: number; kind: 'compare'; predictionIds: string[]; labels: Record<string, string> }
+  | { id: number; kind: 'pulse' }
+  | { id: number; kind: 'relationships'; a: PinnedEntity; b: PinnedEntity }
+  | { id: number; kind: 'note'; message: string }
+
+/** Distributes over the `Turn` union (plain `Omit<Turn, 'id'>` would collapse to the shared
+ * fields only, since `keyof` a union is an intersection) — this preserves each variant's own
+ * fields so `appendTurn` can be called with any turn kind's actual shape, sans `id`. */
+type TurnInput = Turn extends infer T ? (T extends { id: number } ? Omit<T, 'id'> : never) : never
 
 export default function InsightsPage() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const nextId = useRef(0)
+
   const [sportCode, setSportCode] = useState<SportCode | ''>('')
-  const [teamId, setTeamId] = useState<string | ''>('')
-  const [marketId, setMarketId] = useState<string | ''>('')
-  const [expandedId, setExpandedId] = useState<string | null>(null)
-  const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const [entityKind, setEntityKind] = useState<PinnedKind>('team')
+  const [query, setQuery] = useState('')
+  const [pinned, setPinned] = useState<PinnedEntity[]>([])
+  const [turns, setTurns] = useState<Turn[]>([])
+  const [selected, setSelected] = useState<Selection[]>([])
+  const [focusedPredictionId, setFocusedPredictionId] = useState<string | null>(null)
+  const [freeText, setFreeText] = useState('')
+
+  function appendTurn(turn: TurnInput) {
+    nextId.current += 1
+    setTurns((prev) => [...prev, { ...turn, id: nextId.current } as Turn])
+  }
+
+  function pin(entity: PinnedEntity) {
+    setPinned((prev) => (prev.some((p) => p.kind === entity.kind && p.id === entity.id) ? prev : [...prev, entity]))
+    // Guards against double-pinning (e.g. React StrictMode's double effect invocation on the
+    // cross-link auto-pin below) re-appending a duplicate history turn for the same entity.
+    setTurns((prev) => {
+      const alreadyHasHistory = prev.some(
+        (t) => t.kind === 'history' && t.entity.kind === entity.kind && t.entity.id === entity.id,
+      )
+      if (alreadyHasHistory) return prev
+      nextId.current += 1
+      return [...prev, { id: nextId.current, kind: 'history', entity }]
+    })
+    setQuery('')
+  }
+
+  function unpin(entity: PinnedEntity) {
+    setPinned((prev) => prev.filter((p) => !(p.kind === entity.kind && p.id === entity.id)))
+  }
+
+  // Cross-link entry point: Match Intelligence pages link here with ?pin_type=fixture&pin_id=...
+  const pinFixtureId = searchParams.get('pin_id')
+  const pinType = searchParams.get('pin_type')
+  const crossLinkFixtureQuery = useQuery({
+    queryKey: ['sports', 'fixture', pinFixtureId],
+    queryFn: () => sportsApi.getFixture(pinFixtureId!),
+    enabled: pinType === 'fixture' && !!pinFixtureId,
+  })
+  useEffect(() => {
+    if (!crossLinkFixtureQuery.data) return
+    const f = crossLinkFixtureQuery.data
+    pin({ kind: 'fixture', id: f.id, label: `${f.home_team.short_name} vs ${f.away_team.short_name}` })
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      next.delete('pin_type')
+      next.delete('pin_id')
+      return next
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [crossLinkFixtureQuery.data])
 
   const teamsQuery = useQuery({
     queryKey: ['sports', 'teams', sportCode],
     queryFn: () => sportsApi.listTeams(sportCode as SportCode),
-    enabled: !!sportCode,
+    enabled: !!sportCode && entityKind === 'team',
   })
-  const marketsQuery = useQuery({
-    queryKey: ['markets', sportCode, 'production'],
-    queryFn: () => marketsApi.list({ sport_code: sportCode as SportCode, status: 'production' }),
-    enabled: !!sportCode,
-  })
-  const historyQuery = useQuery({
-    queryKey: ['predictions', 'history', teamId, marketId],
-    queryFn: () => predictionsApi.history(teamId, marketId || undefined),
-    enabled: !!teamId,
-  })
-  const communityQuery = useQuery({
-    queryKey: ['intelligence', 'community-topics', 'top'],
-    queryFn: () => intelligenceApi.communityTopics(),
+  const fixturesQuery = useQuery({
+    queryKey: ['sports', 'fixtures', sportCode],
+    queryFn: () => sportsApi.listFixtures(sportCode as SportCode, { limit: 50 }),
+    enabled: !!sportCode && entityKind === 'fixture',
   })
 
-  const compare = useMutation({
-    mutationFn: () => predictionsApi.compare(selectedIds),
-  })
+  const teamResults = (teamsQuery.data ?? [])
+    .filter((t) => t.name.toLowerCase().includes(query.toLowerCase()))
+    .slice(0, 8)
+  const fixtureResults = (fixturesQuery.data ?? [])
+    .filter((f) => `${f.home_team.name} ${f.away_team.name}`.toLowerCase().includes(query.toLowerCase()))
+    .slice(0, 8)
 
-  const topTopics = [...(communityQuery.data ?? [])].sort((a, b) => b.volume - a.volume).slice(0, 5)
-  const maxVolume = Math.max(1, ...topTopics.map((t) => t.volume))
-
-  function toggleSelected(id: string) {
-    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
-    compare.reset()
+  function toggleSelect(id: string, label: string) {
+    setSelected((prev) => (prev.some((s) => s.id === id) ? prev.filter((s) => s.id !== id) : [...prev, { id, label }]))
   }
 
-  return (
-    <div className="mx-auto max-w-4xl space-y-10 p-4 lg:p-8">
-      <div>
-        <p className="font-telemetry text-xs font-semibold uppercase tracking-[0.16em] text-accent-primary">
-          TitanIQ Insights
-        </p>
-        <h1 className="mt-1 font-display text-2xl font-semibold text-text-primary">Ask why, not just what</h1>
-        <p className="mt-2 max-w-lg text-sm text-text-secondary">
-          Every prediction can explain itself. Insights today is grounded and deterministic — pick
-          what you want to explore below. Free-form conversation arrives in a future update.
-        </p>
+  function triggerCompare() {
+    if (selected.length < 2) {
+      appendTurn({ kind: 'note', message: 'Select at least two predictions below (check the boxes) to compare them.' })
+      return
+    }
+    appendTurn({
+      kind: 'compare',
+      predictionIds: selected.map((s) => s.id),
+      labels: Object.fromEntries(selected.map((s) => [s.id, s.label])),
+    })
+    setSelected([])
+  }
 
-        <div className="mt-4 flex items-center gap-2 rounded-md border border-border-subtle bg-bg-elevated px-3 py-2.5 opacity-60">
-          <Sparkles className="size-4 shrink-0 text-accent-primary" aria-hidden="true" />
-          <span className="flex-1 text-sm text-text-muted">Ask TitanIQ anything — coming soon</span>
-          <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-bg-secondary">
-            <ArrowUp className="size-3 text-text-muted" aria-hidden="true" />
-          </span>
+  function triggerPulse() {
+    if (turns.some((t) => t.kind === 'pulse')) return
+    appendTurn({ kind: 'pulse' })
+  }
+
+  function triggerRelationships() {
+    if (pinned.length < 2) {
+      appendTurn({ kind: 'note', message: "Pin at least two teams or matches to see how they're connected." })
+      return
+    }
+    const [a, b] = pinned.slice(-2)
+    appendTurn({ kind: 'relationships', a, b })
+  }
+
+  function handleAsk(text: string) {
+    const q = text.trim().toLowerCase()
+    if (!q) return
+    if (q.includes('compare')) triggerCompare()
+    else if (q.includes('pulse') || q.includes('community')) triggerPulse()
+    else if (q.includes('connect') || q.includes('relationship') || q.includes('graph') || q.includes('link'))
+      triggerRelationships()
+    else if (q.includes('history'))
+      appendTurn({
+        kind: 'note',
+        message: 'Prediction history appears automatically for anything you pin — try pinning a team or match in the rail.',
+      })
+    else
+      appendTurn({
+        kind: 'note',
+        message:
+          "I can compare predictions, check community pulse, or find Knowledge Graph relationships for what's pinned — free-form questions beyond that need a backend NL service that doesn't exist yet. Try one of the suggestions below, or pin a team/match to get started.",
+      })
+    setFreeText('')
+  }
+
+  const hasContent = turns.length > 0
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-[240px_1fr_280px] xl:grid-cols-[280px_1fr_320px]">
+      {/* Context rail */}
+      <div className="space-y-4 lg:sticky lg:top-4 lg:self-start">
+        <div>
+          <p className="font-infinity-body text-[11px] font-semibold uppercase tracking-[0.16em] text-infinity-signal">
+            TitanIQ Assistant
+          </p>
+          <h1 className="mt-1 font-infinity-display text-lg font-semibold text-infinity-text-primary">
+            Intelligence Workspace
+          </h1>
         </div>
 
-        <div className="mt-4 flex flex-wrap gap-2">
-          {SUGGESTED.map((s) => (
-            <a
-              key={s.label}
-              href={s.anchor}
-              className="inline-flex items-center gap-1.5 rounded-full border border-border-default px-3 py-1.5 text-xs text-text-secondary hover:border-accent-primary hover:text-accent-primary"
+        <InfinityPanel>
+          <InfinityLabel>Pin a team or match</InfinityLabel>
+
+          <div className="mt-2 flex gap-1.5">
+            {SPORT_OPTIONS.map((s) => (
+              <InfinityButton
+                key={s.code}
+                size="sm"
+                variant={sportCode === s.code ? 'secondary' : 'ghost'}
+                onClick={() => setSportCode(sportCode === s.code ? '' : s.code)}
+              >
+                {s.label}
+              </InfinityButton>
+            ))}
+          </div>
+
+          {sportCode && (
+            <>
+              <div className="mt-3 flex gap-1.5">
+                <InfinityButton
+                  size="sm"
+                  variant={entityKind === 'team' ? 'outline' : 'ghost'}
+                  onClick={() => { setEntityKind('team'); setQuery('') }}
+                  className="flex-1"
+                >
+                  <Users className="size-3.5" /> Teams
+                </InfinityButton>
+                <InfinityButton
+                  size="sm"
+                  variant={entityKind === 'fixture' ? 'outline' : 'ghost'}
+                  onClick={() => { setEntityKind('fixture'); setQuery('') }}
+                  className="flex-1"
+                >
+                  <CircleDot className="size-3.5" /> Matches
+                </InfinityButton>
+              </div>
+
+              <div className="mt-2">
+                <InfinitySearchInput
+                  placeholder={entityKind === 'team' ? 'Search teams…' : 'Search matches…'}
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  aria-label={entityKind === 'team' ? 'Search teams' : 'Search matches'}
+                />
+              </div>
+
+              <div className="mt-2 max-h-64 space-y-1 overflow-y-auto">
+                {entityKind === 'team' && teamsQuery.isPending && <InfinitySkeleton className="h-8" />}
+                {entityKind === 'team' &&
+                  teamResults.map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => pin({ kind: 'team', id: t.id, label: t.name })}
+                      className="block w-full truncate rounded-infinity-sm px-2 py-1.5 text-left font-infinity-body text-[12px] text-infinity-text-secondary hover:bg-infinity-ground-2 hover:text-infinity-text-primary"
+                    >
+                      {t.name}
+                    </button>
+                  ))}
+                {entityKind === 'fixture' && fixturesQuery.isPending && <InfinitySkeleton className="h-8" />}
+                {entityKind === 'fixture' &&
+                  fixtureResults.map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() =>
+                        pin({ kind: 'fixture', id: f.id, label: `${f.home_team.short_name} vs ${f.away_team.short_name}` })
+                      }
+                      className="block w-full truncate rounded-infinity-sm px-2 py-1.5 text-left font-infinity-body text-[12px] text-infinity-text-secondary hover:bg-infinity-ground-2 hover:text-infinity-text-primary"
+                    >
+                      {f.home_team.short_name} vs {f.away_team.short_name}
+                    </button>
+                  ))}
+              </div>
+            </>
+          )}
+        </InfinityPanel>
+
+        {pinned.length > 0 && (
+          <div>
+            <InfinityLabel>Pinned</InfinityLabel>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {pinned.map((p) => (
+                <span
+                  key={`${p.kind}:${p.id}`}
+                  className="inline-flex items-center gap-1 rounded-infinity-sm border border-infinity-border-default bg-infinity-ground-2 py-1 pl-2 pr-1 font-infinity-body text-[11px] text-infinity-text-primary"
+                >
+                  {p.label}
+                  <button
+                    type="button"
+                    onClick={() => unpin(p)}
+                    aria-label={`Unpin ${p.label}`}
+                    className="rounded-full p-0.5 text-infinity-text-muted hover:bg-infinity-ground-1 hover:text-infinity-text-primary"
+                  >
+                    <X className="size-3" aria-hidden="true" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Conversation stream */}
+      <div className="min-w-0 space-y-4">
+        {!hasContent && (
+          <InfinityEmptyState
+            icon={Sparkles}
+            title="Pin something to get started"
+            description="Search a team or match in the rail — TitanIQ pulls its real prediction history immediately, and you can compare, cross-reference, or explore its Knowledge Graph connections from there."
+          />
+        )}
+
+        {turns.map((turn) => {
+          if (turn.kind === 'history')
+            return (
+              <HistoryTurn
+                key={turn.id}
+                entity={turn.entity}
+                selectedIds={selected.map((s) => s.id)}
+                onToggleSelect={(id) => toggleSelect(id, turn.entity.label)}
+                onFocusPrediction={setFocusedPredictionId}
+              />
+            )
+          if (turn.kind === 'compare')
+            return (
+              <CompareTurn
+                key={turn.id}
+                predictionIds={turn.predictionIds}
+                labels={turn.labels}
+                onFocusPrediction={setFocusedPredictionId}
+              />
+            )
+          if (turn.kind === 'pulse') return <PulseTurn key={turn.id} />
+          if (turn.kind === 'relationships') return <RelationshipsTurn key={turn.id} a={turn.a} b={turn.b} />
+          return <NoteTurn key={turn.id} message={turn.message} />
+        })}
+
+        <div className="sticky bottom-4 space-y-2 border-t border-infinity-border-hairline bg-infinity-ground-0/95 pt-3 backdrop-blur-sm">
+          <div className="flex flex-wrap gap-2">
+            <InfinityButton size="sm" variant="outline" onClick={triggerCompare} disabled={selected.length < 2}>
+              <GitCompare className="size-3.5" /> Compare {selected.length > 0 ? `${selected.length} selected` : 'selected'}
+            </InfinityButton>
+            <InfinityButton size="sm" variant="outline" onClick={triggerPulse}>
+              <MessageCircle className="size-3.5" /> Community pulse
+            </InfinityButton>
+            <InfinityButton size="sm" variant="outline" onClick={triggerRelationships} disabled={pinned.length < 2}>
+              <Waypoints className="size-3.5" /> How are these connected?
+            </InfinityButton>
+          </div>
+
+          <form
+            className="flex items-center gap-2 rounded-infinity-sm border border-infinity-border-default bg-infinity-ground-1 px-3 py-2"
+            onSubmit={(e) => { e.preventDefault(); handleAsk(freeText) }}
+          >
+            <Sparkles className="size-4 shrink-0 text-infinity-signal" aria-hidden="true" />
+            <InfinityInput
+              value={freeText}
+              onChange={(e) => setFreeText(e.target.value)}
+              placeholder="Ask about what's pinned — try 'compare' or 'how are these connected'"
+              className="h-auto border-0 bg-transparent p-0 focus:ring-0"
+              aria-label="Ask the Assistant"
+            />
+            <button
+              type="submit"
+              disabled={!freeText.trim()}
+              aria-label="Send"
+              className="flex size-6 shrink-0 items-center justify-center rounded-full bg-infinity-ground-2 text-infinity-text-muted transition-colors hover:text-infinity-text-primary disabled:opacity-40"
             >
-              <s.icon className="size-3.5" aria-hidden="true" />
-              {s.label}
-            </a>
-          ))}
+              <ArrowUp className="size-3" aria-hidden="true" />
+            </button>
+          </form>
+          <p className="font-infinity-body text-[11px] text-infinity-text-muted">
+            Grounded and deterministic today — every answer traces to real TitanIQ data, no free-form AI conversation yet.
+          </p>
         </div>
       </div>
 
-      <section id="explore" className="scroll-mt-20">
-        <div className="mb-4 flex items-center gap-2">
-          <History className="size-4 text-accent-primary" aria-hidden="true" />
-          <p className="text-sm font-medium text-text-primary">Prediction history</p>
-        </div>
-
-        <Card className="p-5">
-          <div className="flex flex-wrap gap-3">
-            <Select value={sportCode} onValueChange={(v) => { setSportCode(v as SportCode); setTeamId(''); setMarketId('') }}>
-              <SelectTrigger className="w-44" aria-label="Sport"><SelectValue placeholder="Choose a sport" /></SelectTrigger>
-              <SelectContent>
-                {SPORT_OPTIONS.map((s) => (
-                  <SelectItem key={s.code} value={s.code}>{s.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-
-            <Select value={teamId} onValueChange={setTeamId} disabled={!sportCode || !teamsQuery.data}>
-              <SelectTrigger className="w-52" aria-label="Team"><SelectValue placeholder="Choose a team" /></SelectTrigger>
-              <SelectContent>
-                {(teamsQuery.data ?? []).map((t) => (
-                  <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-
-            <Select value={marketId} onValueChange={setMarketId} disabled={!sportCode || !marketsQuery.data}>
-              <SelectTrigger className="w-56" aria-label="Market"><SelectValue placeholder="Any market" /></SelectTrigger>
-              <SelectContent>
-                {(marketsQuery.data ?? []).map((m) => (
-                  <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="mt-5">
-            {!teamId && <p className="text-sm text-text-muted">Choose a sport and team to see its prediction history.</p>}
-            {teamId && historyQuery.isPending && (
-              <div className="space-y-2">
-                {Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-14" />)}
-              </div>
-            )}
-            {teamId && historyQuery.isError && <ErrorState error={historyQuery.error} onRetry={() => void historyQuery.refetch()} />}
-            {teamId && historyQuery.data && historyQuery.data.length === 0 && (
-              <EmptyState title="No prediction history yet" description="TitanIQ hasn't generated a prediction for this team yet." />
-            )}
-            {teamId && historyQuery.data && historyQuery.data.length > 0 && (
-              <ul className="space-y-2">
-                {historyQuery.data.map((prediction) => (
-                  <li key={prediction.id} className="rounded-md border border-border-default">
-                    <div className="flex items-center gap-3 p-3">
-                      <Checkbox
-                        checked={selectedIds.includes(prediction.id)}
-                        onCheckedChange={() => toggleSelected(prediction.id)}
-                        aria-label="Select for comparison"
-                      />
-                      <button
-                        type="button"
-                        className="flex flex-1 items-center justify-between gap-3 text-left"
-                        onClick={() => setExpandedId(expandedId === prediction.id ? null : prediction.id)}
-                      >
-                        <div className="min-w-0">
-                          <p className="truncate font-telemetry text-sm font-medium text-text-primary">
-                            {String(prediction.value)}
-                          </p>
-                          <p className="truncate font-mono text-[11px] text-text-muted">market {prediction.market_id}</p>
-                        </div>
-                        <ConfidenceTelemetry confidence={prediction.confidence.overall} size="sm" />
-                      </button>
-                    </div>
-                    {expandedId === prediction.id && (
-                      <div className="border-t border-border-subtle p-3">
-                        <PredictionPanel prediction={prediction} />
-                      </div>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        </Card>
-      </section>
-
-      <section id="compare" className="scroll-mt-20">
-        <div className="mb-4 flex items-center gap-2">
-          <GitCompare className="size-4 text-accent-primary" aria-hidden="true" />
-          <p className="text-sm font-medium text-text-primary">Compare predictions</p>
-        </div>
-        <Card className="p-5">
-          <p className="text-sm text-text-secondary">
-            Select two or more predictions above, then compare them side by side.
-          </p>
-          <Button className="mt-3" disabled={selectedIds.length < 2 || compare.isPending} onClick={() => compare.mutate()}>
-            {compare.isPending ? 'Comparing…' : `Compare ${selectedIds.length || ''} selected`}
-          </Button>
-
-          {compare.isError && <div className="mt-4"><ErrorState error={compare.error} onRetry={() => compare.mutate()} /></div>}
-
-          {compare.data && (
-            <div className="mt-5 overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="text-left text-xs text-text-muted">
-                  <tr>
-                    <th className="py-1.5 pr-4 font-medium">Value</th>
-                    <th className="py-1.5 pr-4 font-medium">Probability</th>
-                    <th className="py-1.5 font-medium">Confidence</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {compare.data.map((p) => (
-                    <tr key={p.id} className="border-t border-border-subtle">
-                      <td className="py-2 pr-4 font-telemetry text-text-primary">{String(p.value)}</td>
-                      <td className="py-2 pr-4 font-mono tabular-nums text-text-secondary">{(p.probability * 100).toFixed(1)}%</td>
-                      <td className="py-2"><ConfidenceTelemetry confidence={p.confidence.overall} size="sm" /></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+      {/* Evidence panel */}
+      <div className="lg:sticky lg:top-4 lg:self-start">
+        <InfinityLabel>Evidence</InfinityLabel>
+        <div className="mt-2">
+          {!focusedPredictionId && (
+            <InfinityEmptyState
+              icon={Sparkles}
+              title="Nothing focused"
+              description="Click any prediction value in the conversation to see its full confidence breakdown and evidence here."
+            />
           )}
-        </Card>
-      </section>
-
-      <section id="pulse" className="scroll-mt-20">
-        <div className="mb-4 flex items-center gap-2">
-          <MessageCircle className="size-4 text-accent-primary" aria-hidden="true" />
-          <p className="text-sm font-medium text-text-primary">Today's community pulse</p>
+          {focusedPredictionId && <EvidencePanel predictionId={focusedPredictionId} />}
         </div>
-        <Card className="p-5">
-          {communityQuery.isPending && <Skeleton className="h-24" />}
-          {communityQuery.isError && <ErrorState error={communityQuery.error} onRetry={() => void communityQuery.refetch()} />}
-          {topTopics.length === 0 && !communityQuery.isPending && !communityQuery.isError && (
-            <EmptyState title="No community signal yet" description="No tracked topics right now." />
-          )}
-          {topTopics.length > 0 && (
-            <div className="space-y-3">
-              {topTopics.map((topic) => (
-                <div key={topic.id} className="flex items-center gap-4">
-                  <span className="w-40 shrink-0 truncate text-sm text-text-primary">{topic.title}</span>
-                  <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-bg-secondary">
-                    <div className="h-full rounded-full bg-accent-primary" style={{ width: `${(topic.volume / maxVolume) * 100}%` }} />
-                  </div>
-                  <span className="w-16 shrink-0 text-right font-mono text-xs text-text-muted">{topic.volume.toLocaleString()}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </Card>
-      </section>
+      </div>
     </div>
   )
 }

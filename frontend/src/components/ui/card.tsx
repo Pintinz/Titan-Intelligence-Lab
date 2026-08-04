@@ -22,9 +22,10 @@ export const Card = forwardRef<HTMLDivElement, CardProps>(
     <div
       ref={ref}
       className={cn(
-        'relative overflow-hidden rounded-lg border border-border-default bg-bg-elevated',
+        'relative overflow-hidden rounded-lg border border-border-default bg-bg-elevated transition-all duration-300',
+        'shadow-elevation-1 hover:shadow-elevation-2',
         rail !== 'none' &&
-          'pl-[19px] before:absolute before:inset-y-0 before:left-0 before:w-[3px] before:content-[""]',
+          'pl-[19px] before:absolute before:inset-y-0 before:left-0 before:w-[3px] before:content-[""] before:transition-opacity before:duration-300',
         railColor[rail],
         className,
       )}

@@ -13,7 +13,13 @@ from modules.predictions.application.market_registry_service import (
     MarketRegistryService,
 )
 from modules.predictions.domain.entities import FeatureMarketMapping
-from modules.predictions.domain.value_objects import FeatureMarketMappingId, MarketKind, MarketStatus, TargetType
+from modules.predictions.domain.value_objects import (
+    FeatureMarketMappingId,
+    MarketKind,
+    MarketStatus,
+    OutcomeType,
+    TargetType,
+)
 
 T0 = datetime(2026, 7, 26, tzinfo=timezone.utc)
 
@@ -44,6 +50,35 @@ async def test_register_creates_draft_version_1(service):
     assert market.status is MarketStatus.DRAFT
     assert market.version == 1
     assert market.is_production() is False
+
+
+@pytest.mark.asyncio
+async def test_register_without_outcome_registry_kwargs_defaults_empty(service):
+    """Every pre-Milestone-9.2 caller (market_seeding.py x4 sports) omits the new kwargs — must
+    keep registering successfully with empty/None defaults, not require the new fields."""
+    market = await _register(service)
+
+    assert market.outcome_type is None
+    assert market.allowed_values == ()
+    assert market.resolver_key is None
+    assert market.gemini_prompt_template is None
+
+
+@pytest.mark.asyncio
+async def test_register_accepts_outcome_registry_kwargs(service):
+    market = await _register(
+        service,
+        key="football.match_winner",
+        outcome_type=OutcomeType.HOME_DRAW_AWAY,
+        allowed_values=("HOME_WIN", "DRAW", "AWAY_WIN"),
+        resolver_key="football.match_winner",
+        gemini_prompt_template="Explain the {predicted_outcome} prediction.",
+    )
+
+    assert market.outcome_type is OutcomeType.HOME_DRAW_AWAY
+    assert market.allowed_values == ("HOME_WIN", "DRAW", "AWAY_WIN")
+    assert market.resolver_key == "football.match_winner"
+    assert market.gemini_prompt_template == "Explain the {predicted_outcome} prediction."
 
 
 @pytest.mark.asyncio

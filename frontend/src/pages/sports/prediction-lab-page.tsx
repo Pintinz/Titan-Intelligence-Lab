@@ -48,6 +48,7 @@ export default function PredictionLabPage() {
 
   const markets = marketsQuery.data ?? []
   const fixtures = fixturesQuery.data ?? []
+  const selectedFixture = fixtures.find((f) => f.id === selectedFixtureId)
 
   return (
     <div className="max-w-4xl space-y-8">
@@ -133,7 +134,11 @@ export default function PredictionLabPage() {
           )}
           {generatePrediction.data && (
             <Card className="mt-4 p-5">
-              <PredictionPanel prediction={generatePrediction.data} />
+              <PredictionPanel
+                prediction={generatePrediction.data}
+                homeTeam={selectedFixture ? { name: selectedFixture.home_team.name, logoUrl: selectedFixture.home_team.logo_url } : undefined}
+                awayTeam={selectedFixture ? { name: selectedFixture.away_team.name, logoUrl: selectedFixture.away_team.logo_url } : undefined}
+              />
             </Card>
           )}
         </div>

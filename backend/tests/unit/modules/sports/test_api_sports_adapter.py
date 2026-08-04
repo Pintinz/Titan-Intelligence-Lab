@@ -3,6 +3,7 @@ code (URL construction, header auth, response parsing) runs; only the network is
 (docs/decisions.md ADR-008 pattern, applied to an HTTP adapter instead of a cache)."""
 
 import json
+from datetime import datetime, timezone
 
 import httpx
 import pytest
@@ -14,6 +15,8 @@ from modules.sports.infrastructure.providers.api_sports_adapter import (
     ApiFootballAdapter,
     ProviderRequestError,
 )
+
+NOW = datetime(2026, 7, 26, tzinfo=timezone.utc)
 
 
 async def _get_key() -> str:
@@ -80,6 +83,8 @@ def football_adapter():
                             {"type": "Shots on Goal", "value": 6},
                             {"type": "Corner Kicks", "value": 5},
                             {"type": "Fouls", "value": 9},
+                            {"type": "Yellow Cards", "value": 3},
+                            {"type": "Red Cards", "value": 0},
                             {"type": "Offsides", "value": 2},  # unmapped — should be skipped
                         ],
                     }
@@ -92,6 +97,29 @@ def football_adapter():
                         "team": {"id": 42}, "formation": "4-3-3",
                         "startXI": [{"player": {"id": 7, "pos": "F", "number": 9}}],
                         "substitutes": [{"player": {"id": 8, "pos": "M", "number": 14}}],
+                    }
+                ]
+            })
+        if path == "/odds":
+            return _json_response({
+                "response": [
+                    {
+                        "fixture": {"id": 100},
+                        "bookmakers": [
+                            {
+                                "id": 1, "name": "Bookmaker A",
+                                "bets": [
+                                    {
+                                        "id": 1, "name": "Match Winner",
+                                        "values": [
+                                            {"value": "Home", "odd": "2.10"},
+                                            {"value": "Draw", "odd": "3.40"},
+                                            {"value": "Away", "odd": "3.60"},
+                                        ],
+                                    }
+                                ],
+                            }
+                        ],
                     }
                 ]
             })
@@ -119,7 +147,7 @@ async def test_football_fetch_teams(football_adapter):
 
 @pytest.mark.asyncio
 async def test_football_fetch_fixtures(football_adapter):
-    fixtures = await football_adapter.fetch_fixtures("39", "2026")
+    fixtures = await football_adapter.fetch_fixtures("39", "2026", NOW)
 
     assert fixtures[0].home_team_ref.external_id == "42"
     assert fixtures[0].away_team_ref.external_id == "43"
@@ -151,6 +179,7 @@ async def test_football_fetch_team_statistics_maps_known_types_and_skips_unknown
 
     assert stats[0].stat_set == {
         "possession_pct": 55.0, "shots_total": 12, "shots_on_target": 6, "corners": 5, "fouls": 9,
+        "cards_yellow": 3, "cards_red": 0,
     }
     assert "Offsides" not in stats[0].stat_set
 
@@ -163,6 +192,39 @@ async def test_football_fetch_lineups(football_adapter):
     assert len(lineups[0].slots) == 2
     assert lineups[0].slots[0].role == "starter"
     assert lineups[0].slots[1].role == "substitute"
+
+
+@pytest.mark.asyncio
+async def test_football_fetch_odds_parses_first_bookmakers_match_winner_bet(football_adapter):
+    odds = await football_adapter.fetch_odds(ProviderRef("api_football", "100"))
+
+    assert odds.home_win == pytest.approx(2.10)
+    assert odds.draw == pytest.approx(3.40)
+    assert odds.away_win == pytest.approx(3.60)
+
+
+@pytest.mark.asyncio
+async def test_football_fetch_odds_returns_none_when_no_match_winner_bet_present():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/odds":
+            return _json_response({"response": [{"fixture": {"id": 101}, "bookmakers": [{"bets": [{"name": "Total Goals", "values": []}]}]}]})
+        raise AssertionError(f"unexpected path {request.url.path}")
+
+    adapter = ApiFootballAdapter(get_api_key=_get_key, client=_client_for(handler))
+
+    assert await adapter.fetch_odds(ProviderRef("api_football", "101")) is None
+
+
+@pytest.mark.asyncio
+async def test_football_fetch_odds_returns_none_when_no_fixtures_in_response():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/odds":
+            return _json_response({"response": []})
+        raise AssertionError(f"unexpected path {request.url.path}")
+
+    adapter = ApiFootballAdapter(get_api_key=_get_key, client=_client_for(handler))
+
+    assert await adapter.fetch_odds(ProviderRef("api_football", "999")) is None
 
 
 @pytest.mark.asyncio
@@ -185,6 +247,20 @@ async def test_football_request_error_wraps_invalid_json():
 
     with pytest.raises(ProviderRequestError):
         await adapter.fetch_teams("39")
+
+
+@pytest.mark.asyncio
+async def test_football_request_error_surfaces_api_level_errors():
+    """API-SPORTS reports plan/parameter problems (e.g. a free plan requesting a season it
+    isn't entitled to) inside a 200 response's `errors` field, not via HTTP status — this must
+    raise so a bad request doesn't look identical to "genuinely zero results"."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response({"response": [], "errors": {"plan": "Free plans do not have access to this season, try from 2022 to 2024."}})
+
+    adapter = ApiFootballAdapter(get_api_key=_get_key, client=_client_for(handler))
+
+    with pytest.raises(ProviderRequestError, match="Free plans do not have access"):
+        await adapter.fetch_fixtures("39", "2025", NOW)
 
 
 @pytest.mark.asyncio
@@ -240,7 +316,7 @@ async def test_basketball_fetch_teams(basketball_adapter):
 
 @pytest.mark.asyncio
 async def test_basketball_fetch_fixtures(basketball_adapter):
-    fixtures = await basketball_adapter.fetch_fixtures("12", "2026")
+    fixtures = await basketball_adapter.fetch_fixtures("12", "2026", NOW)
 
     assert fixtures[0].home_team_ref.external_id == "1"
 
@@ -274,6 +350,11 @@ async def test_basketball_fetch_lineups_returns_empty_list(basketball_adapter):
     lineups = await basketball_adapter.fetch_lineups(ProviderRef("api_basketball", "200"))
 
     assert lineups == []
+
+
+@pytest.mark.asyncio
+async def test_basketball_fetch_odds_returns_none(basketball_adapter):
+    assert await basketball_adapter.fetch_odds(ProviderRef("api_basketball", "200")) is None
 
 
 # -- ApiBaseballAdapter -------------------------------------------------------------------------
@@ -313,7 +394,7 @@ async def test_baseball_fetch_teams(baseball_adapter):
 
 @pytest.mark.asyncio
 async def test_baseball_fetch_fixtures(baseball_adapter):
-    fixtures = await baseball_adapter.fetch_fixtures("1", "2026")
+    fixtures = await baseball_adapter.fetch_fixtures("1", "2026", NOW)
 
     assert fixtures[0].away_team_ref.external_id == "6"
 
@@ -346,3 +427,8 @@ async def test_baseball_fetch_lineups_returns_empty_list(baseball_adapter):
     lineups = await baseball_adapter.fetch_lineups(ProviderRef("api_baseball", "300"))
 
     assert lineups == []
+
+
+@pytest.mark.asyncio
+async def test_baseball_fetch_odds_returns_none(baseball_adapter):
+    assert await baseball_adapter.fetch_odds(ProviderRef("api_baseball", "300")) is None

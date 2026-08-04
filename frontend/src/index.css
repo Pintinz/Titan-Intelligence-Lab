@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "./styles/tokens.css";
+@import "./styles/tokens.infinity.css";
 @import "./styles/fonts.css";
 
 /*
@@ -73,6 +74,71 @@
   --gradient-confidence-high: var(--gradient-confidence-high);
 }
 
+/*
+  Infinity theme mapping — Phase 11.0. A SEPARATE @theme block under the `infinity-*`
+  Tailwind prefix (e.g. `bg-infinity-ground-1`, `text-infinity-signal`), independent of
+  the block above. Existing `bg-bg-primary`-style utilities are untouched; components
+  under components/infinity/ opt in to this prefix explicitly.
+*/
+@theme {
+  --color-infinity-ground-0: var(--infinity-ground-0);
+  --color-infinity-ground-1: var(--infinity-ground-1);
+  --color-infinity-ground-2: var(--infinity-ground-2);
+  --color-infinity-ground-3: var(--infinity-ground-3);
+
+  --color-infinity-border-hairline: var(--infinity-border-hairline);
+  --color-infinity-border-default: var(--infinity-border-default);
+  --color-infinity-border-strong: var(--infinity-border-strong);
+
+  --color-infinity-text-primary: var(--infinity-text-primary);
+  --color-infinity-text-secondary: var(--infinity-text-secondary);
+  --color-infinity-text-muted: var(--infinity-text-muted);
+  --color-infinity-text-inverse: var(--infinity-text-inverse);
+
+  --color-infinity-signal: var(--infinity-signal);
+  --color-infinity-signal-hover: var(--infinity-signal-hover);
+  --color-infinity-signal-muted: var(--infinity-signal-muted);
+
+  --color-infinity-football: var(--infinity-domain-football);
+  --color-infinity-basketball: var(--infinity-domain-basketball);
+  --color-infinity-baseball: var(--infinity-domain-baseball);
+  --color-infinity-table-tennis: var(--infinity-domain-table-tennis);
+  --color-infinity-predictions: var(--infinity-domain-predictions);
+  --color-infinity-knowledge-graph: var(--infinity-domain-knowledge-graph);
+  --color-infinity-learning: var(--infinity-domain-learning);
+  --color-infinity-news: var(--infinity-domain-news);
+  --color-infinity-community: var(--infinity-domain-community);
+  --color-infinity-operations: var(--infinity-domain-operations);
+  --color-infinity-infrastructure: var(--infinity-domain-infrastructure);
+  --color-infinity-alerts: var(--infinity-domain-alerts);
+  --color-infinity-security: var(--infinity-domain-security);
+
+  --color-infinity-confidence-high: var(--infinity-confidence-high);
+  --color-infinity-confidence-medium: var(--infinity-confidence-medium);
+  --color-infinity-confidence-low: var(--infinity-confidence-low);
+
+  --color-infinity-success: var(--infinity-success);
+  --color-infinity-warning: var(--infinity-warning);
+  --color-infinity-danger: var(--infinity-danger);
+  --color-infinity-info: var(--infinity-info);
+  --color-infinity-live: var(--infinity-live);
+
+  --color-infinity-glass-bg: var(--infinity-glass-bg);
+  --color-infinity-glass-border: var(--infinity-glass-border);
+
+  --radius-infinity-sm: var(--infinity-radius-sm);
+  --radius-infinity-md: var(--infinity-radius-md);
+  --radius-infinity-lg: var(--infinity-radius-lg);
+  --radius-infinity-xl: var(--infinity-radius-xl);
+  --radius-infinity-2xl: var(--infinity-radius-2xl);
+  --radius-infinity-full: var(--infinity-radius-full);
+
+  --font-infinity-display: var(--infinity-font-display);
+  --font-infinity-telemetry: var(--infinity-font-telemetry);
+  --font-infinity-body: var(--infinity-font-body);
+  --font-infinity-mono: var(--infinity-font-mono);
+}
+
 @layer base {
   * {
     border-color: var(--color-border-default);
@@ -99,6 +165,14 @@
     outline: 2px solid var(--color-accent-primary);
     outline-offset: 2px;
   }
+}
+
+/* Infinity system motion — the "sweep" used by InfinitySkeleton and any live-scan
+   indicator. Duration comes from --infinity-motion-sweep-duration (tokens.infinity.css),
+   which collapses to 0ms under prefers-reduced-motion. */
+@keyframes infinity-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
 }
 
 /* Radix data-state-driven enter/exit keyframes (Dialog/Popover) — Radix keeps the element

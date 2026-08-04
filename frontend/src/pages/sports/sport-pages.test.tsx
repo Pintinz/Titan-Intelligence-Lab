@@ -56,25 +56,24 @@ const PREDICTION: PredictionDto = {
   value: 'Yes',
   probability: 0.81,
   confidence: {
-    overall: 0.81,
-    data_quality: 0.9,
-    feature_completeness: 0.9,
-    model_certainty: 0.81,
+    feature_quality: 0.9,
+    feature_freshness: 0.9,
     historical_accuracy: 0.8,
-    sample_size_adequacy: 0.85,
-    market_liquidity: 0.7,
-    temporal_relevance: 0.9,
-    ensemble_agreement: 0.85,
-    calibration_quality: 0.88,
-    volatility_penalty: 0.1,
+    knowledge_graph_completeness: 0.85,
+    news_reliability: 0.7,
+    community_reliability: 0.9,
+    data_completeness: 0.85,
+    model_reliability: 0.88,
+    prediction_stability: 0.8,
+    composite: 0.81,
   },
   explanation: {
-    top_positive_features: [{ feature_key: 'form_shots_on_target_last5', contribution: 0.3 }],
+    top_positive_features: [['form_shots_on_target_last5', 0.3]],
     top_negative_features: [],
     feature_importance: {},
-    knowledge_graph_contribution: null,
-    news_contribution: null,
-    community_contribution: null,
+    knowledge_graph_evidence: [],
+    news_contribution: [],
+    community_contribution: [],
     ai_explanation: 'Both attacks are in strong scoring form.',
   },
   feature_snapshot: {},
@@ -118,7 +117,8 @@ describe('SportHubPage', () => {
   it('renders fixtures once loaded', async () => {
     vi.mocked(sportsApi.listFixtures).mockResolvedValue([FIXTURE])
     renderAtSport('/app/football', <SportHubPage />)
-    await waitFor(() => expect(screen.getByText('Arsenal vs Chelsea')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Arsenal')).toBeInTheDocument())
+    expect(screen.getByText('Chelsea')).toBeInTheDocument()
   })
 
   it('renders an empty state when there are no fixtures', async () => {
@@ -134,7 +134,8 @@ describe('MatchListPage', () => {
     renderAtSport('/app/football/matches', <MatchListPage />)
     await waitFor(() => expect(screen.getByText("Couldn't load this")).toBeInTheDocument())
     await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
-    await waitFor(() => expect(screen.getByText('Arsenal vs Chelsea')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Arsenal')).toBeInTheDocument())
+    expect(screen.getByText('Chelsea')).toBeInTheDocument()
   })
 })
 

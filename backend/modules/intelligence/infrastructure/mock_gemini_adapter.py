@@ -21,6 +21,17 @@ _STOPWORDS = frozenset(
 )
 
 
+def _humanize_feature_key(key: str) -> str:
+    """Turns an internal feature key like "football.fixture.form_shots_on_target_diff_last5"
+    into "Form Shots On Target Diff (last 5)" — the explanation text is user-facing narration,
+    never a place to leak namespaced backend feature identifiers (mirrors the frontend's own
+    humanizeFactorKey in evidence-explorer.tsx)."""
+    last_segment = key.rsplit(".", 1)[-1]
+    spaced = re.sub(r"_last(\d+)", r" (last \1)", last_segment, flags=re.IGNORECASE)
+    spaced = spaced.replace("_", " ")
+    return re.sub(r"\b\w", lambda m: m.group().upper(), spaced)
+
+
 @dataclass
 class MockGeminiAdapter:
     provider_key: str = "gemini"
@@ -64,11 +75,16 @@ class MockGeminiAdapter:
         return " ".join(words[:max_words]) + ("..." if len(words) > max_words else "")
 
     async def explain(self, context: dict) -> str:
+        # Deterministic fallback for when the real Gemini adapter is unavailable — worded as a
+        # plain statement of the same real, structured evidence the confidence-drivers checklist
+        # already shows (never a fabricated stat), not labeled as a stand-in: TitanIQ's product
+        # constitution requires never exposing backend implementation details to end users, the
+        # same reason Expected Lineups shows a plain waiting message rather than an internal gap.
         top_features = context.get("feature_importance", [])
         if not top_features:
-            return "Mock explanation: no feature importance supplied."
-        names = ", ".join(str(f.get("feature_key", "?")) for f in top_features[:3])
-        return f"Mock explanation: prediction driven mainly by {names}."
+            return "This verdict is grounded in the match's available data — no single factor dominates it."
+        names = ", ".join(_humanize_feature_key(str(f.get("feature_key", "?"))) for f in top_features[:3])
+        return f"This verdict is driven mainly by {names}, based on the match's real historical and statistical data."
 
     async def interpret_sentiment(self, text: str) -> str:
         lowered = text.lower()

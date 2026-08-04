@@ -25,6 +25,12 @@ class _FakeRetrievalPort:
 
 
 @dataclass
+class _EmptyTeamNamesResolver:
+    async def team_names_for_match(self, subject_ref: str) -> tuple[str, ...]:
+        return ()
+
+
+@dataclass
 class _FakeTextIntelligenceProvider:
     provider_key: str = "fake"
     last_context: dict | None = None
@@ -49,6 +55,7 @@ def retrieval_service():
             modality="knowledge_graph", documents=(_document("knowledge_graph", "TeamA rivalry_with TeamB"),)
         ),
         ai_reports=_FakeRetrievalPort(modality="ai_reports", documents=()),
+        team_names=_EmptyTeamNamesResolver(),
     )
 
 

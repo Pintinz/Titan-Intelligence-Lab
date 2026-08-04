@@ -44,7 +44,7 @@ function withQuery(path: string, params?: Record<string, unknown>): string {
 
 const REQUEST_TIMEOUT_MS = 20_000
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function requestEnvelope<T>(path: string, init: RequestInit = {}): Promise<Envelope<T>> {
   const auth = await authHeader()
   let response: Response
   try {
@@ -75,16 +75,33 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new ApiError(response.status, detail)
   }
 
-  if (response.status === 204) return undefined as T
-  const envelope = (await response.json()) as Envelope<T>
+  if (response.status === 204) return { data: undefined as T, meta: {}, error: null }
+  return (await response.json()) as Envelope<T>
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const envelope = await requestEnvelope<T>(path, init)
   return envelope.data
 }
 
 export const api = {
   get: <T>(path: string, params?: Record<string, unknown>) => request<T>(withQuery(path, params)),
+  /** Like `get`, but keeps `meta` (pagination totals, counts) instead of discarding it — use this
+   * for any list endpoint a caller needs `meta.total`/`meta.has_more` from. */
+  getWithMeta: <T>(path: string, params?: Record<string, unknown>) => requestEnvelope<T>(withQuery(path, params)),
   post: <T>(path: string, body?: unknown, params?: Record<string, unknown>) =>
     request<T>(withQuery(path, params), {
       method: 'POST',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    }),
+  patch: <T>(path: string, body?: unknown, params?: Record<string, unknown>) =>
+    request<T>(withQuery(path, params), {
+      method: 'PATCH',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    }),
+  put: <T>(path: string, body?: unknown, params?: Record<string, unknown>) =>
+    request<T>(withQuery(path, params), {
+      method: 'PUT',
       body: body !== undefined ? JSON.stringify(body) : undefined,
     }),
   delete: <T>(path: string, body?: unknown, params?: Record<string, unknown>) =>

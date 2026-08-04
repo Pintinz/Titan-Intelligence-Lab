@@ -108,6 +108,9 @@ def _serialize_prediction(prediction: Prediction) -> dict:
         "status": prediction.status.value,
         "generated_at": prediction.generated_at.isoformat() if prediction.generated_at else None,
         "data_freshness": prediction.data_freshness.isoformat() if prediction.data_freshness else None,
+        "probability_distribution": prediction.probability_distribution,
+        "confidence_interval": list(prediction.confidence_interval) if prediction.confidence_interval else None,
+        "expected_error": prediction.expected_error,
     }
 
 

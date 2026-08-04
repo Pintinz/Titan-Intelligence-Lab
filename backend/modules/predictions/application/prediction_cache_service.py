@@ -27,11 +27,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
 
+from modules.alerts.domain.value_objects import AlertType
+from modules.alerts.ports.notifier import AlertNotifierPort
 from modules.features.domain.value_objects import EntityType
 from modules.predictions.application.prediction_engine import PredictionEngine
 from modules.predictions.domain.entities import Prediction, PredictionAudit
 from modules.predictions.domain.value_objects import AuditAction, PredictionAuditId, PredictionStatus
 from modules.predictions.ports.repositories import MarketRepositoryPort, PredictionAuditRepositoryPort, PredictionRepositoryPort
+from modules.watchlist.domain.value_objects import WatchlistEntityType
 
 
 def _ensure_aware(dt: datetime, reference: datetime) -> datetime:
@@ -56,6 +59,7 @@ class PredictionCacheService:
     predictions: PredictionRepositoryPort
     audits: PredictionAuditRepositoryPort
     cache_ttl_seconds: float = 300.0
+    alerts: AlertNotifierPort | None = None
 
     async def get_or_generate(
         self,
@@ -131,7 +135,8 @@ class PredictionCacheService:
         self, prediction: Prediction, confidence_threshold: float, actor: str, now: datetime
     ) -> Prediction:
         previous = await self.predictions.get_latest_for_subject(prediction.subject_ref, prediction.market_id)
-        if previous is not None and previous.status is PredictionStatus.PUBLISHED:
+        was_published = previous is not None and previous.status is PredictionStatus.PUBLISHED
+        if was_published:
             previous.status = PredictionStatus.SUPERSEDED
             await self.predictions.update(previous)
 
@@ -140,6 +145,16 @@ class PredictionCacheService:
 
         await self.predictions.record(prediction)
         await self._audit(AuditAction.GENERATED, actor, now, prediction)
+
+        if was_published and prediction.status is PredictionStatus.PUBLISHED and self.alerts is not None:
+            await self.alerts.notify_watchers(
+                WatchlistEntityType.FIXTURE,
+                prediction.subject_ref,
+                AlertType.PREDICTION_CHANGED,
+                "Prediction updated",
+                f"The prediction for {prediction.subject_ref} changed to {prediction.value}.",
+                now,
+            )
         return prediction
 
     async def _audit(

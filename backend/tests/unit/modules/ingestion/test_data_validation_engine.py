@@ -8,6 +8,7 @@ from modules.sports.ports.provider_gateway import (
     ProviderFixtureRecord,
     ProviderLineupRecord,
     ProviderLineupSlotRecord,
+    ProviderOddsRecord,
     ProviderPlayerRecord,
     ProviderStandingRecord,
     ProviderTeamRecord,
@@ -177,6 +178,29 @@ def test_lineup_with_invalid_role_fails():
     result = engine.validate_lineup(lineup)
     assert not result.is_valid
     assert any("invalid values" in issue for issue in result.issues)
+
+
+def test_valid_odds_passes():
+    result = engine.validate_odds(ProviderOddsRecord(fixture_ref=_ref(), home_win=2.1, draw=3.4, away_win=3.6))
+    assert result.is_valid
+
+
+def test_odds_with_only_two_outcomes_passes():
+    """A two-outcome sport (no draw) is still a valid record."""
+    result = engine.validate_odds(ProviderOddsRecord(fixture_ref=_ref(), home_win=1.8, draw=None, away_win=2.0))
+    assert result.is_valid
+
+
+def test_odds_at_or_below_1_0_fails():
+    result = engine.validate_odds(ProviderOddsRecord(fixture_ref=_ref(), home_win=1.0, draw=3.4, away_win=3.6))
+    assert not result.is_valid
+    assert any("invalid values" in issue for issue in result.issues)
+
+
+def test_odds_with_no_outcomes_populated_fails():
+    result = engine.validate_odds(ProviderOddsRecord(fixture_ref=_ref()))
+    assert not result.is_valid
+    assert any("missing values" in issue for issue in result.issues)
 
 
 def test_find_duplicate_refs_detects_repeats():

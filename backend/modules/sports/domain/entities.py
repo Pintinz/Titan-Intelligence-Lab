@@ -82,6 +82,7 @@ class Competition:
     tier: int | None = None
     version: int = 1
     provider_refs: tuple[ProviderRef, ...] = field(default_factory=tuple)
+    logo_url: str | None = None
 
 
 @dataclass
@@ -118,6 +119,7 @@ class Team:
     venue_id: VenueId | None = None
     version: int = 1
     provider_refs: tuple[ProviderRef, ...] = field(default_factory=tuple)
+    logo_url: str | None = None
 
 
 @dataclass
@@ -159,6 +161,8 @@ class Fixture:
     status: FixtureStatus = FixtureStatus.SCHEDULED
     version: int = 1
     provider_refs: tuple[ProviderRef, ...] = field(default_factory=tuple)
+    home_score: int | None = None
+    away_score: int | None = None
 
     def transition_to(self, target: FixtureStatus) -> "Fixture":
         if not is_valid_fixture_transition(self.status, target):
@@ -173,6 +177,8 @@ class Fixture:
             status=target,
             version=self.version,
             provider_refs=self.provider_refs,
+            home_score=self.home_score,
+            away_score=self.away_score,
         )
 
 

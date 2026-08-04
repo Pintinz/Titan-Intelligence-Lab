@@ -17,6 +17,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    Uuid,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -48,13 +49,27 @@ class ProviderModel(TimestampMixin, Base):
     monthly_quota_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cache_ttl_seconds: Mapped[int] = mapped_column(Integer, default=3600)
     poll_interval_seconds: Mapped[int] = mapped_column(Integer, default=300)
+    # Milestone 11B — Provider Registry connection/lifecycle metadata.
+    base_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    auth_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    auth_header_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    region: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    environment: Mapped[str] = mapped_column(String(32), default="production")
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=10)
+    retry_count: Mapped[int] = mapped_column(Integer, default=2)
+    retry_delay_seconds: Mapped[int] = mapped_column(Integer, default=1)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    capability_note: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    capability_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ProviderCredentialModel(TimestampMixin, Base):
     __tablename__ = "provider_credentials"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    provider_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("providers.id"), index=True)
+    provider_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("providers.id", ondelete="CASCADE"), index=True)
     label: Mapped[str] = mapped_column(String(128))
     encrypted_value: Mapped[str] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -69,9 +84,9 @@ class ProviderUsageRecordModel(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    provider_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("providers.id"), index=True)
+    provider_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("providers.id", ondelete="CASCADE"), index=True)
     credential_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("provider_credentials.id"), nullable=True, index=True
+        ForeignKey("provider_credentials.id", ondelete="CASCADE"), nullable=True, index=True
     )
     period: Mapped[str] = mapped_column(String(16))
     window_key: Mapped[str] = mapped_column(String(16), index=True)
@@ -86,7 +101,7 @@ class ProviderHealthCheckModel(Base):
     __tablename__ = "provider_health_checks"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    provider_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("providers.id"), index=True)
+    provider_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("providers.id", ondelete="CASCADE"), index=True)
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     success: Mapped[bool] = mapped_column(Boolean)
     latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -99,7 +114,7 @@ class ProviderHealthStateModel(Base):
 
     __tablename__ = "provider_health_state"
 
-    provider_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("providers.id"), primary_key=True)
+    provider_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("providers.id", ondelete="CASCADE"), primary_key=True)
     status: Mapped[str] = mapped_column(String(16), default="healthy")
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
     consecutive_successes: Mapped[int] = mapped_column(Integer, default=0)
@@ -115,7 +130,7 @@ class ProviderIncidentModel(TimestampMixin, Base):
     __tablename__ = "provider_incidents"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    provider_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("providers.id"), index=True)
+    provider_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("providers.id", ondelete="CASCADE"), index=True)
     severity: Mapped[str] = mapped_column(String(16))
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

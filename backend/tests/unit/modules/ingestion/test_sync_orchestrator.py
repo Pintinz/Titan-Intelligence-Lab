@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+import uuid
 from uuid import uuid4
 
 import pytest
@@ -9,7 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from modules.ingestion.application.data_quality_engine import IngestionQualityEngine
 from modules.ingestion.application.data_validation_engine import DataValidationEngine
 from modules.ingestion.application.entity_reconciliation_service import EntityReconciliationService
-from modules.ingestion.application.sync_orchestrator import SportNotReconciledError, SyncOrchestrator
+from modules.ingestion.application.sync_orchestrator import (
+    NoFixtureSourcePreferenceError,
+    SportNotReconciledError,
+    SyncOrchestrator,
+)
+from modules.ingestion.domain.entities import CompetitionFixtureSourcePreference, ProviderRefIndexEntry
 from modules.ingestion.domain.value_objects import EntityKind, SyncStatus, SyncTrigger, TimelineEventType
 from modules.ingestion.infrastructure.persistence.models import Base as IngestionBase
 from modules.ingestion.infrastructure.persistence.repositories import (
@@ -26,12 +32,13 @@ from modules.knowledge_graph.infrastructure.persistence.repositories import (
     SqlAlchemyKGNodeRepository,
 )
 from modules.sports.domain.entities import Team
-from modules.sports.domain.value_objects import ProviderRef, SeasonId, SportCode, TeamId
+from modules.sports.domain.value_objects import FixtureId, ProviderRef, SeasonId, SportCode, TeamId
 from modules.sports.infrastructure.persistence.models import Base as SportsBase
 from modules.sports.infrastructure.persistence.repositories import (
     SqlAlchemyCompetitionRepository,
     SqlAlchemyCountryRepository,
     SqlAlchemyFixtureRepository,
+    SqlAlchemyMatchRepository,
     SqlAlchemyLineupRepository,
     SqlAlchemyPlayerRepository,
     SqlAlchemySeasonRepository,
@@ -41,7 +48,14 @@ from modules.sports.infrastructure.persistence.repositories import (
     SqlAlchemyTeamStatisticsRepository,
     SqlAlchemyVenueRepository,
 )
-from modules.sports.ports.provider_gateway import ProviderCountryRecord, ProviderStandingRecord, ProviderTeamRecord
+from modules.sports.ports.provider_gateway import (
+    ProviderCountryRecord,
+    ProviderFixtureRecord,
+    ProviderOddsRecord,
+    ProviderStandingRecord,
+    ProviderTeamRecord,
+    ProviderTeamStatisticsRecord,
+)
 
 T0 = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
 
@@ -53,9 +67,13 @@ class FakeRouter:
     countries_to_return: list = field(default_factory=list)
     fixtures_to_return: list = field(default_factory=list)
     standings_to_return: list = field(default_factory=list)
+    odds_to_return: object = None
+    team_statistics_to_return: list = field(default_factory=list)
+    upcoming_fixtures_calls: list = field(default_factory=list)
+    upcoming_fixtures_to_return: list = field(default_factory=list)
     raise_on_fetch: Exception | None = None
 
-    async def fetch_teams(self, sport_code, competition_ref, now, *, low_priority=False):
+    async def fetch_teams(self, sport_code, competition_ref, now, *, low_priority=False, season_label=None):
         self.teams_by_call.append((sport_code, competition_ref))
         if self.raise_on_fetch:
             raise self.raise_on_fetch
@@ -75,6 +93,22 @@ class FakeRouter:
         if self.raise_on_fetch:
             raise self.raise_on_fetch
         return self.standings_to_return
+
+    async def fetch_odds(self, sport_code, fixture_ref, now, *, low_priority=True):
+        if self.raise_on_fetch:
+            raise self.raise_on_fetch
+        return self.odds_to_return
+
+    async def fetch_team_statistics(self, sport_code, fixture_ref, now, *, low_priority=True):
+        if self.raise_on_fetch:
+            raise self.raise_on_fetch
+        return self.team_statistics_to_return
+
+    async def fetch_upcoming_fixtures(self, sport_code, provider_key, competition_ref, season_label, now, *, low_priority=False):
+        self.upcoming_fixtures_calls.append((sport_code, provider_key, competition_ref, season_label))
+        if self.raise_on_fetch:
+            raise self.raise_on_fetch
+        return self.upcoming_fixtures_to_return
 
 
 @dataclass
@@ -119,6 +153,59 @@ def lock():
     return FakeLock()
 
 
+@dataclass
+class FakeOddsFeatureWriter:
+    calls: list = field(default_factory=list)
+
+    async def compute_and_write(self, fixture_id, odds, now):
+        self.calls.append((fixture_id, odds, now))
+        return ("football.market.overround",)
+
+
+@pytest.fixture
+def odds_writer():
+    return FakeOddsFeatureWriter()
+
+
+@pytest.fixture
+def orchestrator_with_odds_writer(session, router, lock, odds_writer):
+    kg = KnowledgeGraphPopulationService(
+        nodes=SqlAlchemyKGNodeRepository(session=session), edges=SqlAlchemyKGEdgeRepository(session=session)
+    )
+    reconciler = EntityReconciliationService(
+        sports=SqlAlchemySportRepository(session=session),
+        countries=SqlAlchemyCountryRepository(session=session),
+        competitions=SqlAlchemyCompetitionRepository(session=session),
+        seasons=SqlAlchemySeasonRepository(session=session),
+        venues=SqlAlchemyVenueRepository(session=session),
+        teams=SqlAlchemyTeamRepository(session=session),
+        players=SqlAlchemyPlayerRepository(session=session),
+        fixtures=SqlAlchemyFixtureRepository(session=session),
+        matches=SqlAlchemyMatchRepository(session=session),
+        team_statistics=SqlAlchemyTeamStatisticsRepository(session=session),
+        lineups=SqlAlchemyLineupRepository(session=session),
+        standings=SqlAlchemyStandingRepository(session=session),
+        ref_index=SqlAlchemyProviderRefIndexRepository(session=session),
+        kg=kg,
+        timeline=SqlAlchemyTimelineEventRepository(session=session),
+    )
+    return SyncOrchestrator(
+        router=router,
+        validator=DataValidationEngine(),
+        quality=IngestionQualityEngine(
+            sync_runs=SqlAlchemySyncRunRepository(session=session),
+            reports=SqlAlchemyDataQualityReportRepository(session=session),
+        ),
+        reconciler=reconciler,
+        sports=SqlAlchemySportRepository(session=session),
+        checkpoints=SqlAlchemySyncCheckpointRepository(session=session),
+        sync_runs=SqlAlchemySyncRunRepository(session=session),
+        timeline=SqlAlchemyTimelineEventRepository(session=session),
+        lock=lock,
+        odds_feature_writers={"football": odds_writer},
+    )
+
+
 @pytest.fixture
 def orchestrator(session, router, lock):
     kg = KnowledgeGraphPopulationService(
@@ -133,6 +220,7 @@ def orchestrator(session, router, lock):
         teams=SqlAlchemyTeamRepository(session=session),
         players=SqlAlchemyPlayerRepository(session=session),
         fixtures=SqlAlchemyFixtureRepository(session=session),
+        matches=SqlAlchemyMatchRepository(session=session),
         team_statistics=SqlAlchemyTeamStatisticsRepository(session=session),
         lineups=SqlAlchemyLineupRepository(session=session),
         standings=SqlAlchemyStandingRepository(session=session),
@@ -154,6 +242,144 @@ def orchestrator(session, router, lock):
         timeline=SqlAlchemyTimelineEventRepository(session=session),
         lock=lock,
     )
+
+
+@dataclass
+class FakeFixtureSourceRepo:
+    store: dict = field(default_factory=dict)
+
+    async def get_by_competition(self, competition_id):
+        return self.store.get(competition_id)
+
+    async def upsert(self, preference):
+        self.store[preference.competition_id] = preference
+        return preference
+
+    async def delete(self, competition_id):
+        self.store.pop(competition_id, None)
+
+    async def list_all(self):
+        return list(self.store.values())
+
+
+@pytest.fixture
+def fixture_source_preferences():
+    return FakeFixtureSourceRepo()
+
+
+@pytest.fixture
+def orchestrator_with_fixture_source(session, router, lock, fixture_source_preferences):
+    kg = KnowledgeGraphPopulationService(
+        nodes=SqlAlchemyKGNodeRepository(session=session), edges=SqlAlchemyKGEdgeRepository(session=session)
+    )
+    reconciler = EntityReconciliationService(
+        sports=SqlAlchemySportRepository(session=session),
+        countries=SqlAlchemyCountryRepository(session=session),
+        competitions=SqlAlchemyCompetitionRepository(session=session),
+        seasons=SqlAlchemySeasonRepository(session=session),
+        venues=SqlAlchemyVenueRepository(session=session),
+        teams=SqlAlchemyTeamRepository(session=session),
+        players=SqlAlchemyPlayerRepository(session=session),
+        fixtures=SqlAlchemyFixtureRepository(session=session),
+        matches=SqlAlchemyMatchRepository(session=session),
+        team_statistics=SqlAlchemyTeamStatisticsRepository(session=session),
+        lineups=SqlAlchemyLineupRepository(session=session),
+        standings=SqlAlchemyStandingRepository(session=session),
+        ref_index=SqlAlchemyProviderRefIndexRepository(session=session),
+        kg=kg,
+        timeline=SqlAlchemyTimelineEventRepository(session=session),
+    )
+    return SyncOrchestrator(
+        router=router,
+        validator=DataValidationEngine(),
+        quality=IngestionQualityEngine(
+            sync_runs=SqlAlchemySyncRunRepository(session=session),
+            reports=SqlAlchemyDataQualityReportRepository(session=session),
+        ),
+        reconciler=reconciler,
+        sports=SqlAlchemySportRepository(session=session),
+        checkpoints=SqlAlchemySyncCheckpointRepository(session=session),
+        sync_runs=SqlAlchemySyncRunRepository(session=session),
+        timeline=SqlAlchemyTimelineEventRepository(session=session),
+        lock=lock,
+        fixture_source_preferences=fixture_source_preferences,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_upcoming_fixtures_raises_when_orchestrator_not_wired_with_repository(orchestrator):
+    with pytest.raises(NoFixtureSourcePreferenceError):
+        await orchestrator.sync_upcoming_fixtures("football", "comp-1", "2026", SeasonId(uuid4()), T0)
+
+
+@pytest.mark.asyncio
+async def test_sync_upcoming_fixtures_raises_when_no_preference_configured(orchestrator_with_fixture_source):
+    with pytest.raises(NoFixtureSourcePreferenceError):
+        await orchestrator_with_fixture_source.sync_upcoming_fixtures("football", "comp-1", "2026", SeasonId(uuid4()), T0)
+
+
+@pytest.mark.asyncio
+async def test_sync_upcoming_fixtures_uses_preference_to_resolve_provider_and_reconciles(
+    orchestrator_with_fixture_source, session, router, fixture_source_preferences
+):
+    home = await _seed_team(orchestrator_with_fixture_source, session, "t1")
+    away, _ = await orchestrator_with_fixture_source.reconciler.reconcile_team(
+        ProviderTeamRecord(external_ref=ProviderRef("mock", "t2"), name="Chelsea", short_name="CHE", country="England"),
+        home.sport_id, T0,
+    )
+    await session.commit()
+    # Simulate a confirmed cross-provider team mapping (CrossProviderTeamMappingService.confirm_mappings).
+    await orchestrator_with_fixture_source.reconciler.ref_index.upsert(
+        ProviderRefIndexEntry("football_data_org", "fd-t1", EntityKind.TEAM, str(home.id.value))
+    )
+    await orchestrator_with_fixture_source.reconciler.ref_index.upsert(
+        ProviderRefIndexEntry("football_data_org", "fd-t2", EntityKind.TEAM, str(away.id.value))
+    )
+    await session.commit()
+
+    fixture_source_preferences.store["comp-1"] = CompetitionFixtureSourcePreference(
+        competition_id="comp-1", preferred_provider_key="football_data_org", provider_competition_ref="PL",
+    )
+    router.upcoming_fixtures_to_return = [
+        ProviderFixtureRecord(
+            external_ref=ProviderRef("football_data_org", "fd-fx1"),
+            home_team_ref=ProviderRef("football_data_org", "fd-t1"),
+            away_team_ref=ProviderRef("football_data_org", "fd-t2"),
+            scheduled_at=T0, competition_ref="PL", season_label="2026",
+        )
+    ]
+
+    run = await orchestrator_with_fixture_source.sync_upcoming_fixtures("football", "comp-1", "2026", SeasonId(uuid4()), T0)
+    await session.commit()
+
+    assert run.status is SyncStatus.SUCCEEDED
+    assert run.records_created == 1
+    assert router.upcoming_fixtures_calls == [("football", "football_data_org", "PL", "2026")]
+
+
+@pytest.mark.asyncio
+async def test_sync_upcoming_fixtures_uses_a_scope_key_distinct_from_sync_fixtures(
+    orchestrator_with_fixture_source, session, router, fixture_source_preferences
+):
+    """Different checkpoint/lock scope than the default sync_fixtures for the same competition —
+    otherwise the two sync paths would incorrectly skip/block each other via the incremental-skip
+    or distributed-lock machinery `_run_sync` shares between every sync_* method."""
+    await _seed_sport(orchestrator_with_fixture_source, session)
+    fixture_source_preferences.store["comp-1"] = CompetitionFixtureSourcePreference(
+        competition_id="comp-1", preferred_provider_key="football_data_org", provider_competition_ref="PL",
+    )
+    router.fixtures_to_return = []
+    router.upcoming_fixtures_to_return = []
+
+    default_run = await orchestrator_with_fixture_source.sync_fixtures("football", "comp-1", "2026", SeasonId(uuid4()), T0)
+    await session.commit()
+    upcoming_run = await orchestrator_with_fixture_source.sync_upcoming_fixtures(
+        "football", "comp-1", "2026", SeasonId(uuid4()), T0
+    )
+    await session.commit()
+
+    assert default_run is not None
+    assert upcoming_run is not None  # not skipped by sync_fixtures' checkpoint for the same competition
 
 
 async def _seed_sport(orchestrator, session):
@@ -420,6 +646,140 @@ async def test_sync_standings_rejects_records_for_unreconciled_teams(orchestrato
 
     run = await orchestrator.sync_standings("football", "39", "2026", season_id, T0)
     await session.commit()
+
+    assert run.status is SyncStatus.PARTIAL
+    assert run.records_rejected == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_fixtures_rejects_records_referencing_unreconciled_teams(orchestrator, session, router):
+    await _seed_sport(orchestrator, session)
+    season_id = SeasonId(uuid4())
+    router.fixtures_to_return = [
+        ProviderFixtureRecord(
+            external_ref=ProviderRef("mock", "f1"),
+            home_team_ref=ProviderRef("mock", "unknown-home"),
+            away_team_ref=ProviderRef("mock", "unknown-away"),
+            scheduled_at=T0,
+            competition_ref="39",
+            season_label="2026",
+        ),
+    ]
+
+    run = await orchestrator.sync_fixtures("football", "39", "2026", season_id, T0)
+    await session.commit()
+
+    assert run.status is SyncStatus.PARTIAL
+    assert run.records_rejected == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_odds_writes_features_when_a_writer_is_registered(orchestrator_with_odds_writer, router, odds_writer):
+    fixture_ref = ProviderRef("mock", "fx1")
+    router.odds_to_return = ProviderOddsRecord(fixture_ref=fixture_ref, home_win=2.1, draw=3.4, away_win=3.6)
+
+    run = await orchestrator_with_odds_writer.sync_odds_for_fixture("football", fixture_ref, "fixture-id-1", T0)
+
+    assert run.status is SyncStatus.SUCCEEDED
+    assert run.records_fetched == 1
+    assert len(odds_writer.calls) == 1
+    assert odds_writer.calls[0][0] == "fixture-id-1"
+
+
+@pytest.mark.asyncio
+async def test_sync_odds_rejects_invalid_record_and_skips_writer(orchestrator_with_odds_writer, router, odds_writer):
+    fixture_ref = ProviderRef("mock", "fx1")
+    router.odds_to_return = ProviderOddsRecord(fixture_ref=fixture_ref, home_win=1.0, draw=3.4, away_win=3.6)  # <=1.0 is invalid
+
+    run = await orchestrator_with_odds_writer.sync_odds_for_fixture("football", fixture_ref, "fixture-id-1", T0)
+
+    assert run.status is SyncStatus.PARTIAL
+    assert run.records_rejected == 1
+    assert odds_writer.calls == []
+
+
+@pytest.mark.asyncio
+async def test_sync_odds_no_line_available_yet_succeeds_with_zero_records(orchestrator_with_odds_writer, router, odds_writer):
+    fixture_ref = ProviderRef("mock", "fx1")
+    router.odds_to_return = None
+
+    run = await orchestrator_with_odds_writer.sync_odds_for_fixture("football", fixture_ref, "fixture-id-1", T0)
+
+    assert run.status is SyncStatus.SUCCEEDED
+    assert run.records_fetched == 0
+    assert odds_writer.calls == []
+
+
+@pytest.mark.asyncio
+async def test_sync_odds_skips_write_silently_when_no_writer_registered_for_sport(orchestrator, router):
+    """`orchestrator` (no odds_feature_writers) exercises the default empty-dict field — this
+    must not crash, matching EntityReconciliationService's form_differential_calculators
+    posture for an unregistered sport."""
+    fixture_ref = ProviderRef("mock", "fx1")
+    router.odds_to_return = ProviderOddsRecord(fixture_ref=fixture_ref, home_win=2.1, draw=3.4, away_win=3.6)
+
+    run = await orchestrator.sync_odds_for_fixture("football", fixture_ref, "fixture-id-1", T0)
+
+    assert run.status is SyncStatus.SUCCEEDED
+    assert run.records_created == 1
+
+
+async def _seed_team(orchestrator, session, external_id="t1"):
+    sport, _ = await orchestrator.reconciler.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    team, _ = await orchestrator.reconciler.reconcile_team(
+        ProviderTeamRecord(external_ref=ProviderRef("mock", external_id), name="Arsenal", short_name="ARS", country="England"),
+        sport.id, T0,
+    )
+    await session.commit()
+    return team
+
+
+_FIXTURE_ID = str(uuid4())
+
+
+@pytest.mark.asyncio
+async def test_sync_team_statistics_creates_match_and_statistics(orchestrator, session, router):
+    await _seed_team(orchestrator, session)
+    fixture_ref = ProviderRef("mock", "fx1")
+    router.team_statistics_to_return = [
+        ProviderTeamStatisticsRecord(fixture_ref=fixture_ref, team_ref=ProviderRef("mock", "t1"), stat_set={"possession_pct": 55.0}),
+    ]
+
+    run = await orchestrator.sync_team_statistics_for_fixture("football", fixture_ref, _FIXTURE_ID, T0)
+    await session.commit()
+
+    assert run.status is SyncStatus.SUCCEEDED
+    assert run.records_fetched == 1
+    assert run.records_created == 1
+    match = await orchestrator.reconciler.matches.get_by_fixture(FixtureId(uuid.UUID(_FIXTURE_ID)))
+    assert match is not None
+
+
+@pytest.mark.asyncio
+async def test_sync_team_statistics_rejects_invalid_record(orchestrator, session, router):
+    await _seed_team(orchestrator, session)
+    fixture_ref = ProviderRef("mock", "fx1")
+    router.team_statistics_to_return = [
+        ProviderTeamStatisticsRecord(fixture_ref=fixture_ref, team_ref=ProviderRef("mock", "t1"), stat_set={}),
+    ]
+
+    run = await orchestrator.sync_team_statistics_for_fixture("football", fixture_ref, _FIXTURE_ID, T0)
+
+    assert run.status is SyncStatus.PARTIAL
+    assert run.records_rejected == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_team_statistics_rejects_when_team_not_reconciled(orchestrator, session, router):
+    await orchestrator.reconciler.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    fixture_ref = ProviderRef("mock", "fx1")
+    router.team_statistics_to_return = [
+        ProviderTeamStatisticsRecord(fixture_ref=fixture_ref, team_ref=ProviderRef("mock", "unknown-team"), stat_set={"possession_pct": 55.0}),
+    ]
+
+    run = await orchestrator.sync_team_statistics_for_fixture("football", fixture_ref, _FIXTURE_ID, T0)
 
     assert run.status is SyncStatus.PARTIAL
     assert run.records_rejected == 1

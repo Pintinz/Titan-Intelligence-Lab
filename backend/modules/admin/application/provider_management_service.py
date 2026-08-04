@@ -5,6 +5,7 @@ these methods; it does not talk to repositories or the vault directly.
 
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -28,6 +29,20 @@ class ProviderNotFoundError(KeyError):
     pass
 
 
+class EnvironmentVariableNotSetError(ValueError):
+    pass
+
+
+def mask_credential(plaintext: str) -> str:
+    """Renders a plaintext secret as ``****...<last 4 chars>`` (docs/security.md §2 example) —
+    called only ever server-side, immediately after a controlled ``vault.decrypt``, and the
+    plaintext is discarded the instant this returns. Never logged, never the return value of an
+    API endpoint on its own."""
+    if len(plaintext) <= 4:
+        return "*" * len(plaintext)
+    return "*" * (len(plaintext) - 4) + plaintext[-4:]
+
+
 @dataclass
 class ProviderManagementService:
     providers: ProviderRepositoryPort
@@ -43,6 +58,16 @@ class ProviderManagementService:
         priority: int = 100,
         daily_quota_limit: int | None = None,
         monthly_quota_limit: int | None = None,
+        base_url: str | None = None,
+        auth_type: str | None = None,
+        auth_header_name: str | None = None,
+        region: str | None = None,
+        version: str | None = None,
+        environment: str = "production",
+        timeout_seconds: int = 10,
+        retry_count: int = 2,
+        retry_delay_seconds: int = 1,
+        created_by: str | None = None,
     ) -> ProviderDefinition:
         if await self.providers.get_by_key(key) is not None:
             raise ProviderAlreadyRegisteredError(f"provider '{key}' is already registered")
@@ -55,6 +80,17 @@ class ProviderManagementService:
             priority=priority,
             daily_quota_limit=daily_quota_limit,
             monthly_quota_limit=monthly_quota_limit,
+            base_url=base_url,
+            auth_type=auth_type,
+            auth_header_name=auth_header_name,
+            region=region,
+            version=version,
+            environment=environment,
+            timeout_seconds=timeout_seconds,
+            retry_count=retry_count,
+            retry_delay_seconds=retry_delay_seconds,
+            created_by=created_by,
+            updated_by=created_by,
         )
         return await self.providers.upsert(provider)
 
@@ -144,3 +180,102 @@ class ProviderManagementService:
 
     async def usable_credentials(self, provider_id: ProviderId) -> list[ProviderCredential]:
         return [c for c in await self.credentials.list_by_provider(provider_id) if c.is_active]
+
+    async def masked_credentials(self, provider_id: ProviderId) -> list[tuple[ProviderCredential, str]]:
+        """Every credential for a provider paired with a masked display value — the only form a
+        credential's value is ever allowed to leave this service in (docs/security.md §2)."""
+        credentials = await self.credentials.list_by_provider(provider_id)
+        return [(c, mask_credential(self.vault.decrypt(c.encrypted_value))) for c in credentials]
+
+    async def update_provider(
+        self,
+        provider_id: ProviderId,
+        *,
+        updated_by: str | None = None,
+        name: str | None = None,
+        priority: int | None = None,
+        daily_quota_limit: int | None = None,
+        monthly_quota_limit: int | None = None,
+        base_url: str | None = None,
+        auth_type: str | None = None,
+        auth_header_name: str | None = None,
+        region: str | None = None,
+        version: str | None = None,
+        environment: str | None = None,
+        timeout_seconds: int | None = None,
+        retry_count: int | None = None,
+        retry_delay_seconds: int | None = None,
+        cache_ttl_seconds: int | None = None,
+        poll_interval_seconds: int | None = None,
+    ) -> ProviderDefinition:
+        """Patch-style update — every argument left at its default is a no-op on that field, so
+        callers (the PATCH endpoint) only need to pass what actually changed."""
+        provider = await self._require_provider(provider_id)
+        if name is not None:
+            provider.name = name
+        if priority is not None:
+            provider.priority = priority
+        if daily_quota_limit is not None:
+            provider.daily_quota_limit = daily_quota_limit
+        if monthly_quota_limit is not None:
+            provider.monthly_quota_limit = monthly_quota_limit
+        if base_url is not None:
+            provider.base_url = base_url
+        if auth_type is not None:
+            provider.auth_type = auth_type
+        if auth_header_name is not None:
+            provider.auth_header_name = auth_header_name
+        if region is not None:
+            provider.region = region
+        if version is not None:
+            provider.version = version
+        if environment is not None:
+            provider.environment = environment
+        if timeout_seconds is not None:
+            provider.timeout_seconds = timeout_seconds
+        if retry_count is not None:
+            provider.retry_count = retry_count
+        if retry_delay_seconds is not None:
+            provider.retry_delay_seconds = retry_delay_seconds
+        if cache_ttl_seconds is not None:
+            provider.cache_ttl_seconds = cache_ttl_seconds
+        if poll_interval_seconds is not None:
+            provider.poll_interval_seconds = poll_interval_seconds
+        if updated_by is not None:
+            provider.updated_by = updated_by
+        return await self.providers.upsert(provider)
+
+    async def delete_provider(self, provider_id: ProviderId) -> None:
+        await self._require_provider(provider_id)  # 404s early rather than silently no-op'ing
+        await self.providers.delete(provider_id)
+
+    async def import_from_env(
+        self,
+        env_var_name: str,
+        key: str,
+        name: str,
+        category: ProviderCategory,
+        *,
+        now: datetime,
+        credential_label: str = "imported-from-env",
+        created_by: str | None = None,
+    ) -> tuple[ProviderDefinition, ProviderCredential]:
+        """One-time migration path for an admin who already has a real key sitting in `.env`
+        (docs/admin_center.md — Milestone 11B). Reads the named environment variable exactly
+        once, encrypts it into the vault, and registers (or re-credentials) the provider — from
+        that point on the DB is the only source of truth; nothing keeps reading the env var on
+        subsequent requests. Deliberately NOT a standing runtime fallback: this system's existing
+        design (SportsProviderRouter._resolve_adapter) treats "no usable DB credential" as "use
+        the mock adapter," not "read a raw env var" — a permanent env-read path would add a
+        second, less secure credential path that bypasses the vault entirely.
+        """
+        plaintext = os.environ.get(env_var_name)
+        if not plaintext:
+            raise EnvironmentVariableNotSetError(f"environment variable '{env_var_name}' is not set")
+
+        provider = await self.providers.get_by_key(key)
+        if provider is None:
+            provider = await self.register_provider(key, name, category, created_by=created_by)
+
+        credential = await self.add_credential(provider.id, credential_label, plaintext, now=now)
+        return provider, credential

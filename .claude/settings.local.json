@@ -173,7 +173,14 @@
       "Bash(echo \"exit=$?\")",
       "Bash(.venv/Scripts/python.exe scripts/seed_local_market.py)",
       "Bash(npx vite *)",
-      "Bash(npx vitest *)"
+      "Bash(npx vitest *)",
+      "Bash(git push *)",
+      "Bash(node scripts/context.mjs --target C:\\\\Users\\\\hp\\\\OneDrive\\\\Desktop\\\\TitanIQ\\\\frontend\\\\src\\\\pages)",
+      "PowerShell(cd $env:USERPROFILE\\\\.claude\\\\skills\\\\impeccable; node scripts/context.mjs --target \"$env:USERPROFILE\\\\OneDrive\\\\Desktop\\\\TitanIQ\\\\frontend\\\\src\\\\pages\")",
+      "mcp__visualize__read_me",
+      "mcp__visualize__show_widget",
+      "PowerShell(cd \"$env:USERPROFILE\\\\OneDrive\\\\Desktop\\\\TitanIQ\"; node \"$env:USERPROFILE\\\\.claude\\\\skills\\\\impeccable\\\\scripts\\\\detect.mjs\" --json frontend/src/components/auth frontend/src/index.css 2>&1 | ConvertFrom-Json -ErrorAction SilentlyContinue)",
+      "PowerShell(cd \"$env:USERPROFILE\\\\OneDrive\\\\Desktop\\\\TitanIQ\"; node \"$env:USERPROFILE\\\\.claude\\\\skills\\\\impeccable\\\\scripts\\\\context.mjs\" --target frontend)"
     ]
   }
 }

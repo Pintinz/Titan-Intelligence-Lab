@@ -6,10 +6,16 @@ export const loginSchema = z.object({
 })
 export type LoginValues = z.infer<typeof loginSchema>
 
-export const signupSchema = z.object({
-  email: z.string().email('Enter a valid email address'),
-  password: z.string().min(8, 'Use at least 8 characters'),
-})
+export const signupSchema = z
+  .object({
+    email: z.string().email('Enter a valid email address'),
+    password: z.string().min(8, 'Use at least 8 characters'),
+    confirmPassword: z.string(),
+  })
+  .refine((data) => data.password === data.confirmPassword, {
+    message: 'Passwords do not match',
+    path: ['confirmPassword'],
+  })
 export type SignupValues = z.infer<typeof signupSchema>
 
 export const magicLinkSchema = z.object({

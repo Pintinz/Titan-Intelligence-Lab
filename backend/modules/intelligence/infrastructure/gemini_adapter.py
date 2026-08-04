@@ -53,8 +53,20 @@ class GeminiAdapter:
             response.raise_for_status()
             data = response.json()
             return data["candidates"][0]["content"]["parts"][0]["text"]
-        except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
-            raise GeminiRequestError(f"Gemini request failed: {exc}") from exc
+        except httpx.HTTPStatusError as exc:
+            # Built from status_code/response text only, never str(exc) — the API key travels as
+            # a URL query param (line above), and httpx's default HTTPStatusError message embeds
+            # the full request URL, which would otherwise leak the credential into this (and every
+            # caller's) error message/logs.
+            raise GeminiRequestError(
+                f"Gemini request failed: HTTP {exc.response.status_code} — {exc.response.text[:300]}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise GeminiRequestError(f"Gemini request failed: {type(exc).__name__} (network/transport error)") from exc
+        except (KeyError, IndexError, ValueError) as exc:
+            # Parsing errors come from the response body only, never the request URL — safe to
+            # include str(exc) here.
+            raise GeminiRequestError(f"Gemini returned an unexpected response shape: {exc}") from exc
 
     async def extract_events(self, text: str) -> list[ExtractedEvent]:
         prompt = (

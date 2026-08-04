@@ -11,11 +11,15 @@ from modules.features.application.feature_registration_service import FeatureReg
 from modules.features.application.feature_store_service import FeatureStoreService
 from modules.predictions.application.feature_market_mapping_service import FeatureMarketMappingService
 from modules.predictions.application.market_registry_service import MarketRegistryService
-from modules.predictions.application.windowed_feature_engineering_service import football_form_calculator
-from modules.predictions.domain.value_objects import MarketStatus
+from modules.predictions.application.windowed_feature_engineering_service import (
+    football_fixture_expected_goals_calculator,
+    football_fixture_stat_differential_calculators,
+    football_form_calculator,
+)
+from modules.predictions.domain.value_objects import MarketKind, MarketStatus, OutcomeType
 from modules.predictions.football.market_seeding import MARKETS, SINGLE_RECORD_FEATURES, FootballMarketSeeder
-from modules.sports.domain.entities import TeamStatistics
-from modules.sports.domain.value_objects import EntityId, MatchId, TeamId
+from modules.sports.domain.entities import Fixture, TeamStatistics
+from modules.sports.domain.value_objects import EntityId, FixtureId, FixtureStatus, MatchId, SeasonId, TeamId
 
 T0 = datetime(2026, 7, 26, tzinfo=timezone.utc)
 
@@ -104,18 +108,46 @@ def mapping_service(feature_mapping_repo, market_repo, feature_definition_repo):
     )
 
 
+@dataclass
+class InMemoryFixtureRepository:
+    store: list = field(default_factory=list)  # list[Fixture]
+
+    def add_completed(self, home_team_id, away_team_id, home_score, away_score, scheduled_at):
+        self.store.append(
+            Fixture(
+                id=FixtureId(uuid4()), season_id=SeasonId(uuid4()), home_team_id=home_team_id,
+                away_team_id=away_team_id, venue_id=None, scheduled_at=scheduled_at,
+                status=FixtureStatus.COMPLETED, home_score=home_score, away_score=away_score,
+            )
+        )
+
+    async def list_recent_by_team(self, team_id, before, limit=10):
+        matches = [
+            f for f in sorted(self.store, key=lambda f: f.scheduled_at, reverse=True)
+            if (f.home_team_id == team_id or f.away_team_id == team_id) and f.scheduled_at < before
+        ]
+        return matches[:limit]
+
+
 @pytest.fixture
 def team_statistics_repo():
     return InMemoryTeamStatisticsRepository()
 
 
 @pytest.fixture
-def seeder(registration, store, market_registry, mapping_service, team_statistics_repo):
+def fixtures_repo():
+    return InMemoryFixtureRepository()
+
+
+@pytest.fixture
+def seeder(registration, store, market_registry, mapping_service, team_statistics_repo, fixtures_repo):
     return FootballMarketSeeder(
         registration=registration,
         markets=market_registry,
         mappings=mapping_service,
         windowed_calculator=football_form_calculator(registration, store, team_statistics_repo),
+        differential_calculators=football_fixture_stat_differential_calculators(registration, store, team_statistics_repo),
+        expected_goals_calculator=football_fixture_expected_goals_calculator(registration, store, fixtures_repo),
     )
 
 
@@ -161,6 +193,92 @@ async def test_seed_maps_every_declared_required_feature(seeder, feature_mapping
         market = await market_repo.get_by_key(spec["market_key"])
         mapped_keys = {m.feature_key for m in await feature_mapping_repo.list_by_market(market.id)}
         assert mapped_keys == set(spec["required_features"])
+
+
+@pytest.mark.asyncio
+async def test_seed_applies_conservative_weights_to_new_stat_differential_features(
+    seeder, feature_mapping_repo, market_repo
+):
+    """The new possession/shots_total/corners/fouls/cards features (2026-08-03) must not get the
+    weight=1.0 default every other required feature gets — at their natural raw-stat scale that
+    would swamp the existing calibrated implied-probability/shots-on-target signal in the
+    weighted-sum predictors. football.both_teams_to_score is a representative market: it carries
+    both an original feature (shots_on_target, unweighted) and all five new ones."""
+    from modules.predictions.football.market_seeding import NEW_STAT_FEATURE_WEIGHTS
+
+    await seeder.seed(T0)
+
+    market = await market_repo.get_by_key("football.both_teams_to_score")
+    mappings = {m.feature_key: m.weight for m in await feature_mapping_repo.list_by_market(market.id)}
+
+    assert mappings["football.fixture.form_shots_on_target_diff_last5"] == 1.0
+    for feature_key, expected_weight in NEW_STAT_FEATURE_WEIGHTS.items():
+        assert mappings[feature_key] == pytest.approx(expected_weight)
+        assert expected_weight < 1.0
+
+
+@pytest.mark.asyncio
+async def test_seed_marks_new_stat_differential_features_optional(seeder, feature_mapping_repo, market_repo):
+    """Regression test for a real bug found live-verifying this feature: a fixture whose
+    TeamStatistics predate cards support (or that simply has fewer than 5 prior matches of
+    history for one team) has no value at all for one of the five new stat-differential
+    features — not a zero, an absent key. If these were `is_required=True` (the mistake this
+    guards against), `PredictionContextBuilder` would raise `MissingRequiredFeatureError` and
+    block generation entirely for any such fixture, defeating the whole "fine-tune when
+    available" point of adding them. Only the original shots_on_target differential — which
+    every fixture in dev.db already has — stays required."""
+    from modules.predictions.football.market_seeding import _NEW_STAT_DIFFERENTIAL_FEATURES
+
+    await seeder.seed(T0)
+
+    market = await market_repo.get_by_key("football.both_teams_to_score")
+    mappings = {m.feature_key: m.is_required for m in await feature_mapping_repo.list_by_market(market.id)}
+
+    assert mappings["football.fixture.form_shots_on_target_diff_last5"] is True
+    for feature_key in _NEW_STAT_DIFFERENTIAL_FEATURES:
+        assert mappings[feature_key] is False
+
+
+@pytest.mark.asyncio
+async def test_seed_registers_match_winner_as_home_draw_away_kind(seeder, market_repo):
+    """Milestone 9.2 Phase 3 — the first market registered with the genuinely 3-way
+    MarketKind.HOME_DRAW_AWAY, backed by WeightedOrdinalPredictor rather than a relabeled binary."""
+    await seeder.seed(T0)
+
+    market = await market_repo.get_by_key("football.match_winner")
+    assert market is not None
+    assert market.market_kind is MarketKind.HOME_DRAW_AWAY
+    assert market.status is MarketStatus.PRODUCTION
+
+
+@pytest.mark.asyncio
+async def test_seed_pulls_real_outcome_contract_from_the_catalog(seeder, market_repo):
+    """Every seeded market's outcome_type/allowed_values/resolver_key comes from Milestone 9.2
+    Phase 1's MARKET_OUTCOME_CATALOG (domain/market_outcome_registry.py), not invented here."""
+    await seeder.seed(T0)
+
+    match_winner = await market_repo.get_by_key("football.match_winner")
+    assert match_winner.outcome_type is OutcomeType.HOME_DRAW_AWAY
+    assert set(match_winner.allowed_values) == {"HOME_WIN", "DRAW", "AWAY_WIN"}
+    assert match_winner.resolver_key == "football.match_winner"
+
+    both_teams_to_score = await market_repo.get_by_key("football.both_teams_to_score")
+    assert both_teams_to_score.resolver_key == "football.both_teams_to_score"
+
+    # first_half_winner has a real catalog entry (2026-08-02 expansion) specifying its 3-way
+    # label space — but still no resolver_key, honestly: no sub-match score data is ingested yet
+    # to actually evaluate it.
+    first_half_winner = await market_repo.get_by_key("football.first_half_winner")
+    assert first_half_winner.outcome_type is OutcomeType.HOME_DRAW_AWAY
+    assert set(first_half_winner.allowed_values) == {"HOME_WIN", "DRAW", "AWAY_WIN"}
+    assert first_half_winner.resolver_key is None
+
+    # home_clean_sheet has a real catalog entry AND a real resolver (computable from the final
+    # score alone) — the 2026-08-02 expansion's fully-resolved shape.
+    home_clean_sheet = await market_repo.get_by_key("football.home_clean_sheet")
+    assert home_clean_sheet.outcome_type is OutcomeType.BINARY_YES_NO
+    assert set(home_clean_sheet.allowed_values) == {"YES", "NO"}
+    assert home_clean_sheet.resolver_key == "football.home_clean_sheet"
 
 
 @pytest.mark.asyncio

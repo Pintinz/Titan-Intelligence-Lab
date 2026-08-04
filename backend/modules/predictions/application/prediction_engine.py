@@ -8,6 +8,18 @@ thin wrapper's job on top of this engine (Milestone 9 task #134's Prediction Cac
 Audit services) — the same "engine computes, a service on top persists" split already used by
 `ConfidenceEngine.compute()` and `ExplainabilityEngine.explain()`.
 
+Audit finding (2026-08-02): `generate()` previously always resolved its predictor from the
+generic `PredictorRegistry` (the 3 weighted-formula strategies), ignoring `context.model`
+entirely except as bookkeeping metadata stamped onto the resulting `Prediction` — even after
+`AutomaticModelSelectionService` correctly trains and registers a real Challenger, and a human
+promotes it to Champion, nothing ever served it. `_resolve_predictor` now prefers a real trained
+model — loaded via `ModelLoaderService` and wrapped in `TrainedModelPredictor` — whenever the
+market's Champion has a real `artifact_ref`, falling back to the `PredictorRegistry` exactly as
+before for every market whose Champion is a placeholder (no artifact, e.g. the legacy
+`football.match_result.heuristic` row) or when `model_loader` isn't wired at all. Any failure
+loading/deserializing a real artifact falls back the same way — an artifact problem must never
+break prediction generation when a safe formula-based path exists.
+
 Three of the six cross-module confidence factors `PredictionContextBuilder` deliberately doesn't
 gather are computed here from real, already-available signals, each with a documented proxy for
 the "not enough history yet" case (same posture as every other honestly-scoped v1 metric in this
@@ -44,11 +56,19 @@ from modules.intelligence.application.intelligence_retrieval_service import Inte
 from modules.intelligence.ports.retrieval import IntelligenceRetrievalDocument
 from modules.predictions.application.confidence_engine import ConfidenceEngine, ConfidenceInputs
 from modules.predictions.application.explainability_engine import ExplainabilityEngine
-from modules.predictions.application.prediction_context_builder import PredictionContextBuilder
+from modules.predictions.application.outcome_label_mapper import (
+    map_generic_distribution_to_real_labels,
+    map_generic_value_to_real_label,
+)
+from modules.predictions.application.prediction_context_builder import PredictionContext, PredictionContextBuilder
 from modules.predictions.application.predictor_registry import PredictorRegistry
 from modules.predictions.domain.entities import Prediction
-from modules.predictions.domain.value_objects import MarketId, ModelId, PredictionId, PredictionStatus
+from modules.predictions.domain.value_objects import MarketId, ModelId, PredictionId, PredictionStatus, TargetType
+from modules.predictions.ports.predictor import PredictorOutput
+from modules.predictions.infrastructure.ml.model_loader import ModelLoaderService
+from modules.predictions.infrastructure.predictors.ml_predictor import TrainedModelPredictor
 from modules.predictions.ports.calibrator import CalibratorPort
+from modules.predictions.ports.predictor import PredictorPort
 from modules.predictions.ports.repositories import (
     ModelEvaluationRepositoryPort,
     PredictionOutcomeRepositoryPort,
@@ -58,6 +78,38 @@ from modules.predictions.ports.repositories import (
 
 def _clamp(value: float) -> float:
     return min(max(value, 0.0), 1.0)
+
+
+def _calibrate_distribution(
+    distribution: dict[str, float], calibration_key: str, raw_probability: float, calibrated_probability: float
+) -> dict[str, float]:
+    """Rescales a predictor's raw per-outcome distribution (Universal Probability Engine) so
+    ``calibration_key`` — the *specific outcome `raw_probability` is P(...) of*, which for a
+    two-sided weighted predictor is always P("positive") regardless of which side actually wins
+    (see `_shape_outcome`'s docstring) — carries the calibrated probability
+    `ProbabilityCalibrationEngine` (Part 4) already produced for it, proportionally
+    redistributing the remaining probability mass across every other outcome so the distribution
+    still sums to 1. Only that one outcome has a real calibration mapping fitted for it —
+    `CalibratorPort.calibrate()` calibrates one probability at a time — so this keeps every other
+    entry's *relative* shape from the predictor's own raw estimate rather than inventing a
+    per-outcome calibration that was never fitted."""
+    if not distribution or calibration_key not in distribution:
+        return dict(distribution)
+    remaining_raw_mass = 1.0 - raw_probability
+    remaining_calibrated_mass = max(0.0, 1.0 - calibrated_probability)
+    other_keys = [key for key in distribution if key != calibration_key]
+    result = {calibration_key: calibrated_probability}
+    if remaining_raw_mass > 1e-9:
+        scale = remaining_calibrated_mass / remaining_raw_mass
+        for key in other_keys:
+            result[key] = distribution[key] * scale
+    else:
+        # All raw mass sat on this outcome (a degenerate/near-certain raw estimate) — nothing to
+        # scale proportionally, so split whatever calibrated mass remains evenly across the rest.
+        share = remaining_calibrated_mass / len(other_keys) if other_keys else 0.0
+        for key in other_keys:
+            result[key] = share
+    return result
 
 
 @dataclass
@@ -71,6 +123,7 @@ class PredictionEngine:
     outcomes: PredictionOutcomeRepositoryPort
     model_evaluations: ModelEvaluationRepositoryPort
     predictions: PredictionRepositoryPort
+    model_loader: ModelLoaderService | None = None
     expected_kg_facts: int = 10
     stability_window: int = 5
 
@@ -79,11 +132,21 @@ class PredictionEngine:
     ) -> Prediction:
         context = await self.context_builder.build(market_key, entity_type, entity_id, now)
 
-        predictor = self.predictors.get(context.market.market_kind, context.market.market_key)
+        predictor = await self._resolve_predictor(context)
         predictor_output = await predictor.predict(
             context.market.market_kind, context.resolved_features, context.mapping_weights
         )
+        # `calibrated_probability` is P("positive") for the two-sided weighted predictors — see
+        # `_shape_outcome`'s docstring — never assume it's P(the eventual `value`); `_shape_outcome`
+        # derives the real published `probability` (P(the winning `value`)) from the distribution
+        # it builds. Still computed/stored for a REGRESSION market (e.g.
+        # `basketball.player_points_prop`) — `Prediction.probability` stays a required field every
+        # other consumer already reads — but a REGRESSION market's frontend surface reads
+        # `confidence_interval`/`expected_error` instead, never this value.
         calibrated_probability = await self.calibrator.calibrate(context.model.id, predictor_output.probability)
+        value, probability, probability_distribution, confidence_interval, expected_error = await self._shape_outcome(
+            context, predictor_output, calibrated_probability
+        )
 
         documents = await self.retrieval.retrieve_all(subject_ref)
         confidence = self.confidence_engine.compute(
@@ -107,8 +170,8 @@ class PredictionEngine:
             market_id=context.market.id,
             model_id=context.model.id,
             subject_ref=subject_ref,
-            value=predictor_output.value,
-            probability=calibrated_probability,
+            value=value,
+            probability=probability,
             confidence=confidence,
             explanation=explanation,
             feature_snapshot=context.resolved_features,
@@ -116,7 +179,89 @@ class PredictionEngine:
             status=PredictionStatus.DRAFT,
             generated_at=now,
             data_freshness=now,
+            probability_distribution=probability_distribution,
+            confidence_interval=confidence_interval,
+            expected_error=expected_error,
         )
+
+    async def _shape_outcome(
+        self, context: PredictionContext, predictor_output: PredictorOutput, calibrated_probability: float
+    ) -> tuple[str, float, dict[str, float], tuple[float, float] | None, float | None]:
+        """Splits `Prediction`'s CLASSIFICATION-vs-REGRESSION field groups (Universal Probability
+        Engine) by the market's own `TargetType` — the one place that decision gets made, so every
+        `MarketKind` predictor stays agnostic to it and just reports its raw estimate. Returns
+        ``(value, probability, probability_distribution, confidence_interval, expected_error)``.
+
+        ``predictor_output.probability``/``calibrated_probability`` are NOT always P(the winning
+        ``value``) — for the two-sided weighted predictors (`WeightedLogisticPredictor`,
+        `WeightedLinearPredictor`) they're always P("positive") regardless of which side actually
+        wins, by design: `CalibrationFittingService` fits the calibrator against exactly that
+        convention (pairs `Prediction.probability` with "was the real outcome positive", not
+        "did the prediction match"), so the calibration math below must stay anchored to whichever
+        raw distribution entry the calibrator actually calibrated — found by matching
+        ``predictor_output.probability`` back to its distribution key, not by assuming it's
+        ``predictor_output.value``. `WeightedOrdinalPredictor`/`PoissonScorePredictor`'s
+        argmax-shaped output makes those two the same key anyway, so this is a no-op for them.
+
+        The returned ``probability`` — what gets published as `Prediction.probability` and shown
+        as the AI Verdict's headline confidence — is deliberately read back OUT of the calibrated
+        distribution at ``value``'s own key, so it always means "confidence in the outcome actually
+        published," never "confidence in the positive side" regardless of which side won."""
+        if context.market.target_type is TargetType.REGRESSION:
+            expected_error, confidence_interval = await self._regression_uncertainty(
+                context.market.id, predictor_output.raw_score
+            )
+            return f"{predictor_output.raw_score:.4f}", calibrated_probability, {}, confidence_interval, expected_error
+
+        mapped_value = map_generic_value_to_real_label(context.market.market_key, predictor_output.value)
+        mapped_distribution = map_generic_distribution_to_real_labels(
+            context.market.market_key, predictor_output.distribution
+        )
+        raw_calibration_key = next(
+            (key for key, probability in predictor_output.distribution.items() if probability == predictor_output.probability),
+            predictor_output.value,
+        )
+        mapped_calibration_key = map_generic_value_to_real_label(context.market.market_key, raw_calibration_key)
+        probability_distribution = _calibrate_distribution(
+            mapped_distribution, mapped_calibration_key, predictor_output.probability, calibrated_probability
+        )
+        verdict_probability = probability_distribution.get(mapped_value, calibrated_probability)
+        return mapped_value, verdict_probability, probability_distribution, None, None
+
+    async def _regression_uncertainty(
+        self, market_id: MarketId, predicted_value: float
+    ) -> tuple[float | None, tuple[float, float] | None]:
+        """Historical-MAE-based expected error / confidence interval for a `TargetType.REGRESSION`
+        market — reuses the same `PredictionOutcome.error` convention `_historical_accuracy` reads
+        (`domain/dataset.py`: "the normalized absolute error for a REGRESSION target"). Both are
+        `None` until the market has at least two evaluated outcomes to estimate spread from — an
+        honest gap, never a fabricated interval."""
+        outcomes = await self.outcomes.list_by_market(market_id, limit=200)
+        errors = [outcome.error for outcome in outcomes if outcome.error is not None]
+        if len(errors) < 2:
+            return None, None
+        expected_error = sum(errors) / len(errors)
+        return expected_error, (predicted_value - expected_error, predicted_value + expected_error)
+
+    async def _resolve_predictor(self, context: PredictionContext) -> PredictorPort:
+        """Prefers the market's real CHAMPION model when one has actually been trained (a real
+        `artifact_ref` exists) — loaded via `ModelLoaderService` and served through
+        `TrainedModelPredictor`. Falls back to the generic formula-predictor registry for a
+        placeholder Champion (no artifact), an unrecognized/corrupt artifact, or when
+        `model_loader` was never wired — a trained-model problem must never break generation."""
+        if self.model_loader is not None and context.model.artifact_ref:
+            try:
+                model = await self.model_loader.load(
+                    context.model.id,
+                    context.model.framework or "",
+                    context.model.algorithm,
+                    context.market.target_type,
+                    context.model.artifact_ref,
+                )
+                return TrainedModelPredictor(market_kind=context.market.market_kind, model=model)
+            except Exception:  # noqa: BLE001 — any artifact-loading failure falls back, never breaks generation
+                pass
+        return self.predictors.get(context.market.market_kind, context.market.market_key)
 
     async def _historical_accuracy(self, market_id: MarketId) -> float:
         outcomes = await self.outcomes.list_by_market(market_id, limit=200)

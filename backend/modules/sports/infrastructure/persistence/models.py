@@ -83,6 +83,7 @@ class CompetitionModel(TimestampMixin, VersionedMixin, Base):
     type: Mapped[str] = mapped_column(String(32))
     country: Mapped[str | None] = mapped_column(String(120), nullable=True)
     tier: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    logo_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
 
 class SeasonModel(TimestampMixin, VersionedMixin, Base):
@@ -105,6 +106,7 @@ class TeamModel(TimestampMixin, VersionedMixin, Base):
     short_name: Mapped[str] = mapped_column(String(32))
     country: Mapped[str | None] = mapped_column(String(120), nullable=True)
     venue_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("venues.id"), nullable=True)
+    logo_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
 
 class PlayerModel(TimestampMixin, VersionedMixin, Base):
@@ -146,6 +148,8 @@ class FixtureModel(TimestampMixin, VersionedMixin, Base):
     venue_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("venues.id"), nullable=True)
     scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     status: Mapped[str] = mapped_column(String(32), default="scheduled", index=True)
+    home_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    away_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class MatchModel(TimestampMixin, Base):

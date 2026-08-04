@@ -23,6 +23,38 @@ export const sportsApi = {
   getFixture: (fixtureId: string) => api.get<FixtureSummaryDto>(`/api/v1/sports/fixtures/${fixtureId}`),
   listFixtures: (sportCode: SportCode, opts: { competition_id?: string; limit?: number } = {}) =>
     api.get<FixtureSummaryDto[]>(`/api/v1/sports/${sportCode}/fixtures`, opts),
+  /** Paginated fixture browse for the Matches/Live discovery surfaces — carries `meta.total`/
+   * `has_more` through, unlike `listFixtures` (which every existing "just show me some fixtures"
+   * caller keeps using unchanged). */
+  listFixturesPaged: async (sportCode: SportCode, opts: FixtureQueryOpts = {}): Promise<FixturePage> => {
+    const envelope = await api.getWithMeta<FixtureSummaryDto[]>(`/api/v1/sports/${sportCode}/fixtures`, opts as Record<string, unknown>)
+    const meta = envelope.meta as { total?: number; offset?: number; limit?: number; has_more?: boolean }
+    return {
+      items: envelope.data,
+      total: meta.total ?? envelope.data.length,
+      offset: meta.offset ?? opts.offset ?? 0,
+      limit: meta.limit ?? opts.limit ?? envelope.data.length,
+      hasMore: meta.has_more ?? false,
+    }
+  },
+}
+
+export interface FixtureQueryOpts {
+  competition_id?: string
+  status?: 'scheduled' | 'live' | 'completed' | 'postponed' | 'cancelled'
+  date_from?: string
+  date_to?: string
+  search?: string
+  limit?: number
+  offset?: number
+}
+
+export interface FixturePage {
+  items: FixtureSummaryDto[]
+  total: number
+  offset: number
+  limit: number
+  hasMore: boolean
 }
 
 export const SPORT_OPTIONS: Array<{ code: SportCode; label: string }> = [

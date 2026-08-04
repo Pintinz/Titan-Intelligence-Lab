@@ -22,6 +22,12 @@ from typing import Protocol
 class IntelligenceRetrievalQuery:
     subject_ref: str
     max_results: int = 20
+    # Additional refs a modality may also match against, alongside `subject_ref` — e.g. a
+    # match's home/away team names, since news articles and community posts are written in
+    # prose that names teams, never match ids (`IntelligenceRetrievalService.retrieve_all`
+    # populates this via `MatchTeamNamesResolver`). Ignored by ports with no use for it
+    # (Knowledge Graph, AI Reports already resolve `subject_ref` directly).
+    additional_refs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

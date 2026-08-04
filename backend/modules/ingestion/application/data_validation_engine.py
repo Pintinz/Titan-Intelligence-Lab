@@ -16,6 +16,7 @@ from modules.sports.ports.provider_gateway import (
     ProviderCountryRecord,
     ProviderFixtureRecord,
     ProviderLineupRecord,
+    ProviderOddsRecord,
     ProviderPlayerRecord,
     ProviderStandingRecord,
     ProviderTeamRecord,
@@ -102,6 +103,15 @@ class DataValidationEngine:
         if not record.stat_set:
             return ValidationResult.failed("stat_set is empty (missing values)")
         return ValidationResult.ok()
+
+    def validate_odds(self, record: ProviderOddsRecord) -> ValidationResult:
+        issues = []
+        for label, value in (("home_win", record.home_win), ("draw", record.draw), ("away_win", record.away_win)):
+            if value is not None and value <= 1.0:
+                issues.append(f"{label} odds must be decimal odds > 1.0, got {value} (invalid values)")
+        if record.home_win is None and record.draw is None and record.away_win is None:
+            issues.append("odds record has no outcomes populated (missing values)")
+        return ValidationResult.failed(*issues) if issues else ValidationResult.ok()
 
     def validate_lineup(self, record: ProviderLineupRecord) -> ValidationResult:
         issues = []

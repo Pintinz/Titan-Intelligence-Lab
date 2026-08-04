@@ -31,7 +31,17 @@ def get_redis_settings() -> RedisSettings:
 
 
 def build_redis_client(url: str | None = None) -> Redis:
-    return from_url(url or get_redis_settings().url, decode_responses=True)
+    """A short connect/command timeout matters here specifically because this client backs a
+    store this module's own docstring calls "just a cache" — `FeatureStoreService` already
+    degrades gracefully on `redis.exceptions.RedisError` (writes stay durable via the offline
+    store, reads fall back to it), but redis-py's default has no timeout at all, so an
+    unreachable Redis (the common local-dev state — no local Redis running) silently turns every
+    write/read into a multi-second stall instead of the fast, cheap failure the fallback path is
+    built for."""
+    return from_url(
+        url or get_redis_settings().url, decode_responses=True,
+        socket_connect_timeout=2, socket_timeout=2,
+    )
 
 
 def _cache_key(feature_key: FeatureKey, entity_type: EntityType, entity_id: str) -> str:

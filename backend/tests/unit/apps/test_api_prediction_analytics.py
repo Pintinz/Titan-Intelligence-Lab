@@ -99,7 +99,13 @@ def _auth_headers(client, email="analytics@titaniq.test", password="correct-hors
     return {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
 
 
-async def _seed_production_market(db_session_factory, market_key: str, feature_key: str) -> MarketId:
+async def _seed_production_market(
+    db_session_factory,
+    market_key: str,
+    feature_key: str,
+    sport_code: str = "football",
+    confidence_threshold: float = 0.0,
+) -> MarketId:
     async with db_session_factory() as session:
         markets = SqlAlchemyMarketRepository(session=session)
         models = SqlAlchemyModelRepository(session=session)
@@ -112,7 +118,7 @@ async def _seed_production_market(db_session_factory, market_key: str, feature_k
             feature_key=FeatureKey(feature_key),
             name="Test Feature",
             description="test",
-            sport_code="football",
+            sport_code=sport_code,
             category=FeatureCategory.ENGINEERED,
             formula="n/a",
             data_type=FeatureDataType.FLOAT,
@@ -136,13 +142,13 @@ async def _seed_production_market(db_session_factory, market_key: str, feature_k
         market = MarketDefinition(
             id=MarketId(uuid4()),
             market_key=market_key,
-            sport_code="football",
+            sport_code=sport_code,
             name="Test Market",
             category="match_outcome",
             market_kind=MarketKind.BINARY,
             target_type=TargetType.CLASSIFICATION,
             status=MarketStatus.PRODUCTION,
-            confidence_threshold=0.0,
+            confidence_threshold=confidence_threshold,
         )
         await markets.upsert(market)
         await mappings.upsert(
@@ -326,3 +332,87 @@ def test_prediction_history_invalid_market_id_returns_422(client):
     )
 
     assert response.status_code == 422
+
+
+# -- AI Picks -----------------------------------------------------------------------------------
+
+
+def test_picks_route_is_not_shadowed_by_prediction_id_route(client):
+    headers = _auth_headers(client)
+
+    response = client.get("/api/v1/predictions/picks", headers=headers)
+
+    # A 422 (invalid prediction_id UUID) would mean the generic /{prediction_id} route
+    # swallowed this request instead of the literal /picks route.
+    assert response.status_code == 200
+    assert response.json()["data"] == []
+
+
+def test_ai_picks_includes_published_prediction_with_market_context(client, db_session_factory):
+    headers = _auth_headers(client)
+    market_id = asyncio.run(
+        _seed_production_market(db_session_factory, "football.picks_market", "football.picks_feature_a")
+    )
+    prediction = _generate(client, headers, "football.picks_market")
+
+    response = client.get("/api/v1/predictions/picks", headers=headers)
+
+    assert response.status_code == 200
+    picks = response.json()["data"]
+    assert len(picks) == 1
+    pick = picks[0]
+    assert pick["id"] == prediction["id"]
+    assert pick["market_id"] == str(market_id)
+    assert pick["market_key"] == "football.picks_market"
+    assert pick["market_name"] == "Test Market"
+    assert pick["sport_code"] == "football"
+    assert pick["status"] == "published"
+    assert isinstance(pick["evidence_count"], int) and pick["evidence_count"] >= 0
+
+
+def test_ai_picks_excludes_below_threshold_draft_predictions(client, db_session_factory):
+    headers = _auth_headers(client)
+    asyncio.run(
+        _seed_production_market(
+            db_session_factory,
+            "football.picks_draft_market",
+            "football.picks_feature_b",
+            confidence_threshold=1.1,  # unreachable — every prediction here stays DRAFT
+        )
+    )
+    _generate(client, headers, "football.picks_draft_market")
+
+    response = client.get("/api/v1/predictions/picks", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["data"] == []
+
+
+def test_ai_picks_filters_by_sport_code(client, db_session_factory):
+    headers = _auth_headers(client)
+    asyncio.run(
+        _seed_production_market(
+            db_session_factory, "basketball.picks_market", "basketball.picks_feature_a", sport_code="basketball"
+        )
+    )
+    _generate(client, headers, "basketball.picks_market")
+
+    football_picks = client.get("/api/v1/predictions/picks", params={"sport_code": "football"}, headers=headers)
+    basketball_picks = client.get("/api/v1/predictions/picks", params={"sport_code": "basketball"}, headers=headers)
+
+    assert football_picks.json()["data"] == []
+    assert len(basketball_picks.json()["data"]) == 1
+    assert basketball_picks.json()["data"][0]["sport_code"] == "basketball"
+
+
+def test_ai_picks_respects_limit(client, db_session_factory):
+    headers = _auth_headers(client)
+    asyncio.run(_seed_production_market(db_session_factory, "football.picks_limit_a", "football.picks_feature_c"))
+    asyncio.run(_seed_production_market(db_session_factory, "football.picks_limit_b", "football.picks_feature_d"))
+    _generate(client, headers, "football.picks_limit_a", subject_ref="fixture-limit-a")
+    _generate(client, headers, "football.picks_limit_b", subject_ref="fixture-limit-b")
+
+    response = client.get("/api/v1/predictions/picks", params={"limit": 1}, headers=headers)
+
+    assert response.status_code == 200
+    assert len(response.json()["data"]) == 1

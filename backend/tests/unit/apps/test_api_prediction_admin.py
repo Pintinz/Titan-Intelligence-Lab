@@ -50,6 +50,8 @@ from modules.predictions.infrastructure.persistence.repositories import (
     SqlAlchemyModelRepository,
 )
 from modules.sports.infrastructure.persistence.models import Base as SportsBase
+from modules.watchlist.infrastructure.persistence.models import Base as WatchlistBase
+from modules.alerts.infrastructure.persistence.models import Base as AlertsBase
 
 T0 = datetime(2026, 7, 26, tzinfo=timezone.utc)
 
@@ -66,6 +68,8 @@ async def db_session_factory():
                 "sports": None,
                 "intelligence": None,
                 "knowledge_graph": None,
+                "watchlist": None,
+                "alerts": None,
             }
         },
     )
@@ -76,6 +80,8 @@ async def db_session_factory():
         await conn.run_sync(SportsBase.metadata.create_all)
         await conn.run_sync(IntelligenceBase.metadata.create_all)
         await conn.run_sync(KnowledgeGraphBase.metadata.create_all)
+        await conn.run_sync(WatchlistBase.metadata.create_all)
+        await conn.run_sync(AlertsBase.metadata.create_all)
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory

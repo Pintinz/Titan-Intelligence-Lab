@@ -28,7 +28,6 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
   const loginForm = useForm<LoginValues>({ resolver: zodResolver(loginSchema) })
   const signupForm = useForm<SignupValues>({ resolver: zodResolver(signupSchema) })
 
-  const remember = mode === 'login' ? loginForm.getValues('email') : undefined
   const [rememberMe, setRememberMeState] = useState(true)
 
   const isLoginMode = mode === 'login'
@@ -275,8 +274,12 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
               />
               <label htmlFor="signup-agree" className="text-text-secondary cursor-pointer">
                 I agree to the{' '}
-                <a href="/docs" target="_blank" rel="noopener noreferrer" className="text-accent-primary hover:text-accent-primary-hover font-medium">
+                <a href="/terms" target="_blank" rel="noopener noreferrer" className="text-accent-primary hover:text-accent-primary-hover font-medium">
                   terms of service
+                </a>{' '}
+                and{' '}
+                <a href="/privacy" target="_blank" rel="noopener noreferrer" className="text-accent-primary hover:text-accent-primary-hover font-medium">
+                  privacy policy
                 </a>
               </label>
             </div>

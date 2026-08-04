@@ -19,11 +19,8 @@ export default function ResetPasswordPage() {
   const {
     register,
     handleSubmit,
-    watch,
     formState: { errors, isSubmitting },
   } = useForm<ResetPasswordValues>({ resolver: zodResolver(resetPasswordSchema) })
-
-  const password = watch('password')
 
   useEffect(() => {
     const checkSession = async () => {

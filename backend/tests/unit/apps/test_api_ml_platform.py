@@ -113,10 +113,29 @@ async def _seed_market(db_session_factory, market_key: str, with_champion: bool 
 
 
 class TestRoleGating:
-    def test_non_admin_is_forbidden(self, client, db_session_factory):
+    def test_non_admin_is_forbidden_from_mutation_endpoints(self, client, db_session_factory):
         headers = _regular_headers(client)
-        response = client.get("/api/v1/admin/ml/models/does.not.exist", headers=headers)
+        response = client.get("/api/v1/admin/ml/experiments/does.not.exist", headers=headers)
         assert response.status_code == 403
+
+    def test_non_admin_is_forbidden_from_monitoring_endpoints(self, client, db_session_factory):
+        headers = _regular_headers(client)
+        response = client.get("/api/v1/admin/ml/monitoring/does.not.exist/health", headers=headers)
+        assert response.status_code == 403
+
+    def test_non_admin_can_read_the_four_end_user_learning_endpoints(self, client, db_session_factory):
+        """`list_models`, `resolve_champion`, `champion_feature_importance`, and
+        `list_model_evaluations` back the public Learning Intelligence page — they're
+        deliberately gated at plain authentication, not Role.ADMINISTRATOR, matching every
+        other read-only router in the app. A 404 here (not 403) proves the request cleared
+        auth and only failed on "market not found", which is what a regular authenticated
+        user hitting an unknown market should see."""
+        headers = _regular_headers(client)
+
+        assert client.get("/api/v1/admin/ml/models/does.not.exist", headers=headers).status_code == 404
+        assert client.get("/api/v1/admin/ml/champion/does.not.exist", headers=headers).status_code == 404
+        assert client.get("/api/v1/admin/ml/feature-importance/does.not.exist", headers=headers).status_code == 404
+        assert client.get(f"/api/v1/admin/ml/evaluation/{uuid4()}", headers=headers).status_code == 200
 
 
 class TestTrainingDatasets:

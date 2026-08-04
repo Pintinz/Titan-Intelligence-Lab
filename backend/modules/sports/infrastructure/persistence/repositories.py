@@ -17,6 +17,7 @@ from modules.sports.domain.entities import (
     Country,
     Fixture,
     Lineup,
+    Match,
     Player,
     Season,
     Sport,
@@ -220,6 +221,18 @@ class SqlAlchemyFixtureRepository:
         result = await self.session.execute(stmt)
         return [mappers.fixture_to_domain(row) for row in result.scalars().all()]
 
+    async def find_by_teams_and_date_window(
+        self, home_team_id: TeamId, away_team_id: TeamId, date_from: datetime, date_to: datetime
+    ) -> list[Fixture]:
+        stmt = select(FixtureModel).where(
+            FixtureModel.home_team_id == home_team_id.value,
+            FixtureModel.away_team_id == away_team_id.value,
+            FixtureModel.scheduled_at >= date_from,
+            FixtureModel.scheduled_at <= date_to,
+        )
+        result = await self.session.execute(stmt)
+        return [mappers.fixture_to_domain(row) for row in result.scalars().all()]
+
 
 @dataclass
 class SqlAlchemyStandingRepository:
@@ -262,6 +275,23 @@ class SqlAlchemyCountryRepository:
         self.session.add(model)
         await self.session.flush()
         return mappers.country_to_domain(model)
+
+
+@dataclass
+class SqlAlchemyMatchRepository:
+    session: AsyncSession
+
+    async def get_by_fixture(self, fixture_id: FixtureId) -> Match | None:
+        stmt = select(MatchModel).where(MatchModel.fixture_id == fixture_id.value)
+        model = (await self.session.execute(stmt)).scalar_one_or_none()
+        return mappers.match_to_domain(model) if model else None
+
+    async def upsert(self, match: Match) -> Match:
+        existing = await self.session.get(MatchModel, match.id.value)
+        model = mappers.match_to_model(match, existing)
+        self.session.add(model)
+        await self.session.flush()
+        return mappers.match_to_domain(model)
 
 
 @dataclass

@@ -20,6 +20,7 @@ from modules.sports.ports.provider_gateway import (
     ProviderFixtureRecord,
     ProviderLineupRecord,
     ProviderLineupSlotRecord,
+    ProviderOddsRecord,
     ProviderPlayerRecord,
     ProviderStandingRecord,
     ProviderTeamRecord,
@@ -44,6 +45,12 @@ _POSITIONS_BY_SPORT = {
     "baseball": ("pitcher", "catcher", "first_base", "shortstop", "left_field"),
     "table_tennis": ("singles", "doubles"),
 }
+_TYPICAL_DURATION_BY_SPORT = {
+    "football": timedelta(hours=2),
+    "basketball": timedelta(hours=2, minutes=30),
+    "baseball": timedelta(hours=3, minutes=30),
+    "table_tennis": timedelta(hours=1),
+}
 _COUNTRIES = (
     ("GB", "United Kingdom"), ("US", "United States"), ("BR", "Brazil"), ("DE", "Germany"),
     ("JP", "Japan"), ("FR", "France"), ("ES", "Spain"), ("IT", "Italy"),
@@ -55,6 +62,7 @@ def _team_stat_set(rng: random.Random, sport_code: str) -> dict:
         "football": lambda: {
             "possession_pct": round(rng.uniform(35, 65), 1), "shots_total": rng.randint(5, 20),
             "shots_on_target": rng.randint(1, 10), "corners": rng.randint(0, 12), "fouls": rng.randint(5, 18),
+            "cards_yellow": rng.randint(0, 5), "cards_red": rng.randint(0, 1),
         },
         "basketball": lambda: {
             "points": rng.randint(80, 120), "field_goals_made": rng.randint(30, 50),
@@ -79,7 +87,7 @@ class MockSportsDataProvider:
     def _rng(self, seed_key: str) -> random.Random:
         return random.Random(f"{self.provider_key}:{self.sport_code}:{seed_key}")
 
-    async def fetch_teams(self, competition_ref: str) -> list[ProviderTeamRecord]:
+    async def fetch_teams(self, competition_ref: str, season_label: str | None = None) -> list[ProviderTeamRecord]:
         rng = self._rng(f"teams:{competition_ref}")
         suffixes = _CLUB_SUFFIXES_BY_SPORT.get(self.sport_code, ("Club",))
         team_count = 10
@@ -100,7 +108,7 @@ class MockSportsDataProvider:
         return teams
 
     async def fetch_fixtures(
-        self, competition_ref: str, season_label: str
+        self, competition_ref: str, season_label: str, now: datetime
     ) -> list[ProviderFixtureRecord]:
         rng = self._rng(f"fixtures:{competition_ref}:{season_label}")
         teams = await self.fetch_teams(competition_ref)
@@ -114,6 +122,7 @@ class MockSportsDataProvider:
             away = teams[(i + 1) % len(teams)]
             if home is away:
                 continue
+            scheduled_at = base_date + timedelta(days=i * 7, hours=rng.randint(0, 5))
             fixtures.append(
                 ProviderFixtureRecord(
                     external_ref=ProviderRef(
@@ -121,13 +130,26 @@ class MockSportsDataProvider:
                     ),
                     home_team_ref=home.external_ref,
                     away_team_ref=away.external_ref,
-                    scheduled_at=base_date + timedelta(days=i * 7, hours=rng.randint(0, 5)),
+                    scheduled_at=scheduled_at,
                     competition_ref=competition_ref,
                     season_label=season_label,
                     venue_name=home.venue_name,
+                    status=self._mock_status(scheduled_at, now),
                 )
             )
         return fixtures
+
+    def _mock_status(self, scheduled_at: datetime, now: datetime) -> str:
+        """No real live-score feed exists for the mock provider — this derives a status purely
+        from real wall-clock time against the fixture's own real scheduled_at, the only genuine
+        signal available, rather than fabricating a random one. Raw codes match the real
+        API-Sports vocabulary so the same normalize_provider_fixture_status handles both."""
+        duration = _TYPICAL_DURATION_BY_SPORT.get(self.sport_code, timedelta(hours=2))
+        if scheduled_at > now:
+            return "NS"
+        if now - scheduled_at < duration:
+            return "LIVE"
+        return "FT"
 
     async def fetch_countries(self) -> list[ProviderCountryRecord]:
         return [ProviderCountryRecord(code=code, name=name) for code, name in _COUNTRIES]
@@ -219,3 +241,27 @@ class MockSportsDataProvider:
                 )
             )
         return lineups
+
+    async def fetch_odds(self, fixture_ref: ProviderRef) -> ProviderOddsRecord | None:
+        """Only football gets a modeled line today — the three markets that actually consume
+        odds-derived features (both_teams_to_score, correct_score, match_winner) are all
+        football-only. Deterministic like every other mock method: true win/draw/away strengths
+        seeded from the fixture ref, scaled up by a fixed ~6% bookmaker margin so the resulting
+        decimal odds land on a realistic overround rather than a fair (vig-free) line."""
+        if self.sport_code != "football":
+            return None
+        rng = self._rng(f"odds:{fixture_ref.external_id}")
+        home_strength = rng.uniform(0.28, 0.52)
+        draw_strength = rng.uniform(0.18, 0.30)
+        away_strength = max(0.12, 1.0 - home_strength - draw_strength)
+        total_strength = home_strength + draw_strength + away_strength
+        overround = 1.06
+
+        def _odds(strength: float) -> float:
+            implied_probability = (strength / total_strength) * overround
+            return round(1.0 / implied_probability, 2)
+
+        return ProviderOddsRecord(
+            fixture_ref=fixture_ref,
+            home_win=_odds(home_strength), draw=_odds(draw_strength), away_win=_odds(away_strength),
+        )

@@ -96,6 +96,24 @@ class ProviderRefIndexEntry:
 
 
 @dataclass
+class CompetitionFixtureSourcePreference:
+    """An admin-set, durable routing rule: "for this competition, fetch upcoming fixtures from
+    ``preferred_provider_key`` instead of the sport's default provider." Set once (informed by a
+    human's real knowledge of which provider actually covers this competition's upcoming
+    schedule better), then honored automatically by every subsequent
+    ``SyncOrchestrator.sync_upcoming_fixtures`` call — no per-run decision-making. Absence of a
+    row for a competition means "keep using the default per-sport provider," which is the
+    behavior every competition already had before this concept existed."""
+
+    competition_id: str  # stringified CompetitionId
+    preferred_provider_key: str  # e.g. "football_data_org" — must match a provider_key registered
+    # in SportsProviderRouter.fixture_schedule_adapters
+    provider_competition_ref: str  # that provider's own ref for this competition, e.g. "PL"
+    notes: str | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass
 class DataQualityReport:
     """Ingestion-level (raw sports data) quality report — distinct from
     ``modules.features.domain.entities.FeatureValidationReport``, which scores *derived ML

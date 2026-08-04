@@ -18,7 +18,7 @@ from datetime import datetime
 from uuid import uuid4
 
 from modules.predictions.domain.entities import MarketDefinition
-from modules.predictions.domain.value_objects import MarketId, MarketKind, MarketStatus, TargetType
+from modules.predictions.domain.value_objects import MarketId, MarketKind, MarketStatus, OutcomeType, TargetType
 from modules.predictions.ports.repositories import FeatureMarketMappingRepositoryPort, MarketRepositoryPort
 
 _TRANSITIONS: dict[MarketStatus, tuple[MarketStatus, ...]] = {
@@ -68,6 +68,10 @@ class MarketRegistryService:
         confidence_threshold: float = 0.5,
         owner: str = "",
         now: datetime | None = None,
+        outcome_type: OutcomeType | None = None,
+        allowed_values: tuple[str, ...] = (),
+        resolver_key: str | None = None,
+        gemini_prompt_template: str | None = None,
     ) -> MarketDefinition:
         if await self.markets.get_by_key(market_key) is not None:
             raise MarketAlreadyRegisteredError(f"market '{market_key}' is already registered")
@@ -90,6 +94,10 @@ class MarketRegistryService:
             version=1,
             created_at=now,
             updated_at=now,
+            outcome_type=outcome_type,
+            allowed_values=allowed_values,
+            resolver_key=resolver_key,
+            gemini_prompt_template=gemini_prompt_template,
         )
         return await self.markets.upsert(market)
 

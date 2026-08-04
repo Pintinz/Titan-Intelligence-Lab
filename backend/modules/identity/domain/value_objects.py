@@ -91,6 +91,14 @@ class AuditAction(str, Enum):
     ORGANIZATION_CREATED = "organization_created"
     MEMBERSHIP_CHANGED = "membership_changed"
     SUBSCRIPTION_CHANGED = "subscription_changed"
+    PROVIDER_REGISTERED = "provider_registered"
+    PROVIDER_UPDATED = "provider_updated"
+    PROVIDER_DELETED = "provider_deleted"
+    PROVIDER_ACTIVATED = "provider_activated"
+    PROVIDER_DEACTIVATED = "provider_deactivated"
+    PROVIDER_CREDENTIAL_ADDED = "provider_credential_added"
+    PROVIDER_CREDENTIAL_ROTATED = "provider_credential_rotated"
+    PROVIDER_IMPORTED_FROM_ENV = "provider_imported_from_env"
 
 
 class SecurityEventType(str, Enum):

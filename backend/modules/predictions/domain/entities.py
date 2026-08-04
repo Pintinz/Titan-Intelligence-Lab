@@ -23,6 +23,7 @@ from modules.predictions.domain.value_objects import (
     ModelEvaluationId,
     ModelId,
     ModelStatus,
+    OutcomeType,
     PredictionAuditId,
     PredictionId,
     PredictionOutcomeId,
@@ -58,6 +59,17 @@ class MarketDefinition:
     reviewed_at: datetime | None = None
     rejection_reason: str | None = None
     deprecated_at: datetime | None = None
+    # Milestone 9.2 (Market Registry & Prediction Domain Normalization) additive fields — every
+    # existing `MarketRegistryService.register()` call site (market_seeding.py x4 sports) keeps
+    # working unchanged, same posture as the 9.1 `ModelDefinition` fields above. `outcome_type`/
+    # `allowed_values` are the market's real-world answer space (see
+    # `modules.predictions.domain.market_outcome_registry`); `resolver_key` is a stable string ref
+    # into that same registry's resolver table, never a live callable (matches the opaque-ref
+    # pattern `training_run_ref`/`artifact_ref` already use on `ModelDefinition`).
+    outcome_type: OutcomeType | None = None
+    allowed_values: tuple[str, ...] = field(default_factory=tuple)
+    resolver_key: str | None = None
+    gemini_prompt_template: str | None = None
 
     def is_production(self) -> bool:
         return self.status is MarketStatus.PRODUCTION
@@ -168,7 +180,25 @@ class Prediction:
     """One generated prediction (docs/database_schema.md §4 `predictions`). Never published
     without confidence, explanation, feature traceability (`feature_snapshot`), a model version,
     and — implicitly, via this entity's own persistence — an audit trail
-    (Milestone 9 Part 4 "RULES")."""
+    (Milestone 9 Part 4 "RULES").
+
+    Universal Probability Engine (2026-08-02) additive fields, gated by the market's own
+    `TargetType` in `PredictionEngine.generate()` — a `Prediction` never populates both groups:
+
+    - `probability_distribution` — every outcome's calibrated probability for a
+      `TargetType.CLASSIFICATION` market (including `CORRECT_SCORE`-shaped ones, where it's a
+      ranked Top-N scoreline distribution), keyed by the market's real outcome labels. ``value``/
+      ``probability`` above remain the single winning outcome and its probability — this is the
+      full picture behind that pick, what a frontend renders as "Alternative Outcomes". Empty for
+      a `TargetType.REGRESSION` market (no discrete outcome space to distribute over).
+    - `confidence_interval`/`expected_error` — populated only for a `TargetType.REGRESSION`
+      market, where ``value`` is the predicted continuous number itself, not a classification
+      label, and a single probability was never a meaningful thing to publish for it (Universal
+      Probability Engine spec: "regression markets return Prediction / Confidence Interval /
+      Expected Error / Reliability, not a fake probability" — "Reliability" is
+      `confidence.model_reliability`, already tracked, not duplicated here). Both are `None` when
+      the market has no `PredictionOutcome` history yet to derive them from — an honest gap, never
+      a fabricated interval."""
 
     id: PredictionId
     market_id: MarketId
@@ -183,6 +213,9 @@ class Prediction:
     status: PredictionStatus = PredictionStatus.DRAFT
     generated_at: datetime | None = None
     data_freshness: datetime | None = None
+    probability_distribution: dict = field(default_factory=dict)  # real label -> calibrated probability
+    confidence_interval: tuple[float, float] | None = None  # (low, high), regression markets only
+    expected_error: float | None = None  # historical MAE for this market, regression markets only
 
     def is_published(self) -> bool:
         return self.status is PredictionStatus.PUBLISHED

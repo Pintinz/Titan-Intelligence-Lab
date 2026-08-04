@@ -55,7 +55,7 @@ export function HeroSection() {
                 <p className="text-xs text-text-muted">{heroMatch.market}</p>
                 <p className="font-telemetry text-base font-medium text-text-primary">{heroMatch.pick}</p>
               </div>
-              <ConfidenceTelemetry confidence={heroMatch.confidence.overall} />
+              <ConfidenceTelemetry confidence={heroMatch.confidence.composite} />
             </div>
             <p className="mt-4 text-sm text-text-secondary">{heroMatch.whyItMatters}</p>
           </div>

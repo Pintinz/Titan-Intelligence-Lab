@@ -18,6 +18,8 @@ from modules.identity.infrastructure.security import MockJWTValidator
 from modules.ingestion.infrastructure.persistence.models import Base as IngestionBase
 from modules.knowledge_graph.infrastructure.persistence.models import Base as KGBase
 from modules.sports.infrastructure.persistence.models import Base as SportsBase
+from modules.watchlist.infrastructure.persistence.models import Base as WatchlistBase
+from modules.alerts.infrastructure.persistence.models import Base as AlertsBase
 
 
 @pytest.fixture
@@ -27,7 +29,7 @@ def db_session_factory():
         execution_options={
             "schema_translate_map": {
                 "admin": None, "features": None, "sports": None, "ingestion": None, "knowledge_graph": None,
-                "identity": None,
+                "identity": None, "watchlist": None, "alerts": None,
             }
         },
     )
@@ -40,6 +42,8 @@ def db_session_factory():
             await conn.run_sync(IngestionBase.metadata.create_all)
             await conn.run_sync(KGBase.metadata.create_all)
             await conn.run_sync(IdentityBase.metadata.create_all)
+            await conn.run_sync(WatchlistBase.metadata.create_all)
+            await conn.run_sync(AlertsBase.metadata.create_all)
 
     asyncio.run(_setup())
 
@@ -228,6 +232,147 @@ async def _first_reconciled_team_id(db_session_factory, sport_code="football") -
         sport = await SqlAlchemySportRepository(session=session).get_by_code(SportCode(sport_code))
         teams = await SqlAlchemyTeamRepository(session=session).list_by_sport(sport.id)
         return str(teams[0].id.value)
+
+
+# -- football-data.org integration: fixture-source preference + team mapping admin endpoints ----
+
+
+async def _seed_football_team(db_session_factory, external_id="t1", name="Arsenal") -> str:
+    from datetime import datetime, timezone
+
+    from apps.api.composition import build_entity_reconciliation_service
+    from modules.sports.domain.value_objects import ProviderRef, SportCode
+    from modules.sports.infrastructure.persistence.repositories import SqlAlchemySportRepository
+    from modules.sports.ports.provider_gateway import ProviderTeamRecord
+
+    async with db_session_factory() as session:
+        reconciler = build_entity_reconciliation_service(session)
+        await reconciler.reconcile_sport(SportCode.FOOTBALL, "Football", datetime.now(timezone.utc))
+        sport = await SqlAlchemySportRepository(session=session).get_by_code(SportCode.FOOTBALL)
+        team, _ = await reconciler.reconcile_team(
+            ProviderTeamRecord(
+                external_ref=ProviderRef("api_football", external_id), name=name,
+                short_name=name[:3].upper(), country="England",
+            ),
+            sport.id, datetime.now(timezone.utc),
+        )
+        await session.commit()
+        return str(team.id.value)
+
+
+class _StubFdOrgAdapter:
+    async def fetch_teams(self, competition_ref):
+        from modules.sports.domain.value_objects import ProviderRef
+        from modules.sports.ports.provider_gateway import ProviderTeamRecord
+
+        return [ProviderTeamRecord(external_ref=ProviderRef("football_data_org", "61"), name="Arsenal", short_name="ARS", country="England")]
+
+
+def test_fixture_source_preference_round_trip(client, db_session_factory):
+    asyncio.run(_seed_reconciled_sport(db_session_factory))
+    bootstrap = client.post(
+        "/api/v1/admin/sync/football/bootstrap",
+        json={"competition_ref": "39", "competition_name": "Premier League", "season_label": "2026"},
+    )
+    competition_id = bootstrap.json()["data"]["competition_id"]
+
+    missing = client.get(f"/api/v1/admin/competitions/{competition_id}/fixture-source")
+    assert missing.status_code == 200
+    assert missing.json()["data"] is None
+
+    set_response = client.put(
+        f"/api/v1/admin/competitions/{competition_id}/fixture-source",
+        json={"preferred_provider_key": "football_data_org", "provider_competition_ref": "PL", "notes": "better upcoming coverage"},
+    )
+    assert set_response.status_code == 200
+    data = set_response.json()["data"]
+    assert data["competition_id"] == competition_id
+    assert data["preferred_provider_key"] == "football_data_org"
+    assert data["provider_competition_ref"] == "PL"
+
+    get_response = client.get(f"/api/v1/admin/competitions/{competition_id}/fixture-source")
+    assert get_response.json()["data"]["provider_competition_ref"] == "PL"
+
+    delete_response = client.delete(f"/api/v1/admin/competitions/{competition_id}/fixture-source")
+    assert delete_response.status_code == 200
+    cleared = client.get(f"/api/v1/admin/competitions/{competition_id}/fixture-source")
+    assert cleared.json()["data"] is None
+
+
+def test_trigger_upcoming_fixtures_sync_requires_preference(client, db_session_factory):
+    asyncio.run(_seed_reconciled_sport(db_session_factory))
+    bootstrap = client.post(
+        "/api/v1/admin/sync/football/bootstrap",
+        json={"competition_ref": "39", "competition_name": "Premier League", "season_label": "2026"},
+    )
+    competition_id = bootstrap.json()["data"]["competition_id"]
+    season_id = bootstrap.json()["data"]["season_id"]
+
+    response = client.post(
+        f"/api/v1/admin/sync/football/competitions/{competition_id}/upcoming-fixtures",
+        json={"season_label": "2026", "season_id": season_id},
+    )
+
+    assert response.status_code == 409
+
+
+def test_team_suggestions_matches_by_name_against_existing_teams(client, db_session_factory, monkeypatch):
+    import apps.api.main as main_module
+
+    asyncio.run(_seed_reconciled_sport(db_session_factory))
+    bootstrap = client.post(
+        "/api/v1/admin/sync/football/bootstrap",
+        json={"competition_ref": "39", "competition_name": "Premier League", "season_label": "2026"},
+    )
+    competition_id = bootstrap.json()["data"]["competition_id"]
+    team_id = asyncio.run(_seed_football_team(db_session_factory))
+    monkeypatch.setattr(main_module, "get_football_data_org_adapter", lambda session: _StubFdOrgAdapter())
+
+    response = client.get(
+        "/api/v1/admin/providers/football-data-org/team-suggestions",
+        params={"competition_id": competition_id, "provider_competition_ref": "PL"},
+    )
+
+    assert response.status_code == 200
+    suggestions = response.json()["data"]
+    assert suggestions[0]["football_data_org_team_id"] == "61"
+    assert suggestions[0]["suggested_titaniq_team_id"] == team_id
+    assert suggestions[0]["confidence"] == 1.0
+
+
+def test_team_suggestions_returns_404_for_unknown_competition(client, monkeypatch):
+    import apps.api.main as main_module
+
+    monkeypatch.setattr(main_module, "get_football_data_org_adapter", lambda session: _StubFdOrgAdapter())
+    import uuid as _uuid
+
+    response = client.get(
+        "/api/v1/admin/providers/football-data-org/team-suggestions",
+        params={"competition_id": str(_uuid.uuid4()), "provider_competition_ref": "PL"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_confirm_team_mappings_writes_ref_index_entry(client, db_session_factory):
+    team_id = asyncio.run(_seed_football_team(db_session_factory))
+
+    response = client.post(
+        "/api/v1/admin/providers/football-data-org/team-mappings",
+        json={"mappings": [{"football_data_org_team_id": "61", "titaniq_team_id": team_id}]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["mapped"] == 1
+
+    async def _resolved():
+        from modules.ingestion.domain.value_objects import EntityKind
+        from modules.ingestion.infrastructure.persistence.repositories import SqlAlchemyProviderRefIndexRepository
+
+        async with db_session_factory() as session:
+            return await SqlAlchemyProviderRefIndexRepository(session=session).get("football_data_org", "61", EntityKind.TEAM)
+
+    assert asyncio.run(_resolved()) == team_id
 
 
 def test_kg_node_read_returns_edges_after_sync(client, db_session_factory):

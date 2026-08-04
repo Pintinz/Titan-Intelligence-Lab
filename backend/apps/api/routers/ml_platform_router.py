@@ -1,9 +1,18 @@
 """Enterprise ML Platform API (Milestone 9.1) — Training, Experiment, Model Registry, Champion,
 Calibration, Benchmark, Monitoring, Retraining, and Evaluation surfaces. Gated at
-`Role.ADMINISTRATOR`, same posture as `prediction_admin_router.py` (Milestone 9): these are
-operator-only views and actions, never exposed to the public prediction/market resource routers.
-`prediction_admin_router.py` itself is untouched — "Prediction APIs unchanged" (Milestone 9.1
-Definition of Done) — every endpoint here is new, none replace an existing one.
+`Role.ADMINISTRATOR` by default, same posture as `prediction_admin_router.py` (Milestone 9): these
+are operator-only views and actions, never exposed to the public prediction/market resource
+routers. `prediction_admin_router.py` itself is untouched — "Prediction APIs unchanged" (Milestone
+9.1 Definition of Done) — every endpoint here is new, none replace an existing one.
+
+Four read-only endpoints (`resolve_champion`, `list_models`, `champion_feature_importance`,
+`list_model_evaluations`) are the exception — they're gated at plain `get_current_user` instead,
+matching the posture every other read-only router in the app already uses (sports, predictions,
+knowledge graph, intelligence). This is what the end-user Learning Intelligence page
+(`/app/learning`) reads: which model is live, why it weighs the features it does, and how it's
+performed — real ML Platform data, not fabricated for public consumption. Every mutation
+endpoint, plus the two operationally-detailed monitoring/experiment endpoints, stays
+administrator-only.
 """
 
 from __future__ import annotations
@@ -15,7 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.api.auth_deps import require_role
+from apps.api.auth_deps import get_current_user, require_role
 from apps.api.composition import (
     build_automatic_model_selection_service,
     build_calibration_report_builder,
@@ -237,7 +246,7 @@ async def decide_experiment(
 
 @router.get("/models/{market_key}")
 async def list_models(
-    market_key: str, session: AsyncSession = Depends(get_session), _user: User = Depends(require_role(Role.ADMINISTRATOR))
+    market_key: str, session: AsyncSession = Depends(get_session), _user: User = Depends(get_current_user)
 ):
     market_id = await _require_market_id(session, market_key)
     service = build_model_registry_service(session)
@@ -289,7 +298,7 @@ async def resolve_champion(
     model_key: str | None = Query(default=None),
     pinned_version: int | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
-    _user: User = Depends(require_role(Role.ADMINISTRATOR)),
+    _user: User = Depends(get_current_user),
 ):
     market_id = await _require_market_id(session, market_key)
     resolver = build_model_version_resolver(session)
@@ -326,7 +335,7 @@ async def promote_champion(
 
 @router.get("/feature-importance/{market_key}")
 async def champion_feature_importance(
-    market_key: str, session: AsyncSession = Depends(get_session), _user: User = Depends(require_role(Role.ADMINISTRATOR))
+    market_key: str, session: AsyncSession = Depends(get_session), _user: User = Depends(get_current_user)
 ):
     """Global SHAP importance for a market's current champion (Milestone 9.1 SHAP integration,
     task #166) — only meaningful once a market's champion is an ML-backed model with a saved
@@ -490,7 +499,7 @@ async def list_model_evaluations(
     model_id: str,
     limit: int = Query(default=50, ge=1, le=500),
     session: AsyncSession = Depends(get_session),
-    _user: User = Depends(require_role(Role.ADMINISTRATOR)),
+    _user: User = Depends(get_current_user),
 ):
     from modules.predictions.infrastructure.persistence.repositories import SqlAlchemyModelEvaluationRepository
 

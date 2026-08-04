@@ -41,6 +41,15 @@ def _clamp(value: float) -> float:
     return min(max(value, 0.0), 1.0)
 
 
+def _binary_distribution(value: str, probability: float) -> dict[str, float]:
+    """Same two-sided split every other binary-shaped predictor reports — empty for a
+    non-classification ``value`` (e.g. a raw regression number), same convention as
+    `TrainedModelPredictor`."""
+    if value not in _CLASSIFICATION_VALUES:
+        return {}
+    return {"positive": probability, "negative": 1.0 - probability}
+
+
 @dataclass
 class VotingEnsemblePredictor:
     market_kind: MarketKind
@@ -72,11 +81,13 @@ class VotingEnsemblePredictor:
         n = len(outputs)
         probability = _clamp(sum(o.probability for o in outputs) / n)
         raw_score = sum(o.raw_score for o in outputs) / n
+        value = outputs[0].value if self._all_agree(outputs) else self._majority_value(outputs)
         return PredictorOutput(
             raw_score=raw_score,
             probability=probability,
-            value=outputs[0].value if self._all_agree(outputs) else self._majority_value(outputs),
+            value=value,
             feature_contributions=self._average_contributions(outputs, [1.0] * n),
+            distribution=_binary_distribution(value, probability),
         )
 
     def _weighted_vote(self, outputs: list[PredictorOutput]) -> PredictorOutput:
@@ -84,11 +95,13 @@ class VotingEnsemblePredictor:
         normalized = [w / total_weight for w in self.weights]
         probability = _clamp(sum(o.probability * w for o, w in zip(outputs, normalized)))
         raw_score = sum(o.raw_score * w for o, w in zip(outputs, normalized))
+        value = self._majority_value(outputs, self.weights)
         return PredictorOutput(
             raw_score=raw_score,
             probability=probability,
-            value=self._majority_value(outputs, self.weights),
+            value=value,
             feature_contributions=self._average_contributions(outputs, normalized),
+            distribution=_binary_distribution(value, probability),
         )
 
     def _hard_vote(self, outputs: list[PredictorOutput]) -> PredictorOutput:
@@ -101,6 +114,7 @@ class VotingEnsemblePredictor:
             probability=probability,
             value=majority_value,
             feature_contributions=self._average_contributions(agreeing, [1.0] * len(agreeing)),
+            distribution=_binary_distribution(majority_value, probability),
         )
 
     def _all_agree(self, outputs: list[PredictorOutput]) -> bool:
@@ -156,6 +170,7 @@ class StackedEnsemblePredictor:
             probability=meta_prediction.probability,
             value=meta_prediction.value,
             feature_contributions=combined_contributions,
+            distribution=_binary_distribution(meta_prediction.value, meta_prediction.probability),
         )
 
 

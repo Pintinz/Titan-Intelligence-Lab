@@ -50,7 +50,18 @@ class SqlAlchemyProviderRepository:
         model = mappers.provider_to_model(provider, existing)
         self.session.add(model)
         await self.session.flush()
+        # `updated_at` (onupdate=func.now()) is expired by the flush on an UPDATE — SQLite's
+        # driver doesn't eagerly fetch onupdate-computed values the way INSERT's server_default
+        # does, so reading model.updated_at below would trigger an implicit, un-awaited lazy
+        # reload (SQLAlchemy's "MissingGreenlet" failure mode) unless explicitly refreshed here.
+        await self.session.refresh(model)
         return mappers.provider_to_domain(model)
+
+    async def delete(self, provider_id: ProviderId) -> None:
+        model = await self.session.get(ProviderModel, provider_id.value)
+        if model is not None:
+            await self.session.delete(model)
+            await self.session.flush()
 
 
 @dataclass
@@ -115,6 +126,21 @@ class SqlAlchemyUsageRepository:
         self.session.add(model)
         await self.session.flush()
         return mappers.usage_to_domain(model)
+
+    async def list_by_provider(
+        self, provider_id: ProviderId, period: QuotaPeriod, limit: int = 30
+    ) -> list[ProviderUsageRecord]:
+        stmt = (
+            select(ProviderUsageRecordModel)
+            .where(
+                ProviderUsageRecordModel.provider_id == provider_id.value,
+                ProviderUsageRecordModel.period == period.value,
+            )
+            .order_by(ProviderUsageRecordModel.window_key.desc())
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return [mappers.usage_to_domain(row) for row in result.scalars().all()]
 
 
 @dataclass

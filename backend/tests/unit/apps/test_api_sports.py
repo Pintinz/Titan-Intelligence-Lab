@@ -106,6 +106,7 @@ async def seeded(db_session_factory):
             Competition(
                 id=CompetitionId(uuid.uuid4()), sport_id=sport.id, name="Premier League",
                 type=CompetitionType.LEAGUE, country="England", tier=1,
+                logo_url="https://cdn.example.com/premier-league.png",
             )
         )
 
@@ -265,6 +266,7 @@ def test_get_fixture(client, auth_headers, seeded):
     data = response.json()["data"]
     assert data["home_team"]["name"] == "Liverpool FC"
     assert data["competition_name"] == "Premier League"
+    assert data["sport_code"] == "football"
 
 
 def test_get_unknown_fixture_returns_404(client, auth_headers):
@@ -287,3 +289,90 @@ def test_list_sport_fixtures_scoped_to_competition(client, auth_headers, seeded)
     )
     assert response.status_code == 200
     assert len(response.json()["data"]) == 1
+
+
+def test_fixture_serialization_includes_competition_id_and_logo(client, auth_headers, seeded):
+    response = client.get("/api/v1/sports/football/fixtures", headers=auth_headers)
+    data = response.json()["data"]
+    assert data[0]["competition_id"] == str(seeded["competition"].id)
+    assert data[0]["competition_logo_url"] == "https://cdn.example.com/premier-league.png"
+    assert data[0]["competition_tier"] == 1
+
+
+@pytest_asyncio.fixture
+async def extra_fixtures(db_session_factory, seeded):
+    """A completed fixture far in the past and a live fixture at real wall-clock `now` — alongside
+    `seeded`'s single SCHEDULED fixture (scheduled at T0 - 1 day) — so status/date/search/pagination
+    filtering on `list_sport_fixtures` has more than one row to actually discriminate between."""
+    async with db_session_factory() as session:
+        completed = await SqlAlchemyFixtureRepository(session=session).upsert(
+            Fixture(
+                id=FixtureId(uuid.uuid4()), season_id=seeded["season"].id,
+                home_team_id=seeded["home"].id, away_team_id=seeded["away"].id,
+                venue_id=seeded["venue"].id, scheduled_at=T0 - timedelta(days=200),
+                status=FixtureStatus.COMPLETED, home_score=2, away_score=1,
+            )
+        )
+        live = await SqlAlchemyFixtureRepository(session=session).upsert(
+            Fixture(
+                id=FixtureId(uuid.uuid4()), season_id=seeded["season"].id,
+                home_team_id=seeded["home"].id, away_team_id=seeded["away"].id,
+                venue_id=seeded["venue"].id, scheduled_at=datetime.now(timezone.utc),
+                status=FixtureStatus.LIVE,
+            )
+        )
+        await session.commit()
+        return {"completed": completed, "live": live}
+
+
+def test_list_sport_fixtures_filters_by_status(client, auth_headers, seeded, extra_fixtures):
+    response = client.get("/api/v1/sports/football/fixtures", params={"status": "completed"}, headers=auth_headers)
+    data = response.json()["data"]
+    assert len(data) == 1
+    assert data[0]["id"] == str(extra_fixtures["completed"].id)
+
+    response = client.get("/api/v1/sports/football/fixtures", params={"status": "live"}, headers=auth_headers)
+    data = response.json()["data"]
+    assert len(data) == 1
+    assert data[0]["id"] == str(extra_fixtures["live"].id)
+
+
+def test_list_sport_fixtures_rejects_unrecognized_status(client, auth_headers, seeded):
+    response = client.get("/api/v1/sports/football/fixtures", params={"status": "nonsense"}, headers=auth_headers)
+    assert response.status_code == 422
+
+
+def test_list_sport_fixtures_filters_by_date_range(client, auth_headers, seeded, extra_fixtures):
+    target_date = (T0 - timedelta(days=1)).date().isoformat()
+    response = client.get(
+        "/api/v1/sports/football/fixtures",
+        params={"date_from": target_date, "date_to": target_date},
+        headers=auth_headers,
+    )
+    data = response.json()["data"]
+    assert len(data) == 1
+    assert data[0]["id"] == str(seeded["fixture"].id)
+
+
+def test_list_sport_fixtures_search_matches_team_name(client, auth_headers, seeded, extra_fixtures):
+    response = client.get("/api/v1/sports/football/fixtures", params={"search": "everton"}, headers=auth_headers)
+    data = response.json()["data"]
+    assert len(data) == 3  # all three seeded fixtures share the same two teams
+
+    response = client.get("/api/v1/sports/football/fixtures", params={"search": "nonexistent-team"}, headers=auth_headers)
+    assert response.json()["data"] == []
+    assert response.json()["meta"]["total"] == 0
+
+
+def test_list_sport_fixtures_pagination_meta(client, auth_headers, seeded, extra_fixtures):
+    response = client.get("/api/v1/sports/football/fixtures", params={"limit": 1, "offset": 0}, headers=auth_headers)
+    body = response.json()
+    assert len(body["data"]) == 1
+    assert body["meta"]["total"] == 3
+    assert body["meta"]["offset"] == 0
+    assert body["meta"]["has_more"] is True
+
+    response = client.get("/api/v1/sports/football/fixtures", params={"limit": 1, "offset": 2}, headers=auth_headers)
+    body = response.json()
+    assert len(body["data"]) == 1
+    assert body["meta"]["has_more"] is False

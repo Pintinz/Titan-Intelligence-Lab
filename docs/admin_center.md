@@ -51,9 +51,70 @@ alerting threshold, priority-aware throttling, and per-provider circuit breaking
 and tested (`backend/modules/admin/`). `SportsProviderRouter`'s response cache is still
 in-memory TTL, not Redis — Redis infrastructure now exists (`RedisFeatureStore`, Milestone 4)
 but hasn't been wired into the provider router itself; that's a small follow-up, not a blocker.
-Request-log storage/viewing, retry-policy configuration beyond the circuit breaker, and webhook
-support are not yet built — data model supports them, service methods land when the Admin UI
-(Milestone 15) needs them.
+Request-log storage/viewing and retry-policy configuration beyond the circuit breaker are not yet
+built — data model supports them, service methods land when the Admin UI needs them.
+
+### Milestone 11B — Provider Registry Admin API
+
+The Operations Center's Provider Management page (Milestone 11A) shipped against an admin
+console that could only *read* providers (`GET /api/v1/admin/providers`) and activate one that
+already existed — there was no way to actually register a provider, add a credential, or delete
+one, which is why the page showed "No providers configured" with nothing wrong underneath it.
+Milestone 11B closes that specific gap; it does **not** rebuild the Provider Management System —
+that was already complete per Milestone 3 above. All additions are additive, `Role.ADMINISTRATOR`-
+gated the same way every other admin route is, and audit-logged through the same
+`identity.audit_log_entries` table role changes use (`AuditAction.PROVIDER_*` values).
+
+**New endpoints** (`backend/apps/api/main.py`, all under `/api/v1/admin/providers`):
+
+| Route | Purpose |
+|---|---|
+| `POST /providers` | Register a provider — now exposes every `ProviderDefinition` field (base URL, auth type, region, version, environment, timeout/retry policy), not just key/name/category/priority. |
+| `GET /providers/{id}` | Fetch one provider. |
+| `PATCH /providers/{id}` | Patch-style update — only fields present in the request body change. |
+| `DELETE /providers/{id}` | Removes a provider and its full history (credentials, usage, health checks, incidents, health state) — the `admin.*` foreign keys were switched to `ON DELETE CASCADE` for this (migration `0025`). |
+| `POST /providers/{id}/disable` | The missing counterpart to the existing `/activate`. |
+| `GET`/`POST /providers/{id}/credentials` | List credentials (masked — `****...<last 4>`, computed server-side from a controlled decrypt-then-discard, never the plaintext) / add a new one. |
+| `POST /providers/{id}/rotate-key` | Wraps the existing `ProviderManagementService.rotate_credential` (deactivates the old credential, keeps its history, stores a new encrypted one). |
+| `POST /providers/{id}/test`, `POST /providers/{id}/refresh` | Runs a real HTTP probe (`modules/admin/infrastructure/connection_tester.py`) against the provider's `base_url` using its active credential, classifies the result (healthy/warning/offline/unauthorized/rate_limited/timeout/not_configured), and records it through the existing `HealthIntelligenceEngine`. `/refresh` is the identical operation under the name the Operations Center brief used for it. |
+| `POST /providers/import-from-env` | One-time migration for a provider whose only credential today is a raw `.env` value — see "Environment variable migration" below. |
+| `GET /providers/{id}/usage` | Real request-count/error-count/quota-remaining data from `provider_usage_records`, not a placeholder. |
+| `GET /providers/{id}/history` | Merges recent health checks and incidents into one timeline. |
+| `GET /providers/categories`, `GET /providers/status` | Aggregate counts (by category, by status, by health) computed from the real provider table — used for the Operations Center's category/status summary tiles. |
+
+**Category expansion**: `ProviderCategory` grew from `sports_data`/`ai` to also cover
+`news`/`odds`/`general` (`modules/admin/domain/value_objects.py`) — the category column was
+already a plain `String(32)`, so this needed no migration.
+
+**Environment variable migration — deliberately not a standing fallback.** The brief that drove
+this milestone asked for "read from DB, fall back to `.env` if unavailable." That's not what got
+built, on purpose: `SportsProviderRouter._resolve_adapter` already has a designed fallback — no
+usable DB credential means the *mock* adapter is used, not a raw environment read. Adding a
+second, permanent env-read path would bypass the vault entirely for any request the DB path
+missed, which is a real security regression, not a neutral compatibility feature. Instead,
+`ProviderManagementService.import_from_env()` (and `POST /providers/import-from-env`) reads a
+named environment variable **exactly once**, encrypts it into the vault, and registers/
+credentials the provider — from that request onward the DB is the only source of truth for that
+provider's credential, identical to a credential entered by hand through `/providers/{id}/credentials`.
+
+**Connection testing** (`modules/admin/infrastructure/connection_tester.py`): deliberately
+provider-agnostic — one HTTP GET to `base_url` with the credential attached per `auth_type`
+(`bearer` / `api_key_header` / `api_key_query` / `basic`), classifying the transport-level
+outcome. It does not parse or understand any individual provider's response schema; that keeps
+one prober working for every current and future provider category the brief named (sports, news,
+AI, odds, general/webhooks) without per-provider code.
+
+**Background health monitoring**: `modules/admin/infrastructure/celery/tasks.py`'s
+`admin.check_all_provider_health` task runs the same connection-test-and-record logic
+(`modules/admin/application/connection_check_service.py`, shared with the manual `/test` and
+`/refresh` endpoints) for every `ACTIVE` provider, on the `PROVIDER_HEALTH_CHECK_INTERVAL_SECONDS`
+(300s) cadence that `beat_schedule.py` had reserved since Milestone 5 but never wired up — see §2a
+above ("Periodic scheduling of recovery probes ... needs Celery beat, not wired until a later
+milestone — this is the method that job will call").
+
+**Migration**: `alembic/versions/0025_provider_registry_fields.py` — additive columns on
+`admin.providers` (all nullable or defaulted) plus the `ON DELETE CASCADE` FK switch described
+above. No existing row, query, or service method is affected.
 
 ## 2a. Provider Health Intelligence
 

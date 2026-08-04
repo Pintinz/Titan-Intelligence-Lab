@@ -145,6 +145,10 @@ export interface KgNodeDto {
   node_type: string
   entity_ref: string
   attributes: Record<string, unknown>
+  aliases: string[]
+  status: string
+  confidence: number
+  version: number
 }
 
 export interface KgEdgeDto {
@@ -159,52 +163,93 @@ export interface KgSubgraphDto {
   edges: KgEdgeDto[]
 }
 
+/** Matches `_serialize_context` (backend/apps/api/routers/graph_router.py) — confirmed against
+ * the live API. A previous version of this type (`{node, related, summary}`) never matched the
+ * real response and crashed `match-detail-page.tsx` the first time a match actually had populated
+ * Knowledge Graph context to render (`related`/`summary` don't exist on the real payload). */
 export interface KgContextDto {
-  node: KgNodeDto
-  related: KgNodeDto[]
-  summary: string | null
+  subject: KgNodeDto
+  neighborhood: KgSubgraphDto
+  related_by_type: Record<string, KgNodeDto[]>
+  generated_at: string | null
 }
 
 // -- intelligence ---------------------------------------------------------------------------
 
+/** Matches `_serialize_news_source` (backend/apps/api/main.py) — a registered origin of news
+ * content (RSS feed, official site, etc.) the admin news-ingestion trigger syncs from. */
+export interface NewsSourceDto {
+  id: string
+  source_type: string
+  name: string
+  url: string
+  is_official: boolean
+  created_at: string | null
+}
+
+/** Matches `_serialize_article` (backend/apps/api/routers/intelligence_router.py) — confirmed
+ * against the live API. No `entities` field exists on an article; entity linking runs through
+ * `NewsEventDto.affected_entity_refs` instead (an article can produce zero or more events). */
 export interface NewsArticleDto {
   id: string
   source_id: string
   title: string
   url: string
   published_at: string
-  entities: string[]
+  language: string
+  version: number
+  status: string
 }
 
+/** Matches `_serialize_event` — confirmed against the live API. `headline`/`entity_refs`/
+ * `category` never existed on the real response; the actual fields are `summary`/
+ * `affected_entity_refs`/`event_type`. */
 export interface NewsEventDto {
   id: string
-  headline: string
+  event_type: string
+  summary: string
+  confidence: number
+  source_id: string
+  article_id: string | null
   occurred_at: string
-  entity_refs: string[]
-  category: string
+  detected_at: string
+  affected_entity_refs: string[]
 }
 
+/** Matches `_serialize_topic` — confirmed against the live API. The originally-declared
+ * `title`/`volume`/`sentiment_score` don't exist on the real response. */
 export interface CommunityTopicDto {
   id: string
   platform: string
-  title: string
-  volume: number
-  sentiment_score: number | null
+  topic_label: string
+  related_entity_refs: string[]
+  post_count: number
+  momentum: number | null
 }
 
+/** Matches `_serialize_sentiment` — confirmed against the live API. */
 export interface SentimentResultDto {
-  entity_ref: string
-  score: number
-  magnitude: number
-  measured_at: string
+  id: string
+  target_entity_ref: string
+  target_entity_type: string
+  label: string
+  momentum: number | null
+  confidence: number
+  source_ref: string | null
+  computed_at: string
 }
 
+/** Matches `_serialize_impact` — confirmed against the live API. There is no single `entity_ref`
+ * on an impact score; it's expressed as which teams/players/competitions were affected. */
 export interface ImpactScoreDto {
   id: string
   news_event_id: string
-  entity_ref: string
   impact_score: number
-  rationale: string | null
+  confidence: number
+  factors: Record<string, unknown>
+  affected_teams: string[]
+  affected_players: string[]
+  affected_competitions: string[]
 }
 
 export interface SummaryDto {
@@ -214,10 +259,15 @@ export interface SummaryDto {
   generated_at: string
 }
 
+/** Matches `_serialize_reliability` — confirmed against the live API. No `sample_size` field
+ * exists on the real response. */
 export interface SourceReliabilityDto {
   source_id: string
   reliability_score: number
-  sample_size: number
+  historical_accuracy: number
+  bias_rating: string | null
+  verification_status: string
+  trust_level: string
 }
 
 // -- predictions / markets --------------------------------------------------------------------
@@ -249,32 +299,42 @@ export interface FeatureMarketMappingDto {
   weight: number
 }
 
+/**
+ * Matches `_serialize_confidence` (backend/apps/api/routers/prediction_analytics_router.py) and
+ * the inline `confidence` block of `_serialize_prediction` (prediction_router.py) — confirmed
+ * against the live API, not the originally-declared shape (`overall`/`data_quality`/
+ * `model_certainty`/etc., none of which the backend actually returns). `composite` is the overall
+ * score; the other nine are the named factors, matching `modules/predictions/domain/entities.py`.
+ */
 export interface ConfidenceBreakdownDto {
-  overall: number
-  data_quality: number
-  feature_completeness: number
-  model_certainty: number
+  feature_quality: number
+  feature_freshness: number
   historical_accuracy: number
-  sample_size_adequacy: number
-  market_liquidity: number
-  temporal_relevance: number
-  ensemble_agreement: number
-  calibration_quality: number
-  volatility_penalty: number
+  knowledge_graph_completeness: number
+  news_reliability: number
+  community_reliability: number
+  data_completeness: number
+  model_reliability: number
+  prediction_stability: number
+  composite: number
 }
 
+/**
+ * Matches `_serialize_explanation`/the inline `explanation` block of `_serialize_prediction` —
+ * confirmed against the live API. Two drifts from the originally-declared shape: feature entries
+ * are `[feature_key, contribution]` tuples, not `{feature_key, contribution}` objects (the
+ * declared shape caused a live crash — `f.feature_key/f.contribution` on an array is `undefined`);
+ * and KG/news/community evidence are string lists, not a single nullable string each. No
+ * `shap_explanation` field exists in the real response.
+ */
 export interface ExplanationBundleDto {
-  top_positive_features: Array<{ feature_key: string; contribution: number }>
-  top_negative_features: Array<{ feature_key: string; contribution: number }>
+  top_positive_features: Array<[feature_key: string, contribution: number]>
+  top_negative_features: Array<[feature_key: string, contribution: number]>
   feature_importance: Record<string, number>
-  knowledge_graph_contribution: string | null
-  news_contribution: string | null
-  community_contribution: string | null
+  knowledge_graph_evidence: string[]
+  news_contribution: string[]
+  community_contribution: string[]
   ai_explanation: string | null
-  shap_explanation?: {
-    base_value: number
-    feature_contributions: Array<{ feature_key: string; shap_value: number }>
-  } | null
 }
 
 export interface PredictionDto {
@@ -291,6 +351,41 @@ export interface PredictionDto {
   status: string
   generated_at: string
   data_freshness: string | null
+  /** Every outcome's calibrated probability for a classification-shaped market (real label ->
+   * probability), including `value`'s own — "Alternative Outcomes". Empty for a regression-shaped
+   * market (`confidence_interval`/`expected_error` populated instead). */
+  probability_distribution: Record<string, number>
+  /** `[low, high]` — populated only for a regression-shaped market, where `value` is the
+   * predicted continuous number itself rather than a classification label. */
+  confidence_interval: [number, number] | null
+  /** Historical mean absolute error for this market — populated only for a regression-shaped
+   * market, and only once it has evaluated outcome history to derive it from. */
+  expected_error: number | null
+}
+
+/** Matches `_serialize_summary` (prediction_analytics_router.py) — the shape actually returned by
+ * `GET /predictions/history/{subject_ref}` and `POST /predictions/compare`, a flatter view than
+ * `PredictionDto` (no nested `confidence`/`explanation`, just the composite score). */
+export interface PredictionSummaryDto {
+  id: string
+  market_id: string
+  model_id: string
+  subject_ref: string
+  value: string | number
+  probability: number
+  confidence_composite: number
+  status: string
+  generated_at: string | null
+}
+
+/** Matches `_serialize_summary` + the market/evidence fields `ai_picks` (prediction_analytics_router.py)
+ * adds on top — a `PredictionSummaryDto` enriched with which market/sport it belongs to, since a
+ * cross-sport feed can't assume the caller already knows. */
+export interface PredictionPickDto extends PredictionSummaryDto {
+  market_key: string
+  market_name: string
+  sport_code: string
+  evidence_count: number
 }
 
 // -- sports (backed by the new sports_router.py, Task #196 — modules/sports/domain/entities.py) -
@@ -302,6 +397,7 @@ export interface CompetitionSummaryDto {
   type: string
   country: string | null
   tier: number | null
+  logo_url: string | null
 }
 
 export interface TeamSummaryDto {
@@ -311,6 +407,7 @@ export interface TeamSummaryDto {
   short_name: string
   country: string | null
   venue_name: string | null
+  logo_url: string | null
 }
 
 export interface PlayerSummaryDto {
@@ -326,13 +423,17 @@ export interface PlayerSummaryDto {
 export interface FixtureSummaryDto {
   id: string
   season_id: string
+  sport_code: string | null
+  competition_id: string | null
   competition_name: string
-  home_team: { id: string; name: string; short_name: string }
-  away_team: { id: string; name: string; short_name: string }
+  competition_logo_url: string | null
+  competition_tier: number | null
+  home_team: { id: string; name: string; short_name: string; logo_url: string | null }
+  away_team: { id: string; name: string; short_name: string; logo_url: string | null }
   venue_name: string | null
   scheduled_at: string
   status: string
-  final_state: Record<string, unknown> | null
+  final_state: { home: number | null; away: number | null } | null
 }
 
 export interface StandingRowDto {
@@ -341,6 +442,32 @@ export interface StandingRowDto {
   rank: number
   points: number
   record: Record<string, unknown>
+}
+
+// -- Watchlist ----------------------------------------------------------------------------------
+
+export type WatchlistEntityType = 'team' | 'competition' | 'fixture' | 'prediction'
+
+export interface WatchlistEntryDto {
+  id: string
+  entity_type: WatchlistEntityType
+  entity_ref: string
+  created_at: string | null
+}
+
+// -- Alerts ---------------------------------------------------------------------------------
+
+export type AlertType = 'kickoff' | 'final_result' | 'prediction_changed'
+
+export interface AlertEventDto {
+  id: string
+  alert_type: AlertType
+  entity_type: WatchlistEntityType
+  entity_ref: string
+  title: string
+  body: string
+  created_at: string | null
+  read_at: string | null
 }
 
 // -- ML platform (admin) ----------------------------------------------------------------------
@@ -380,4 +507,133 @@ export interface CalibrationReportDto {
   expected_calibration_error: number
   brier_score: number
   reliability_curve: Array<{ predicted_mean: number; actual_rate: number; sample_count: number }>
+}
+
+// -- Provider Registry (Milestone 11B) ----------------------------------------------------------
+
+export type ProviderCategory = 'sports_data' | 'ai' | 'news' | 'odds' | 'general'
+export type ProviderStatus = 'active' | 'inactive' | 'maintenance'
+export type ProviderAuthType = 'bearer' | 'api_key_header' | 'api_key_query' | 'basic'
+export type ConnectionTestStatus =
+  | 'healthy'
+  | 'warning'
+  | 'offline'
+  | 'unauthorized'
+  | 'rate_limited'
+  | 'timeout'
+  | 'not_configured'
+
+export interface ProviderDto {
+  id: string
+  key: string
+  name: string
+  category: ProviderCategory
+  status: ProviderStatus
+  priority: number
+  daily_quota_limit: number | null
+  monthly_quota_limit: number | null
+  cache_ttl_seconds: number
+  poll_interval_seconds: number
+  base_url: string | null
+  auth_type: ProviderAuthType | null
+  auth_header_name: string | null
+  region: string | null
+  version: string | null
+  environment: string
+  timeout_seconds: number
+  retry_count: number
+  retry_delay_seconds: number
+  created_by: string | null
+  updated_by: string | null
+  created_at: string | null
+  updated_at: string | null
+  /** Best-effort capability read from the provider's own connection-test response (e.g. an
+   * API-SPORTS account's subscription plan) — null until a "Test connection" run detects one. */
+  capability_note: string | null
+  capability_checked_at: string | null
+}
+
+export interface ProviderCredentialMaskedDto {
+  id: string
+  provider_id: string
+  label: string
+  masked_value: string
+  is_active: boolean
+  created_at: string | null
+  rotated_at: string | null
+  expires_at: string | null
+}
+
+export interface SyncRunSummaryDto {
+  run_id: string
+  status: string
+  records_fetched: number
+  records_created: number
+  records_updated: number
+  records_rejected: number
+}
+
+export interface CompetitionFixtureSourceDto {
+  competition_id: string
+  preferred_provider_key: string
+  provider_competition_ref: string
+  notes: string | null
+  updated_at: string | null
+}
+
+export interface TeamMappingSuggestionDto {
+  football_data_org_team_id: string
+  football_data_org_team_name: string
+  suggested_titaniq_team_id: string | null
+  suggested_titaniq_team_name: string | null
+  confidence: number
+}
+
+export interface ConnectionTestResultDto {
+  status: ConnectionTestStatus
+  latency_ms: number | null
+  http_status: number | null
+  message: string
+}
+
+export interface ProviderUsageRecordDto {
+  provider_id: string
+  period: 'daily' | 'monthly'
+  window_key: string
+  request_count: number
+  error_count: number
+}
+
+export interface ProviderUsageSummaryDto {
+  provider_id: string
+  period: 'daily' | 'monthly'
+  quota_limit: number | null
+  current_window_requests: number
+  remaining_requests: number | null
+  success_rate: number | null
+  history: ProviderUsageRecordDto[]
+}
+
+export interface ProviderHistoryDto {
+  recent_checks: Array<{ checked_at: string; success: boolean; latency_ms: number | null; message: string | null }>
+  incidents: Array<{
+    id: string
+    provider_id: string
+    severity: string
+    opened_at: string
+    resolved_at: string | null
+    trigger: string
+    is_open: boolean
+  }>
+}
+
+export interface ProviderCategorySummaryDto {
+  category: ProviderCategory
+  provider_count: number
+}
+
+export interface ProviderStatusSummaryDto {
+  total_providers: number
+  by_status: Record<string, number>
+  by_health: Record<string, number>
 }

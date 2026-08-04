@@ -1,13 +1,23 @@
 """Unified read/write facade over the offline (Postgres, audited) and online (Redis, low-
 latency) feature stores (docs/feature_catalog.md §7). Writes always go to both — offline first,
 since it's the durable record; online is a cache and losing it just means the next read falls
-back to offline. Reads prefer online, falling back to offline on a cache miss."""
+back to offline. Reads prefer online, falling back to offline on a cache miss.
+
+Audit fix (2026-08-02): the online cache write was never actually wrapped to honor this module's
+own documented "losing it just means falling back to offline" contract — a Redis connection
+failure raised straight out of `write()` and rolled back the whole (already-durable) offline
+write along with it. Now caught narrowly (`redis.exceptions.RedisError`, the base class covering
+connection/timeout failures) and skipped: the durable record is already written by the time the
+cache write is attempted, so a cache outage degrades reads (next read falls back to offline, per
+this module's own docstring), it must never lose a write."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
+
+import redis.exceptions
 
 from modules.features.domain.entities import FeatureValue
 from modules.features.domain.value_objects import EntityType, FeatureDataType, FeatureKey, QualityFlag, FeatureValueId
@@ -67,14 +77,20 @@ class FeatureStoreService:
             quality_flags=self._validate(definition, value),
         )
         await self.offline.record(record)  # durable record written regardless of quality flags
-        await self.online.set(record, ttl_seconds=definition.online_ttl_seconds)
+        try:
+            await self.online.set(record, ttl_seconds=definition.online_ttl_seconds)
+        except redis.exceptions.RedisError:
+            pass  # cache unavailable — the durable offline record above already succeeded
         return record
 
     async def read(
         self, feature_key: str, entity_type: EntityType, entity_id: str
     ) -> FeatureValue | None:
         key = feature_key if isinstance(feature_key, FeatureKey) else FeatureKey(feature_key)
-        cached = await self.online.get(key, entity_type, entity_id)
+        try:
+            cached = await self.online.get(key, entity_type, entity_id)
+        except redis.exceptions.RedisError:
+            cached = None  # cache unavailable — degrades exactly like a cache miss
         if cached is not None:
             return cached
         return await self.offline.get_latest(key, entity_type, entity_id)

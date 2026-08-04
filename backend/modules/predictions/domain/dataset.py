@@ -5,14 +5,18 @@ Store" is satisfied here by building samples from `Prediction.feature_snapshot`,
 always the market's Feature-to-Market-Registry-filtered resolution of real Feature Store values,
 never a raw/ad-hoc feature read).
 
-**ADR-052 label convention**: for a `TargetType.CLASSIFICATION` market, `PredictionOutcome.actual_value`
-is expected to literally be `"positive"`/`"negative"` — the same generic two-sided convention
-`WeightedLogisticPredictor`/`TrainedModelPredictor` already produce as `PredictorOutput.value`
-(docs/decisions.md — data-driven market registry; `infrastructure/predictors/weighted_scoring.py`
-docstring explicitly defers per-market real-label translation to a layer that doesn't exist yet).
-Until that per-market translation layer exists, outcome recording follows the same convention by
-symmetry — the Dataset Builder does not invent a third convention. For `TargetType.REGRESSION`,
-`actual_value` is the stringified continuous realized value, parsed with `float()` directly.
+**Label convention (updated Milestone 9.2 Phase 2/3)**: for a `TargetType.CLASSIFICATION` market,
+`PredictionOutcome.actual_value` is a human-readable real-world fact (e.g. `"btts_yes"`,
+`"home_win"`, `"HOME_WIN"`) — never the generic `"positive"`/`"negative"` this module originally
+assumed (ADR-052's original convention, obsoleted once `outcome_label_mapper.py` and
+`OutcomeResolutionService` started recording real domain labels instead of the generic predictor's
+bare output). The Dataset Builder recovers the real positive/negative training label from
+`outcome.error` (whether the recorded prediction matched the real outcome) combined with
+`real_label_is_positive(market.market_key, prediction.value)` (what the prediction itself claimed) —
+see `dataset_builder_service._label_from_outcome`. For a market this can't resolve (no binary
+polarity — e.g. a 3-way market like `football.match_winner`), the sample is skipped, never
+mislabeled. For `TargetType.REGRESSION`, `actual_value` is the stringified continuous realized
+value, parsed with `float()` directly.
 """
 
 from __future__ import annotations

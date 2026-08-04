@@ -38,9 +38,20 @@ class TrainedModelPredictor:
         prediction = self.model.predict_one(features)
         importance = self.model.feature_importance()
         contributions = {key: value * importance.get(key, 0.0) for key, value in features.items()}
+        # Every trained-model adapter today is binary-only (`ModelPrediction.value` is
+        # "positive"/"negative" for a CLASSIFICATION target, a raw formatted number for
+        # REGRESSION — see the four framework adapters' `predict_one()`), so the two-sided split
+        # is the whole distribution a trained model can honestly report; a raw-number value means
+        # this is a REGRESSION prediction, which has no discrete distribution to report at all.
+        distribution = (
+            {"positive": prediction.probability, "negative": 1.0 - prediction.probability}
+            if prediction.value in ("positive", "negative")
+            else {}
+        )
         return PredictorOutput(
             raw_score=prediction.raw_score,
             probability=prediction.probability,
             value=prediction.value,
             feature_contributions=contributions,
+            distribution=distribution,
         )

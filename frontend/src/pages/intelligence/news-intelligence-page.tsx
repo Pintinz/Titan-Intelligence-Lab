@@ -30,7 +30,7 @@ export default function NewsIntelligencePage() {
     queryFn: () => intelligenceApi.newsTimeline({ limit: 50 }),
   })
 
-  const headlineFor = (newsEventId: string) => timelineQuery.data?.find((e) => e.id === newsEventId)?.headline
+  const summaryFor = (newsEventId: string) => timelineQuery.data?.find((e) => e.id === newsEventId)?.summary
 
   return (
     <div className="mx-auto max-w-5xl space-y-10 p-4 lg:p-8">
@@ -68,13 +68,6 @@ export default function NewsIntelligencePage() {
                   {new Date(article.published_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
                 </p>
                 <p className="font-display text-sm font-semibold leading-snug text-text-primary">{article.title}</p>
-                {article.entities.length > 0 && (
-                  <div className="flex flex-wrap gap-1.5">
-                    {article.entities.map((entity) => (
-                      <Tag key={entity}>{entity}</Tag>
-                    ))}
-                  </div>
-                )}
                 <a
                   href={article.url}
                   target="_blank"
@@ -108,13 +101,21 @@ export default function NewsIntelligencePage() {
         )}
         {impactQuery.data && impactQuery.data.length > 0 && (
           <div className="space-y-3">
-            {impactQuery.data.map((score) => (
+            {impactQuery.data.map((score) => {
+              const affected = [...score.affected_teams, ...score.affected_players, ...score.affected_competitions]
+              return (
               <Card key={score.id} className="flex items-center gap-4 p-4">
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium text-text-primary">
-                    {headlineFor(score.news_event_id) ?? `Event affecting ${score.entity_ref}`}
+                    {summaryFor(score.news_event_id) ?? (affected.length > 0 ? `Event affecting ${affected[0]}` : 'Scored news event')}
                   </p>
-                  {score.rationale && <p className="mt-0.5 truncate text-xs text-text-secondary">{score.rationale}</p>}
+                  {affected.length > 0 && (
+                    <div className="mt-1 flex flex-wrap gap-1.5">
+                      {affected.slice(0, 4).map((ref) => (
+                        <Tag key={ref}>{ref}</Tag>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <div className="flex w-28 shrink-0 items-center gap-2">
                   <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-bg-secondary">
@@ -126,7 +127,8 @@ export default function NewsIntelligencePage() {
                   <span className="font-mono text-xs tabular-nums text-text-secondary">{score.impact_score.toFixed(2)}</span>
                 </div>
               </Card>
-            ))}
+              )
+            })}
           </div>
         )}
       </section>

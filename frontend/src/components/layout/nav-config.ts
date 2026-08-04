@@ -1,16 +1,18 @@
 import type { LucideIcon } from 'lucide-react'
 import {
   LayoutGrid,
-  CircleDot,
-  Newspaper,
-  GraduationCap,
+  Radio,
+  Trophy,
+  Users,
+  Target,
+  Star,
+  Bell,
   Sparkles,
-  BarChart3,
-  Share2,
   ServerCog,
   Settings,
-  Bell,
+  CreditCard,
   HelpCircle,
+  UserCircle,
 } from 'lucide-react'
 import type { Role } from '@/lib/api/types'
 
@@ -29,33 +31,32 @@ export interface NavGroup {
 }
 
 /**
- * TitanIQ IA — four Sport Intelligence Centers (each its own Live/Match/Team/Player/Competition/
- * Prediction Laboratory/News/Community architecture, built out sport-by-sport starting Phase 2),
- * plus platform-wide intelligence surfaces that cut across sports. Table Tennis, not Tennis — the
- * backend's real Phase One roster (docs/titaniq.md §3).
+ * TitanIQ IA — task-first primary sidebar (Home/Live/Competitions/Teams/AI Picks/Watchlist/
+ * Alerts/Assistant), not sport-first. Sport is a filter within Live/Competitions/Teams/AI Picks,
+ * not a nav destination — the four Sport Intelligence Center routes (/app/:sport/*) still exist
+ * and are still how Match/Team/Competition/Player detail pages are reached, just not listed here
+ * directly anymore.
+ *
+ * News Intelligence, Knowledge Graph, Learning Intelligence, and Analytics are deliberately
+ * absent — per product direction, these are platform capabilities surfaced contextually inside
+ * Match/Team/Competition/AI Picks/Assistant pages, not standalone nav destinations. Learning
+ * Intelligence specifically stays an administrator capability inside Operations Center (its
+ * existing /app/ops/ml page); end users consume its outputs through predictions, confidence,
+ * and explainability, not a dedicated page. Their routes are not deleted, only unlinked from
+ * primary nav — still reachable directly and via the command palette.
  */
 export const NAV_GROUPS: NavGroup[] = [
   {
-    label: 'Overview',
-    items: [{ label: 'Dashboard', href: '/app', icon: LayoutGrid }],
-  },
-  {
-    label: 'Intelligence Centers',
+    label: 'Explore',
     items: [
-      { label: 'Football', href: '/app/football', icon: CircleDot },
-      { label: 'Basketball', href: '/app/basketball', icon: CircleDot },
-      { label: 'Baseball', href: '/app/baseball', icon: CircleDot },
-      { label: 'Table Tennis', href: '/app/table-tennis', icon: CircleDot },
-    ],
-  },
-  {
-    label: 'Platform Intelligence',
-    items: [
-      { label: 'News Intelligence', href: '/app/news', icon: Newspaper },
-      { label: 'Learning Intelligence', href: '/app/learning', icon: GraduationCap },
-      { label: 'TitanIQ Insights', href: '/app/insights', icon: Sparkles },
-      { label: 'Analytics', href: '/app/analytics', icon: BarChart3 },
-      { label: 'Knowledge Graph', href: '/app/graph', icon: Share2 },
+      { label: 'Home', href: '/app', icon: LayoutGrid },
+      { label: 'Live', href: '/app/live', icon: Radio },
+      { label: 'Competitions', href: '/app/competitions', icon: Trophy },
+      { label: 'Teams', href: '/app/teams', icon: Users },
+      { label: 'AI Picks', href: '/app/picks', icon: Target },
+      { label: 'Watchlist', href: '/app/watchlist', icon: Star },
+      { label: 'Alerts', href: '/app/notifications', icon: Bell },
+      { label: 'TitanIQ Assistant', href: '/app/insights', icon: Sparkles },
     ],
   },
   {
@@ -67,9 +68,10 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: 'Account',
     items: [
-      { label: 'Notifications', href: '/app/notifications', icon: Bell },
       { label: 'Settings', href: '/app/settings', icon: Settings },
+      { label: 'Upgrade', href: '/app/billing', icon: CreditCard },
       { label: 'Help', href: '/app/help', icon: HelpCircle },
+      { label: 'Profile', href: '/app/profile', icon: UserCircle },
     ],
   },
 ]
@@ -80,4 +82,6 @@ export const ALL_NAV_ITEMS: NavItem[] = NAV_GROUPS.flatMap((g) => g.items)
 export const BRAND = {
   name: 'TitanIQ',
   tagline: 'See Every Match Through Intelligence.',
+  description:
+    'TitanIQ transforms sports data, news, community signals, and machine learning into explainable sports intelligence.',
 }

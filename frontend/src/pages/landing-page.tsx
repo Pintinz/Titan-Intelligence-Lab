@@ -1,4 +1,6 @@
-import { LandingNav } from './landing/landing-nav'
+import { SiteHeader } from '@/components/layout/site-header'
+import { SiteFooter } from '@/components/layout/site-footer'
+import { Seo } from '@/components/seo/seo'
 import { HeroSection } from './landing/hero-section'
 import { FeaturedMatchSection } from './landing/featured-match-section'
 import { IntelligenceFeedSection } from './landing/intelligence-feed-section'
@@ -11,12 +13,16 @@ import { InsightsSection } from './landing/insights-section'
 import { LearningIntelligenceSection } from './landing/learning-intelligence-section'
 import { PlatformStatisticsSection } from './landing/platform-statistics-section'
 import { CtaSection } from './landing/cta-section'
-import { LandingFooter } from './landing/landing-footer'
 
 export default function LandingPage() {
   return (
     <div className="min-h-svh bg-bg-primary">
-      <LandingNav />
+      <Seo
+        title="TitanIQ — Sports Intelligence Beyond Prediction"
+        description="TitanIQ transforms live sports data, structured intelligence, news, and community signals into explainable sports intelligence across Football, Basketball, Baseball, and Table Tennis."
+        path="/"
+      />
+      <SiteHeader />
       <HeroSection />
       <TodaysIntelligenceSection />
       <FeaturedMatchSection />
@@ -29,7 +35,7 @@ export default function LandingPage() {
       <LearningIntelligenceSection />
       <PlatformStatisticsSection />
       <CtaSection />
-      <LandingFooter />
+      <SiteFooter />
     </div>
   )
 }

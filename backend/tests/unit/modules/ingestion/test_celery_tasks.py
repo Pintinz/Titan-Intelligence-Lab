@@ -46,6 +46,14 @@ class FakeOrchestrator:
         self.calls.append(("sync_standings", sport_code, competition_ref, season_label, season_id))
         return self._respond()
 
+    async def sync_odds_for_fixture(self, sport_code, fixture_ref, fixture_id, now):
+        self.calls.append(("sync_odds_for_fixture", sport_code, fixture_ref, fixture_id))
+        return self._respond()
+
+    async def sync_team_statistics_for_fixture(self, sport_code, fixture_ref, fixture_id, now):
+        self.calls.append(("sync_team_statistics_for_fixture", sport_code, fixture_ref, fixture_id))
+        return self._respond()
+
     def _respond(self):
         if self.raise_error:
             raise self.raise_error
@@ -117,6 +125,30 @@ def test_sync_standings_task_calls_orchestrator(fake_orchestrator):
 
     assert result.get()["status"] == "succeeded"
     assert fake_orchestrator.calls[0][:3] == ("sync_standings", "football", "39")
+
+
+def test_sync_odds_task_calls_orchestrator_with_reconstructed_provider_ref(fake_orchestrator):
+    result = tasks_module.sync_odds_task.delay("football", "mock", "fx1", "fixture-id-1", T0.isoformat())
+
+    assert result.get()["status"] == "succeeded"
+    call = fake_orchestrator.calls[0]
+    assert call[0] == "sync_odds_for_fixture"
+    assert call[1] == "football"
+    assert call[2].provider == "mock"
+    assert call[2].external_id == "fx1"
+    assert call[3] == "fixture-id-1"
+
+
+def test_sync_team_statistics_task_calls_orchestrator_with_reconstructed_provider_ref(fake_orchestrator):
+    result = tasks_module.sync_team_statistics_task.delay("football", "mock", "fx1", "fixture-id-1", T0.isoformat())
+
+    assert result.get()["status"] == "succeeded"
+    call = fake_orchestrator.calls[0]
+    assert call[0] == "sync_team_statistics_for_fixture"
+    assert call[1] == "football"
+    assert call[2].provider == "mock"
+    assert call[2].external_id == "fx1"
+    assert call[3] == "fixture-id-1"
 
 
 def test_sync_live_fixtures_task_routes_to_live_queue():

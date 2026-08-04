@@ -93,6 +93,68 @@ def _serialize_summary(prediction: Prediction) -> dict:
     }
 
 
+# -- AI Picks ------------------------------------------------------------------------------------
+
+
+@router.get("/picks")
+async def ai_picks(
+    limit: int = Query(default=20, ge=1, le=100),
+    sport_code: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+    _user: User = Depends(get_current_user),
+):
+    """A curated, confidence-ranked feed across every sport — reuses
+    ``PredictionRepositoryPort.list_recent`` (already powers ``/monitoring/summary`` above)
+    rather than adding a new repository query. Only ``PUBLISHED`` predictions qualify: that's
+    the state `prediction_router.approve_prediction` gates a below-threshold ``DRAFT`` into
+    (docs Part 6 "Admin Actions") — AI Picks must never surface an unreviewed or below-threshold
+    prediction as if it were a vetted pick. Sorted by ``confidence.composite`` across a wider
+    recent window than ``limit`` so a genuinely high-confidence pick from a quieter market isn't
+    pushed out by a flood of lower-confidence predictions on a busier one.
+    """
+    service = build_prediction_cache_service(session)
+    market_service = build_market_registry_service(session)
+
+    recent = await service.predictions.list_recent(limit=max(limit * 10, 500))
+    published = [p for p in recent if p.status is PredictionStatus.PUBLISHED]
+
+    market_cache: dict[str, object] = {}
+    picks: list[tuple[Prediction, object]] = []
+    for prediction in published:
+        market_key = str(prediction.market_id)
+        if market_key not in market_cache:
+            market_cache[market_key] = await market_service.markets.get(prediction.market_id)
+        market = market_cache[market_key]
+        if market is None:
+            continue
+        if sport_code is not None and market.sport_code != sport_code:
+            continue
+        picks.append((prediction, market))
+
+    picks.sort(key=lambda pm: pm[0].confidence.composite, reverse=True)
+    top = picks[:limit]
+
+    return envelope(
+        data=[
+            {
+                **_serialize_summary(prediction),
+                "market_key": market.market_key,
+                "market_name": market.name,
+                "sport_code": market.sport_code,
+                "evidence_count": (
+                    len(prediction.explanation.top_positive_features)
+                    + len(prediction.explanation.top_negative_features)
+                    + len(prediction.explanation.knowledge_graph_evidence)
+                    + len(prediction.explanation.news_contribution)
+                    + len(prediction.explanation.community_contribution)
+                ),
+            }
+            for prediction, market in top
+        ],
+        meta={"count": len(top)},
+    )
+
+
 # -- Confidence ------------------------------------------------------------------------------------
 
 

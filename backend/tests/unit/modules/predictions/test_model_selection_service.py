@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -43,12 +44,30 @@ def _classification_dataset(n: int = 60, status: DatasetStatus = DatasetStatus.A
     )
 
 
+@dataclass
+class _InMemoryArtifactStore:
+    store: dict = field(default_factory=dict)
+
+    async def save(self, key: str, payload: bytes) -> str:
+        self.store[key] = payload
+        return key
+
+    async def load(self, ref: str) -> bytes:
+        return self.store[ref]
+
+
 @pytest.fixture
-def service(model_repo, experiment_repo_fake):
+def artifact_store():
+    return _InMemoryArtifactStore()
+
+
+@pytest.fixture
+def service(model_repo, experiment_repo_fake, artifact_store):
     return AutomaticModelSelectionService(
         training_pipeline=TrainingPipelineService(),
         model_registry=ModelRegistryService(models=model_repo),
         experiments=ExperimentTrackingService(experiments=experiment_repo_fake),
+        artifact_store=artifact_store,
     )
 
 
@@ -189,6 +208,29 @@ class TestSelectAndRegisterChallenger:
 
         persisted = await model_repo.get(challenger.id)
         assert persisted.status is ModelStatus.CHALLENGER
+
+    async def test_persists_a_real_artifact_the_winning_model_can_be_reloaded_from(
+        self, service, artifact_store
+    ):
+        """Audit fix: registration previously left artifact_ref unset, so a Challenger's real
+        fitted weights were never persisted anywhere — TrainedModelPredictor/ModelLoaderService
+        had nothing to load. The saved payload must be the actual serialized winning model, not
+        a placeholder."""
+        dataset = _classification_dataset()
+
+        challenger, selection = await service.select_and_register_challenger(
+            market_id=dataset.market_id,
+            dataset=dataset,
+            target_type=TargetType.CLASSIFICATION,
+            model_key_prefix="football.match_result",
+            next_version=1,
+            now=T0,
+            candidates=FAST_CLASSIFICATION_CANDIDATES,
+        )
+
+        assert challenger.artifact_ref is not None
+        assert challenger.artifact_ref in artifact_store.store
+        assert artifact_store.store[challenger.artifact_ref] == selection.winning_model.serialize()
 
     async def test_records_a_model_selection_experiment(self, service):
         dataset = _classification_dataset()

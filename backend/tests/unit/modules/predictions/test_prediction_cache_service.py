@@ -17,6 +17,7 @@ from modules.features.domain.value_objects import (
     FeatureValueId,
     QualityFlag,
 )
+from modules.alerts.domain.value_objects import AlertType
 from modules.intelligence.application.intelligence_retrieval_service import IntelligenceRetrievalService
 from modules.intelligence.ports.retrieval import IntelligenceRetrievalQuery, IntelligenceRetrievalResult
 from modules.predictions.application.confidence_engine import ConfidenceEngine
@@ -35,6 +36,7 @@ from modules.predictions.application.predictor_registry import PredictorRegistry
 from modules.predictions.domain.value_objects import MarketKind, PredictionStatus, TargetType
 from modules.predictions.infrastructure.calibration.platt_scaling_calibrator import PlattScalingCalibrator
 from modules.predictions.infrastructure.predictors.weighted_scoring import WeightedLogisticPredictor
+from modules.watchlist.domain.value_objects import WatchlistEntityType
 
 T0 = datetime(2026, 7, 26, tzinfo=timezone.utc)
 
@@ -43,6 +45,12 @@ T0 = datetime(2026, 7, 26, tzinfo=timezone.utc)
 class _EmptyRetrievalPort:
     async def retrieve(self, query: IntelligenceRetrievalQuery) -> IntelligenceRetrievalResult:
         return IntelligenceRetrievalResult(query=query, documents=(), truncated=False)
+
+
+@dataclass
+class _EmptyTeamNamesResolver:
+    async def team_names_for_match(self, subject_ref: str) -> tuple[str, ...]:
+        return ()
 
 
 @dataclass
@@ -87,7 +95,7 @@ def engine(
     predictors.register_many(WeightedLogisticPredictor.SUPPORTED_KINDS, WeightedLogisticPredictor())
     retrieval_service = IntelligenceRetrievalService(
         news=_EmptyRetrievalPort(), community=_EmptyRetrievalPort(), knowledge_graph=_EmptyRetrievalPort(),
-        ai_reports=_EmptyRetrievalPort(),
+        ai_reports=_EmptyRetrievalPort(), team_names=_EmptyTeamNamesResolver(),
     )
     explainability_engine = ExplainabilityEngine(retrieval=retrieval_service, text_intelligence=_FakeTextIntelligenceProvider())
     return PredictionEngine(
@@ -106,6 +114,30 @@ def engine(
 @pytest.fixture
 def service(engine, market_repo, prediction_repo, prediction_audit_repo):
     return PredictionCacheService(engine=engine, markets=market_repo, predictions=prediction_repo, audits=prediction_audit_repo)
+
+
+@dataclass
+class _SpyAlertNotifier:
+    calls: list = None
+
+    def __post_init__(self):
+        self.calls = []
+
+    async def notify_watchers(self, entity_type, entity_ref, alert_type, title, body, now):
+        self.calls.append((entity_type, entity_ref, alert_type, title, body))
+        return []
+
+
+@pytest.fixture
+def alert_spy():
+    return _SpyAlertNotifier()
+
+
+@pytest.fixture
+def service_with_alerts(engine, market_repo, prediction_repo, prediction_audit_repo, alert_spy):
+    return PredictionCacheService(
+        engine=engine, markets=market_repo, predictions=prediction_repo, audits=prediction_audit_repo, alerts=alert_spy
+    )
 
 
 async def _setup_production_market(
@@ -322,3 +354,63 @@ async def test_regenerate_bypasses_cache_ttl_and_supersedes_previous(
 async def test_regenerate_raises_for_unknown_market(service):
     with pytest.raises(MarketNotFoundError):
         await service.regenerate("does.not.exist", EntityType.FIXTURE, "fixture-1", "fixture-1", now=T0)
+
+
+@pytest.mark.asyncio
+async def test_first_publish_does_not_notify_watchers(
+    service_with_alerts, alert_spy, market_registry, model_registry, mapping_service,
+    feature_definition_repo, feature_value_repo,
+):
+    """No previous PUBLISHED prediction to supersede — nothing has "changed" yet, so no alert."""
+    market, _ = await _setup_production_market(
+        market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+        "football.alerts_first_market",
+    )
+
+    await service_with_alerts.get_or_generate(market.market_key, EntityType.FIXTURE, "fixture-1", "fixture-1", now=T0)
+
+    assert alert_spy.calls == []
+
+
+@pytest.mark.asyncio
+async def test_regenerating_a_published_prediction_notifies_watchers(
+    service_with_alerts, alert_spy, market_registry, model_registry, mapping_service,
+    feature_definition_repo, feature_value_repo,
+):
+    market, _ = await _setup_production_market(
+        market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+        "football.alerts_regenerate_market",
+    )
+    await service_with_alerts.get_or_generate(market.market_key, EntityType.FIXTURE, "fixture-1", "fixture-1", now=T0)
+
+    await service_with_alerts.regenerate(
+        market.market_key, EntityType.FIXTURE, "fixture-1", "fixture-1", now=T0 + timedelta(seconds=1), actor="cto"
+    )
+
+    assert len(alert_spy.calls) == 1
+    entity_type, entity_ref, alert_type, _, _ = alert_spy.calls[0]
+    assert entity_type is WatchlistEntityType.FIXTURE
+    assert entity_ref == "fixture-1"
+    assert alert_type is AlertType.PREDICTION_CHANGED
+
+
+@pytest.mark.asyncio
+async def test_regenerating_a_draft_prediction_does_not_notify_watchers(
+    service_with_alerts, alert_spy, market_registry, model_registry, mapping_service,
+    feature_definition_repo, feature_value_repo,
+):
+    """A DRAFT prediction was never published — nothing watchers saw is "changing"."""
+    market, _ = await _setup_production_market(
+        market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+        "football.alerts_draft_market", confidence_threshold=1.1,
+    )
+    prediction = await service_with_alerts.get_or_generate(
+        market.market_key, EntityType.FIXTURE, "fixture-1", "fixture-1", now=T0
+    )
+    assert prediction.status is PredictionStatus.DRAFT
+
+    await service_with_alerts.regenerate(
+        market.market_key, EntityType.FIXTURE, "fixture-1", "fixture-1", now=T0 + timedelta(seconds=1), actor="cto"
+    )
+
+    assert alert_spy.calls == []

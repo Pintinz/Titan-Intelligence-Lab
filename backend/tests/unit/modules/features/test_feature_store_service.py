@@ -1,7 +1,9 @@
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
+import redis.exceptions
 
 from modules.features.application.feature_store_service import (
     FeatureNotActiveError,
@@ -141,6 +143,51 @@ async def test_read_returns_none_when_nothing_written(service, definition_repo):
     await definition_repo.upsert(_definition())
 
     assert await service.read("football.team.possession_pct", EntityType.TEAM, "team-1") is None
+
+
+@dataclass
+class _UnreachableOnlineFeatureStore:
+    """Stands in for a Redis-backed online store whose connection is down — every call raises
+    the same `redis.exceptions.RedisError` subclass a real dead connection would."""
+
+    store: dict = field(default_factory=dict)
+
+    async def get(self, feature_key, entity_type, entity_id):
+        raise redis.exceptions.ConnectionError("connection refused")
+
+    async def set(self, value, ttl_seconds):
+        raise redis.exceptions.ConnectionError("connection refused")
+
+    async def delete(self, feature_key, entity_type, entity_id):
+        raise redis.exceptions.ConnectionError("connection refused")
+
+
+@pytest.mark.asyncio
+async def test_write_persists_offline_even_when_online_cache_is_unreachable(service, definition_repo, value_repo):
+    """Audit fix 2026-08-02: a Redis outage during write() used to raise straight out of the
+    method and roll back the whole (already-durable) offline write along with it. The durable
+    record must survive a cache outage — that's the module's own documented contract."""
+    await definition_repo.upsert(_definition())
+    unreachable = FeatureStoreService(definitions=definition_repo, offline=value_repo, online=_UnreachableOnlineFeatureStore())
+
+    value = await unreachable.write("football.team.possession_pct", EntityType.TEAM, "team-1", 0.6, T0)
+
+    assert value.value == 0.6
+    assert len(value_repo.store) == 1
+
+
+@pytest.mark.asyncio
+async def test_read_falls_back_to_offline_when_online_cache_is_unreachable(service, definition_repo, value_repo):
+    """A cache outage on read() must degrade exactly like a cache miss, not raise."""
+    await definition_repo.upsert(_definition())
+    healthy = FeatureStoreService(definitions=definition_repo, offline=value_repo, online=service.online)
+    await healthy.write("football.team.possession_pct", EntityType.TEAM, "team-1", 0.6, T0)
+
+    unreachable = FeatureStoreService(definitions=definition_repo, offline=value_repo, online=_UnreachableOnlineFeatureStore())
+    read = await unreachable.read("football.team.possession_pct", EntityType.TEAM, "team-1")
+
+    assert read is not None
+    assert read.value == 0.6
 
 
 def test_is_stale():

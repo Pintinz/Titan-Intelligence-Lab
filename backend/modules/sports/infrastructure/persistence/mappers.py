@@ -15,6 +15,7 @@ from modules.sports.domain.entities import (
     Fixture,
     Lineup,
     LineupSlot,
+    Match,
     Player,
     Season,
     Sport,
@@ -48,6 +49,7 @@ from modules.sports.infrastructure.persistence.models import (
     CountryModel,
     FixtureModel,
     LineupModel,
+    MatchModel,
     PlayerModel,
     SeasonModel,
     SportModel,
@@ -140,6 +142,7 @@ def team_to_domain(model: TeamModel) -> Team:
         venue_id=VenueId(model.venue_id) if model.venue_id else None,
         version=model.version,
         provider_refs=_provider_refs_from_dict(model.provider_ref),
+        logo_url=model.logo_url,
     )
 
 
@@ -152,6 +155,7 @@ def team_to_model(entity: Team, model: TeamModel | None = None) -> TeamModel:
     model.venue_id = entity.venue_id.value if entity.venue_id else None
     model.version = entity.version
     model.provider_ref = _provider_refs_to_dict(entity.provider_refs)
+    model.logo_url = entity.logo_url
     return model
 
 
@@ -190,6 +194,7 @@ def competition_to_domain(model: CompetitionModel) -> Competition:
         tier=model.tier,
         version=model.version,
         provider_refs=_provider_refs_from_dict(model.provider_ref),
+        logo_url=model.logo_url,
     )
 
 
@@ -204,6 +209,7 @@ def competition_to_model(
     model.tier = entity.tier
     model.version = entity.version
     model.provider_ref = _provider_refs_to_dict(entity.provider_refs)
+    model.logo_url = entity.logo_url
     return model
 
 
@@ -242,6 +248,8 @@ def fixture_to_domain(model: FixtureModel) -> Fixture:
         status=FixtureStatus(model.status),
         version=model.version,
         provider_refs=_provider_refs_from_dict(model.provider_ref),
+        home_score=model.home_score,
+        away_score=model.away_score,
     )
 
 
@@ -255,6 +263,8 @@ def fixture_to_model(entity: Fixture, model: FixtureModel | None = None) -> Fixt
     model.status = entity.status.value
     model.version = entity.version
     model.provider_ref = _provider_refs_to_dict(entity.provider_refs)
+    model.home_score = entity.home_score
+    model.away_score = entity.away_score
     return model
 
 
@@ -282,6 +292,25 @@ def standing_to_model(entity: Standing, model: StandingModel | None = None) -> S
     model.record = entity.record
     model.version = entity.version
     model.provider_ref = _provider_refs_to_dict(entity.provider_refs)
+    return model
+
+
+def match_to_domain(model: MatchModel) -> Match:
+    return Match(
+        id=MatchId(model.id),
+        fixture_id=FixtureId(model.fixture_id),
+        started_at=model.started_at,
+        ended_at=model.ended_at,
+        final_state=model.final_state,
+    )
+
+
+def match_to_model(entity: Match, model: MatchModel | None = None) -> MatchModel:
+    model = model or MatchModel(id=entity.id.value)
+    model.fixture_id = entity.fixture_id.value
+    model.started_at = entity.started_at
+    model.ended_at = entity.ended_at
+    model.final_state = entity.final_state
     return model
 
 

@@ -14,12 +14,13 @@ from datetime import datetime, timedelta, timezone
 
 import os
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.routers import (
+    alerts_router,
     billing_router,
     graph_router,
     identity_router,
@@ -31,33 +32,51 @@ from apps.api.routers import (
     prediction_router,
     sports_router,
     tenancy_router,
+    watchlist_router,
     webhooks_router,
 )
 from apps.api.auth_deps import require_role
 from apps.api.composition import (
+    build_competition_fixture_source_repository,
+    build_cross_provider_team_mapping_service,
     build_feature_flag_service,
     build_feature_quality_engine,
     build_feature_registration_service,
     build_health_intelligence_engine,
     build_kg_population_service,
     build_ingestion_quality_engine,
+    build_intelligence_enrichment_orchestrator,
     build_monitoring_service,
+    build_entity_reconciliation_service,
+    build_news_ingestion_service,
     build_provider_management_service,
     build_sync_orchestrator,
+    get_football_data_org_adapter,
     get_redis_client,
     get_session,
+    PROVIDER_KEY_BY_SPORT,
 )
 from modules.admin.application.feature_flag_service import FlagAlreadyExistsError, FlagNotFoundError
-from modules.identity.domain.entities import User as _AuthUser
-from modules.identity.domain.value_objects import Role as _Role
+from modules.identity.domain.entities import AuditLogEntry, User as _AuthUser
+from modules.identity.domain.value_objects import AuditAction as _AuditAction, AuditEventId, Role as _Role
+from modules.identity.infrastructure.persistence.repositories import SqlAlchemyAuditLogRepository
 from modules.admin.application.health_intelligence_engine import (
     ProviderDiagnosticsReport,
     WindowMetrics,
 )
-from modules.admin.application.provider_management_service import ProviderNotFoundError
-from modules.admin.domain.entities import FeatureFlag, ProviderIncident
-from modules.admin.domain.value_objects import CredentialId, ProviderId
-from modules.admin.infrastructure.persistence.repositories import SqlAlchemyProviderRepository
+from modules.admin.application.provider_management_service import (
+    EnvironmentVariableNotSetError,
+    ProviderAlreadyRegisteredError,
+    ProviderNotFoundError,
+    mask_credential as mask_credential_value,
+)
+from modules.admin.application.connection_check_service import check_provider_connection
+from modules.admin.domain.entities import FeatureFlag, ProviderCredential, ProviderIncident, ProviderUsageRecord
+from modules.admin.domain.value_objects import CredentialId, ProviderCategory, ProviderId, QuotaPeriod
+from modules.admin.infrastructure.persistence.repositories import (
+    SqlAlchemyProviderRepository,
+    SqlAlchemyUsageRepository,
+)
 from modules.features.application.feature_quality_engine import (
     ComputationCostSnapshot,
     FeatureHealthReport,
@@ -72,10 +91,22 @@ from modules.features.application.feature_registration_service import (
 )
 from modules.features.domain.entities import FeatureConsumer, FeatureDefinition, FeatureValidationReport
 from modules.features.domain.value_objects import EntityType, FeatureCategory, FeatureDataType, FeatureKey
-from modules.ingestion.application.sync_orchestrator import SportNotReconciledError
+from modules.ingestion.application.cross_provider_team_mapping_service import ConfirmedTeamMapping, ExistingTeamRef
+from modules.ingestion.application.sync_orchestrator import NoFixtureSourcePreferenceError, SportNotReconciledError
+from modules.ingestion.domain.entities import CompetitionFixtureSourcePreference
 from modules.ingestion.domain.value_objects import EntityKind as IngestionEntityKind
+from modules.intelligence.domain.entities import NewsSource
+from modules.intelligence.domain.value_objects import NewsSourceId, NewsSourceType
+from modules.intelligence.domain.value_objects import SyncTrigger as _NewsSyncTrigger
 from modules.knowledge_graph.domain.value_objects import NodeType
-from modules.sports.domain.value_objects import SeasonId
+from modules.sports.domain.value_objects import CompetitionId, FixtureId, SeasonId, SportCode
+from modules.sports.infrastructure.persistence.repositories import (
+    SqlAlchemyCompetitionRepository,
+    SqlAlchemyFixtureRepository,
+    SqlAlchemySportRepository,
+    SqlAlchemyTeamRepository,
+)
+from modules.sports.infrastructure.providers.provider_router import ProviderNotConfiguredError
 
 logger = logging.getLogger("titaniq.api")
 
@@ -118,6 +149,8 @@ app.include_router(prediction_router.router)
 app.include_router(market_router.router)
 app.include_router(prediction_admin_router.router)
 app.include_router(ml_platform_router.router)
+app.include_router(watchlist_router.router)
+app.include_router(alerts_router.router)
 
 
 def envelope(data=None, meta=None, error=None):
@@ -175,6 +208,86 @@ def _serialize_diagnostics(report: ProviderDiagnosticsReport) -> dict:
     }
 
 
+def _serialize_provider(p) -> dict:
+    return {
+        "id": str(p.id),
+        "key": p.key,
+        "name": p.name,
+        "category": p.category.value,
+        "status": p.status.value,
+        "priority": p.priority,
+        "daily_quota_limit": p.daily_quota_limit,
+        "monthly_quota_limit": p.monthly_quota_limit,
+        "cache_ttl_seconds": p.cache_ttl_seconds,
+        "poll_interval_seconds": p.poll_interval_seconds,
+        "base_url": p.base_url,
+        "auth_type": p.auth_type,
+        "auth_header_name": p.auth_header_name,
+        "region": p.region,
+        "version": p.version,
+        "environment": p.environment,
+        "timeout_seconds": p.timeout_seconds,
+        "retry_count": p.retry_count,
+        "retry_delay_seconds": p.retry_delay_seconds,
+        "created_by": p.created_by,
+        "updated_by": p.updated_by,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+        "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+        "capability_note": p.capability_note,
+        "capability_checked_at": p.capability_checked_at.isoformat() if p.capability_checked_at else None,
+    }
+
+
+def _serialize_credential_masked(credential: ProviderCredential, masked_value: str) -> dict:
+    return {
+        "id": str(credential.id),
+        "provider_id": str(credential.provider_id),
+        "label": credential.label,
+        "masked_value": masked_value,
+        "is_active": credential.is_active,
+        "created_at": credential.created_at.isoformat() if credential.created_at else None,
+        "rotated_at": credential.rotated_at.isoformat() if credential.rotated_at else None,
+        "expires_at": credential.expires_at.isoformat() if credential.expires_at else None,
+    }
+
+
+def _serialize_usage(record: ProviderUsageRecord) -> dict:
+    return {
+        "provider_id": str(record.provider_id),
+        "period": record.period.value,
+        "window_key": record.window_key,
+        "request_count": record.request_count,
+        "error_count": record.error_count,
+    }
+
+
+async def _audit(
+    session: AsyncSession,
+    action: _AuditAction,
+    actor: _AuthUser,
+    request: Request | None,
+    *,
+    target_id: str | None,
+    metadata: dict | None = None,
+) -> None:
+    """Writes one entry to the shared security audit trail (docs/security.md §2) — the same
+    `identity.audit_log_entries` table role changes use, reused here rather than inventing a
+    second admin-only audit mechanism (identity/domain/value_objects.py AuditAction is a
+    cross-domain closed vocabulary, not identity-only — organization/subscription actions
+    already live in it alongside user actions)."""
+    entry = AuditLogEntry(
+        id=AuditEventId(uuid.uuid4()),
+        action=action,
+        occurred_at=_now(),
+        actor_user_id=actor.id,
+        target_type="provider",
+        target_id=target_id,
+        ip_address=request.client.host if request is not None and request.client else None,
+        metadata=metadata or {},
+    )
+    await SqlAlchemyAuditLogRepository(session=session).append(entry)
+
+
 @app.get("/api/v1/health")
 async def health():
     return envelope(data={"status": "ok"})
@@ -184,29 +297,362 @@ async def health():
 async def list_providers(session: AsyncSession = Depends(get_session), _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
     repo = SqlAlchemyProviderRepository(session=session)
     providers = await repo.list_all()
+    return envelope(data=[_serialize_provider(p) for p in providers])
+
+
+class RegisterProviderBody(BaseModel):
+    key: str
+    name: str
+    category: str
+    priority: int = 100
+    daily_quota_limit: int | None = None
+    monthly_quota_limit: int | None = None
+    base_url: str | None = None
+    auth_type: str | None = None
+    auth_header_name: str | None = None
+    region: str | None = None
+    version: str | None = None
+    environment: str = "production"
+    timeout_seconds: int = 10
+    retry_count: int = 2
+    retry_delay_seconds: int = 1
+
+
+def _parse_category(value: str) -> ProviderCategory:
+    try:
+        return ProviderCategory(value)
+    except ValueError:
+        valid = ", ".join(c.value for c in ProviderCategory)
+        raise HTTPException(status_code=422, detail=f"invalid category '{value}' — must be one of: {valid}") from None
+
+
+@app.post("/api/v1/admin/providers")
+async def create_provider(
+    body: RegisterProviderBody, request: Request, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    service = build_provider_management_service(session)
+    category = _parse_category(body.category)
+    try:
+        provider = await service.register_provider(
+            body.key, body.name, category,
+            priority=body.priority, daily_quota_limit=body.daily_quota_limit,
+            monthly_quota_limit=body.monthly_quota_limit, base_url=body.base_url, auth_type=body.auth_type,
+            auth_header_name=body.auth_header_name,
+            region=body.region, version=body.version, environment=body.environment,
+            timeout_seconds=body.timeout_seconds, retry_count=body.retry_count,
+            retry_delay_seconds=body.retry_delay_seconds, created_by=str(_admin.id.value),
+        )
+    except ProviderAlreadyRegisteredError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    await _audit(
+        session, _AuditAction.PROVIDER_REGISTERED, _admin, request,
+        target_id=str(provider.id), metadata={"key": provider.key, "category": provider.category.value},
+    )
+    return envelope(data=_serialize_provider(provider))
+
+
+@app.get("/api/v1/admin/providers/categories")
+async def provider_categories(session: AsyncSession = Depends(get_session), _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
+    providers = await SqlAlchemyProviderRepository(session=session).list_all()
+    counts: dict[str, int] = {c.value: 0 for c in ProviderCategory}
+    for p in providers:
+        counts[p.category.value] = counts.get(p.category.value, 0) + 1
+    return envelope(data=[{"category": category, "provider_count": count} for category, count in counts.items()])
+
+
+@app.get("/api/v1/admin/providers/status")
+async def provider_status_summary(session: AsyncSession = Depends(get_session), _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
+    providers = await SqlAlchemyProviderRepository(session=session).list_all()
+    engine = build_health_intelligence_engine(session)
+    by_status: dict[str, int] = {}
+    by_health: dict[str, int] = {}
+    for p in providers:
+        by_status[p.status.value] = by_status.get(p.status.value, 0) + 1
+        health_status = (await engine.current_status(p.id)).value
+        by_health[health_status] = by_health.get(health_status, 0) + 1
     return envelope(
-        data=[
-            {
-                "id": str(p.id),
-                "key": p.key,
-                "name": p.name,
-                "category": p.category.value,
-                "status": p.status.value,
-                "priority": p.priority,
-            }
-            for p in providers
-        ]
+        data={"total_providers": len(providers), "by_status": by_status, "by_health": by_health}
     )
 
 
+@app.get("/api/v1/admin/providers/{provider_id}")
+async def get_provider(provider_id: str, session: AsyncSession = Depends(get_session), _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
+    provider = await SqlAlchemyProviderRepository(session=session).get(ProviderId(uuid.UUID(provider_id)))
+    if provider is None:
+        raise HTTPException(status_code=404, detail="provider not found")
+    return envelope(data=_serialize_provider(provider))
+
+
+class UpdateProviderBody(BaseModel):
+    name: str | None = None
+    priority: int | None = None
+    daily_quota_limit: int | None = None
+    monthly_quota_limit: int | None = None
+    base_url: str | None = None
+    auth_type: str | None = None
+    auth_header_name: str | None = None
+    region: str | None = None
+    version: str | None = None
+    environment: str | None = None
+    timeout_seconds: int | None = None
+    retry_count: int | None = None
+    retry_delay_seconds: int | None = None
+    cache_ttl_seconds: int | None = None
+    poll_interval_seconds: int | None = None
+
+
+@app.patch("/api/v1/admin/providers/{provider_id}")
+async def update_provider(
+    provider_id: str, body: UpdateProviderBody, request: Request, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    service = build_provider_management_service(session)
+    pid = ProviderId(uuid.UUID(provider_id))
+    try:
+        provider = await service.update_provider(pid, updated_by=str(_admin.id.value), **body.model_dump(exclude_unset=True))
+    except ProviderNotFoundError:
+        raise HTTPException(status_code=404, detail="provider not found") from None
+    await _audit(
+        session, _AuditAction.PROVIDER_UPDATED, _admin, request,
+        target_id=provider_id, metadata=body.model_dump(exclude_unset=True),
+    )
+    return envelope(data=_serialize_provider(provider))
+
+
+@app.delete("/api/v1/admin/providers/{provider_id}")
+async def delete_provider(
+    provider_id: str, request: Request, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    service = build_provider_management_service(session)
+    pid = ProviderId(uuid.UUID(provider_id))
+    try:
+        await service.delete_provider(pid)
+    except ProviderNotFoundError:
+        raise HTTPException(status_code=404, detail="provider not found") from None
+    await _audit(session, _AuditAction.PROVIDER_DELETED, _admin, request, target_id=provider_id)
+    return envelope(data={"id": provider_id, "deleted": True})
+
+
 @app.post("/api/v1/admin/providers/{provider_id}/activate")
-async def activate_provider(provider_id: str, session: AsyncSession = Depends(get_session), _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
+async def activate_provider(
+    provider_id: str, request: Request, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
     service = build_provider_management_service(session)
     try:
         provider = await service.activate(ProviderId(uuid.UUID(provider_id)))
     except ProviderNotFoundError:
         raise HTTPException(status_code=404, detail="provider not found") from None
+    await _audit(session, _AuditAction.PROVIDER_ACTIVATED, _admin, request, target_id=provider_id)
     return envelope(data={"id": str(provider.id), "status": provider.status.value})
+
+
+@app.post("/api/v1/admin/providers/{provider_id}/disable")
+async def disable_provider(
+    provider_id: str, request: Request, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    service = build_provider_management_service(session)
+    try:
+        provider = await service.deactivate(ProviderId(uuid.UUID(provider_id)))
+    except ProviderNotFoundError:
+        raise HTTPException(status_code=404, detail="provider not found") from None
+    await _audit(session, _AuditAction.PROVIDER_DEACTIVATED, _admin, request, target_id=provider_id)
+    return envelope(data={"id": str(provider.id), "status": provider.status.value})
+
+
+@app.get("/api/v1/admin/providers/{provider_id}/credentials")
+async def list_provider_credentials(provider_id: str, session: AsyncSession = Depends(get_session), _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
+    service = build_provider_management_service(session)
+    pid = ProviderId(uuid.UUID(provider_id))
+    pairs = await service.masked_credentials(pid)
+    return envelope(data=[_serialize_credential_masked(c, masked) for c, masked in pairs])
+
+
+class AddCredentialBody(BaseModel):
+    label: str
+    value: str
+    expires_at: datetime | None = None
+
+
+@app.post("/api/v1/admin/providers/{provider_id}/credentials")
+async def add_provider_credential(
+    provider_id: str, body: AddCredentialBody, request: Request, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    service = build_provider_management_service(session)
+    pid = ProviderId(uuid.UUID(provider_id))
+    try:
+        credential = await service.add_credential(pid, body.label, body.value, now=_now(), expires_at=body.expires_at)
+    except ProviderNotFoundError:
+        raise HTTPException(status_code=404, detail="provider not found") from None
+    await _audit(
+        session, _AuditAction.PROVIDER_CREDENTIAL_ADDED, _admin, request,
+        target_id=provider_id, metadata={"credential_id": str(credential.id), "label": credential.label},
+    )
+    return envelope(data=_serialize_credential_masked(credential, mask_credential_value(body.value)))
+
+
+class RotateCredentialBody(BaseModel):
+    old_credential_id: str
+    label: str
+    value: str
+    expires_at: datetime | None = None
+
+
+@app.post("/api/v1/admin/providers/{provider_id}/rotate-key")
+async def rotate_provider_credential(
+    provider_id: str, body: RotateCredentialBody, request: Request, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    service = build_provider_management_service(session)
+    try:
+        credential = await service.rotate_credential(
+            CredentialId(uuid.UUID(body.old_credential_id)), body.label, body.value, now=_now(), expires_at=body.expires_at
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="credential not found") from None
+    await _audit(
+        session, _AuditAction.PROVIDER_CREDENTIAL_ROTATED, _admin, request,
+        target_id=provider_id,
+        metadata={"old_credential_id": body.old_credential_id, "new_credential_id": str(credential.id)},
+    )
+    return envelope(data=_serialize_credential_masked(credential, mask_credential_value(body.value)))
+
+
+class ImportFromEnvBody(BaseModel):
+    env_var_name: str
+    key: str
+    name: str
+    category: str
+    credential_label: str = "imported-from-env"
+
+
+@app.post("/api/v1/admin/providers/import-from-env")
+async def import_provider_from_env(
+    body: ImportFromEnvBody, request: Request, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    """Migration path for a provider whose only credential today is a raw `.env` value
+    (docs/admin_center.md — Milestone 11B). Reads the named env var exactly once and encrypts
+    it into the vault; nothing keeps reading the env var afterwards — see
+    ProviderManagementService.import_from_env's docstring for why this is a one-time import
+    rather than a standing fallback."""
+    service = build_provider_management_service(session)
+    category = _parse_category(body.category)
+    try:
+        provider, credential = await service.import_from_env(
+            body.env_var_name, body.key, body.name, category,
+            now=_now(), credential_label=body.credential_label, created_by=str(_admin.id.value),
+        )
+    except EnvironmentVariableNotSetError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    await _audit(
+        session, _AuditAction.PROVIDER_IMPORTED_FROM_ENV, _admin, request,
+        target_id=str(provider.id), metadata={"env_var_name": body.env_var_name, "key": provider.key},
+    )
+    return envelope(
+        data={
+            "provider": _serialize_provider(provider),
+            "credential": _serialize_credential_masked(credential, mask_credential_value(os.environ[body.env_var_name])),
+        }
+    )
+
+
+async def _run_and_record_connection_test(provider_id: str, session: AsyncSession):
+    service = build_provider_management_service(session)
+    engine = build_health_intelligence_engine(session)
+    pid = ProviderId(uuid.UUID(provider_id))
+    return await check_provider_connection(service, engine, pid, _now())
+
+
+@app.post("/api/v1/admin/providers/{provider_id}/test")
+async def test_provider_connection(
+    provider_id: str, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    try:
+        result = await _run_and_record_connection_test(provider_id, session)
+    except ProviderNotFoundError:
+        raise HTTPException(status_code=404, detail="provider not found") from None
+    return envelope(
+        data={
+            "status": result.status.value, "latency_ms": result.latency_ms,
+            "http_status": result.http_status, "message": result.message,
+        }
+    )
+
+
+@app.post("/api/v1/admin/providers/{provider_id}/refresh")
+async def refresh_provider_connection(
+    provider_id: str, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    """Same probe as `/test` — "Refresh" in the brief means re-check-now, not a distinct
+    operation; kept as its own route since the Operations Center UI names it separately."""
+    try:
+        result = await _run_and_record_connection_test(provider_id, session)
+    except ProviderNotFoundError:
+        raise HTTPException(status_code=404, detail="provider not found") from None
+    return envelope(
+        data={
+            "status": result.status.value, "latency_ms": result.latency_ms,
+            "http_status": result.http_status, "message": result.message,
+        }
+    )
+
+
+@app.get("/api/v1/admin/providers/{provider_id}/usage")
+async def provider_usage(
+    provider_id: str, period: str = Query(default="daily"), limit: int = Query(default=30, ge=1, le=365),
+    session: AsyncSession = Depends(get_session), _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    try:
+        quota_period = QuotaPeriod(period)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="period must be 'daily' or 'monthly'") from None
+    pid = ProviderId(uuid.UUID(provider_id))
+    provider = await SqlAlchemyProviderRepository(session=session).get(pid)
+    if provider is None:
+        raise HTTPException(status_code=404, detail="provider not found")
+    records = await SqlAlchemyUsageRepository(session=session).list_by_provider(pid, quota_period, limit=limit)
+    total_requests = sum(r.request_count for r in records)
+    total_errors = sum(r.error_count for r in records)
+    quota_limit = provider.daily_quota_limit if quota_period is QuotaPeriod.DAILY else provider.monthly_quota_limit
+    current_window = records[0] if records else None
+    return envelope(
+        data={
+            "provider_id": provider_id,
+            "period": period,
+            "quota_limit": quota_limit,
+            "current_window_requests": current_window.request_count if current_window else 0,
+            "remaining_requests": (quota_limit - current_window.request_count) if (quota_limit and current_window) else quota_limit,
+            "success_rate": ((total_requests - total_errors) / total_requests) if total_requests else None,
+            "history": [_serialize_usage(r) for r in records],
+        }
+    )
+
+
+@app.get("/api/v1/admin/providers/{provider_id}/history")
+async def provider_history(
+    provider_id: str, limit: int = Query(default=20, ge=1, le=200),
+    session: AsyncSession = Depends(get_session), _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    engine = build_health_intelligence_engine(session)
+    pid = ProviderId(uuid.UUID(provider_id))
+    checks = await engine.health.list_recent(pid, limit=limit)
+    incidents = await engine.incidents.list_by_provider(pid)
+    return envelope(
+        data={
+            "recent_checks": [
+                {"checked_at": c.checked_at.isoformat(), "success": c.success, "latency_ms": c.latency_ms, "message": c.message}
+                for c in checks
+            ],
+            "incidents": [_serialize_incident(i) for i in incidents],
+        }
+    )
 
 
 # -- Provider Health Intelligence dashboard API (docs/admin_center.md §2) --------------------
@@ -778,12 +1224,61 @@ async def get_feature_health(
 
 class TriggerSyncBody(BaseModel):
     force: bool = False
+    season_label: str | None = None  # only meaningful for the teams endpoint — season isn't a
+    # concept for countries, but reusing one body model beats a second near-identical class
 
 
 class TriggerFixtureSyncBody(BaseModel):
     season_id: str
     force: bool = False
     live: bool = False
+
+
+class BootstrapCompetitionBody(BaseModel):
+    competition_ref: str
+    competition_name: str
+    season_label: str
+    competition_logo_url: str | None = None
+
+
+@app.post("/api/v1/admin/sync/{sport_code}/bootstrap")
+async def bootstrap_competition(
+    sport_code: str, body: BootstrapCompetitionBody, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    """One-time setup before teams/fixtures/standings can sync for a competition —
+    reconciles the Competition and Season rows a real provider's `competition_ref`/
+    `season_label` refer to (e.g. API-Football's numeric league id and season year), so
+    SyncOrchestrator has something to attach synced records to. The Sport itself must already
+    be reconciled (see scripts/seed_sports.py) — nothing in the sync pipeline creates that.
+    """
+    try:
+        code = SportCode(sport_code)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Unrecognized sport_code '{sport_code}'") from None
+    sport = await SqlAlchemySportRepository(session=session).get_by_code(code)
+    if sport is None:
+        raise HTTPException(status_code=409, detail=f"sport '{sport_code}' not reconciled yet — seed it first") from None
+
+    provider_key = PROVIDER_KEY_BY_SPORT.get(sport_code, sport_code)
+    reconciler = build_entity_reconciliation_service(session)
+    now = _now()
+    competition, competition_created = await reconciler.reconcile_competition(
+        body.competition_ref, provider_key, sport.id, now,
+        name=body.competition_name, logo_url=body.competition_logo_url,
+    )
+    season, season_created = await reconciler.reconcile_season(
+        body.competition_ref, body.season_label, provider_key, competition.id, now
+    )
+    return envelope(
+        data={
+            "sport_id": str(sport.id.value),
+            "competition_id": str(competition.id.value),
+            "competition_created": competition_created,
+            "season_id": str(season.id.value),
+            "season_created": season_created,
+        }
+    )
 
 
 def _serialize_sync_run(run) -> dict | None:
@@ -813,7 +1308,7 @@ async def trigger_sync_teams(
 ):
     orchestrator = build_sync_orchestrator(session)
     try:
-        run = await orchestrator.sync_teams(sport_code, competition_ref, _now(), force=body.force)
+        run = await orchestrator.sync_teams(sport_code, competition_ref, _now(), force=body.force, season_label=body.season_label)
     except SportNotReconciledError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
     return envelope(data=_serialize_sync_run(run))
@@ -844,6 +1339,184 @@ async def trigger_sync_standings(
     return envelope(data=_serialize_sync_run(run))
 
 
+@app.post("/api/v1/admin/sync/{sport_code}/odds/{fixture_id}")
+async def trigger_sync_odds(
+    sport_code: str, fixture_id: str, body: TriggerSyncBody, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    """Per-fixture, not per-competition (unlike the other trigger_sync_* endpoints above) — odds
+    are a single fixture's win-market line, so the caller identifies it by our own persisted
+    fixture_id rather than a competition_ref/season_label pair. Looks the fixture's own
+    provider_refs up to get the ProviderRef sync_odds_for_fixture needs to call the provider."""
+    fixture = await SqlAlchemyFixtureRepository(session=session).get(FixtureId(uuid.UUID(fixture_id)))
+    if fixture is None or not fixture.provider_refs:
+        raise HTTPException(status_code=404, detail=f"fixture '{fixture_id}' not found or has no provider reference") from None
+    orchestrator = build_sync_orchestrator(session)
+    run = await orchestrator.sync_odds_for_fixture(sport_code, fixture.provider_refs[0], fixture_id, _now(), force=body.force)
+    return envelope(data=_serialize_sync_run(run))
+
+
+@app.post("/api/v1/admin/sync/{sport_code}/statistics/{fixture_id}")
+async def trigger_sync_team_statistics(
+    sport_code: str, fixture_id: str, body: TriggerSyncBody, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    """Per-fixture, same shape as trigger_sync_odds above — fetches both teams' match statistics
+    for this one fixture, keyed by our own persisted fixture_id."""
+    fixture = await SqlAlchemyFixtureRepository(session=session).get(FixtureId(uuid.UUID(fixture_id)))
+    if fixture is None or not fixture.provider_refs:
+        raise HTTPException(status_code=404, detail=f"fixture '{fixture_id}' not found or has no provider reference") from None
+    orchestrator = build_sync_orchestrator(session)
+    run = await orchestrator.sync_team_statistics_for_fixture(sport_code, fixture.provider_refs[0], fixture_id, _now(), force=body.force)
+    return envelope(data=_serialize_sync_run(run))
+
+
+# -- football-data.org integration: per-competition fixture-source preference + team mapping ------
+
+
+class SetFixtureSourceBody(BaseModel):
+    preferred_provider_key: str
+    provider_competition_ref: str
+    notes: str | None = None
+
+
+class TeamMappingItem(BaseModel):
+    football_data_org_team_id: str
+    titaniq_team_id: str
+
+
+class ConfirmTeamMappingsBody(BaseModel):
+    mappings: list[TeamMappingItem]
+
+
+class TriggerUpcomingFixturesSyncBody(BaseModel):
+    season_label: str
+    season_id: str
+    force: bool = False
+
+
+def _serialize_fixture_source(preference: CompetitionFixtureSourcePreference) -> dict:
+    return {
+        "competition_id": preference.competition_id,
+        "preferred_provider_key": preference.preferred_provider_key,
+        "provider_competition_ref": preference.provider_competition_ref,
+        "notes": preference.notes,
+        "updated_at": preference.updated_at.isoformat() if preference.updated_at else None,
+    }
+
+
+@app.get("/api/v1/admin/competitions/{competition_id}/fixture-source")
+async def get_competition_fixture_source(
+    competition_id: str, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    repo = build_competition_fixture_source_repository(session)
+    preference = await repo.get_by_competition(competition_id)
+    return envelope(data=_serialize_fixture_source(preference) if preference else None)
+
+
+@app.put("/api/v1/admin/competitions/{competition_id}/fixture-source")
+async def set_competition_fixture_source(
+    competition_id: str, body: SetFixtureSourceBody, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    """The admin-curated routing rule `SyncOrchestrator.sync_upcoming_fixtures` honors
+    automatically on every future call — see `CompetitionFixtureSourcePreference`'s docstring."""
+    repo = build_competition_fixture_source_repository(session)
+    preference = await repo.upsert(
+        CompetitionFixtureSourcePreference(
+            competition_id=competition_id, preferred_provider_key=body.preferred_provider_key,
+            provider_competition_ref=body.provider_competition_ref, notes=body.notes, updated_at=_now(),
+        )
+    )
+    return envelope(data=_serialize_fixture_source(preference))
+
+
+@app.delete("/api/v1/admin/competitions/{competition_id}/fixture-source")
+async def clear_competition_fixture_source(
+    competition_id: str, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    repo = build_competition_fixture_source_repository(session)
+    await repo.delete(competition_id)
+    return envelope(data={"deleted": True})
+
+
+@app.get("/api/v1/admin/providers/football-data-org/team-suggestions")
+async def suggest_football_data_org_team_mappings(
+    competition_id: str = Query(...), provider_competition_ref: str = Query(...),
+    session: AsyncSession = Depends(get_session), _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    """Read-only — never writes a mapping. Lists every football-data.org team in the given
+    competition next to a suggested existing-TitanIQ-team match (by normalized name), for an
+    admin to review before calling the confirm endpoint below. Candidate existing teams are every
+    team in the competition's sport (teams aren't competition-scoped in TitanIQ's domain model),
+    which is a harmless superset — normalized-name matching won't accidentally match an unrelated
+    club."""
+    competition = await SqlAlchemyCompetitionRepository(session=session).get(CompetitionId(uuid.UUID(competition_id)))
+    if competition is None:
+        raise HTTPException(status_code=404, detail=f"competition '{competition_id}' not found") from None
+    existing_teams_domain = await SqlAlchemyTeamRepository(session=session).list_by_sport(competition.sport_id)
+    existing_teams = [ExistingTeamRef(id=str(team.id.value), name=team.name) for team in existing_teams_domain]
+    adapter = get_football_data_org_adapter(session)
+    fd_teams = await adapter.fetch_teams(provider_competition_ref)
+    service = build_cross_provider_team_mapping_service(session)
+    suggestions = service.suggest_mappings(fd_teams, existing_teams)
+    return envelope(
+        data=[
+            {
+                "football_data_org_team_id": s.football_data_org_team_id,
+                "football_data_org_team_name": s.football_data_org_team_name,
+                "suggested_titaniq_team_id": s.suggested_titaniq_team_id,
+                "suggested_titaniq_team_name": s.suggested_titaniq_team_name,
+                "confidence": s.confidence,
+            }
+            for s in suggestions
+        ]
+    )
+
+
+@app.post("/api/v1/admin/providers/football-data-org/team-mappings")
+async def confirm_football_data_org_team_mappings(
+    body: ConfirmTeamMappingsBody, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    """The only write path for cross-provider team identity — see
+    `CrossProviderTeamMappingService.confirm_mappings`'s docstring. Never called automatically;
+    always an explicit admin action confirming (possibly editing) the suggestions above."""
+    service = build_cross_provider_team_mapping_service(session)
+    await service.confirm_mappings(
+        [
+            ConfirmedTeamMapping(
+                football_data_org_team_id=item.football_data_org_team_id, titaniq_team_id=item.titaniq_team_id
+            )
+            for item in body.mappings
+        ]
+    )
+    return envelope(data={"mapped": len(body.mappings)})
+
+
+@app.post("/api/v1/admin/sync/{sport_code}/competitions/{competition_id}/upcoming-fixtures")
+async def trigger_sync_upcoming_fixtures(
+    sport_code: str, competition_id: str, body: TriggerUpcomingFixturesSyncBody,
+    session: AsyncSession = Depends(get_session), _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    """`competition_id` is TitanIQ's own internal id, not a provider-specific ref — the
+    per-competition `CompetitionFixtureSourcePreference` (set via the endpoint above) supplies
+    whatever provider-specific ref the resolved adapter actually needs."""
+    orchestrator = build_sync_orchestrator(session)
+    season_id = SeasonId(uuid.UUID(body.season_id))
+    try:
+        run = await orchestrator.sync_upcoming_fixtures(
+            sport_code, competition_id, body.season_label, season_id, _now(), force=body.force,
+        )
+    except NoFixtureSourcePreferenceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except ProviderNotConfiguredError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    return envelope(data=_serialize_sync_run(run))
+
+
 @app.get("/api/v1/admin/sync/status")
 async def get_sync_status(
     sport_code: str | None = Query(default=None),
@@ -868,6 +1541,91 @@ async def get_sync_stats(
     kind = IngestionEntityKind(entity_kind) if entity_kind else None
     stats = await monitoring.aggregate_stats(sport_code, kind, limit=limit)
     return envelope(data=stats)
+
+
+# -- Milestone 8: News Ingestion (real RSS pipe, no paid API key required) ------------------------
+
+
+class RegisterNewsSourceBody(BaseModel):
+    name: str
+    url: str
+    source_type: str = "rss_feed"
+    is_official: bool = False
+
+
+def _serialize_news_source(source: NewsSource) -> dict:
+    return {
+        "id": str(source.id.value),
+        "source_type": source.source_type.value,
+        "name": source.name,
+        "url": source.url,
+        "is_official": source.is_official,
+        "created_at": source.created_at.isoformat() if source.created_at else None,
+    }
+
+
+def _serialize_intelligence_sync_run(run) -> dict:
+    return {
+        "run_id": str(run.id), "channel_type": run.channel_type.value, "channel_key": run.channel_key,
+        "trigger": run.trigger.value, "status": run.status.value, "started_at": run.started_at.isoformat(),
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "duration_seconds": run.duration_seconds, "items_fetched": run.items_fetched,
+        "items_created": run.items_created, "items_duplicate": run.items_duplicate,
+        "items_rejected": run.items_rejected, "error_message": run.error_message,
+    }
+
+
+@app.post("/api/v1/admin/news/sources")
+async def register_news_source(
+    body: RegisterNewsSourceBody, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    try:
+        source_type = NewsSourceType(body.source_type)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Unrecognized source_type '{body.source_type}'") from None
+
+    service = build_news_ingestion_service(session)
+    existing = await service.sources.get_by_url(body.url)
+    source = NewsSource(
+        id=existing.id if existing else NewsSourceId(uuid.uuid4()),
+        source_type=source_type, name=body.name, url=body.url, is_official=body.is_official,
+        created_at=existing.created_at if existing else _now(),
+    )
+    saved = await service.sources.upsert(source)
+    return envelope(data=_serialize_news_source(saved))
+
+
+@app.get("/api/v1/admin/news/sources")
+async def list_news_sources(
+    session: AsyncSession = Depends(get_session), _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    service = build_news_ingestion_service(session)
+    sources = await service.sources.list_all()
+    return envelope(data=[_serialize_news_source(s) for s in sources])
+
+
+@app.post("/api/v1/admin/news/sources/{source_id}/sync")
+async def trigger_news_sync(
+    source_id: str, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    try:
+        parsed_id = NewsSourceId(uuid.UUID(source_id))
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid source_id '{source_id}'") from None
+
+    service = build_news_ingestion_service(session)
+    orchestrator = build_intelligence_enrichment_orchestrator(session)
+    now = _now()
+    try:
+        run = await service.sync_source(
+            parsed_id, now, trigger=_NewsSyncTrigger.MANUAL,
+            on_article_created=lambda article: orchestrator.enrich_article(article, now),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    return envelope(data=_serialize_intelligence_sync_run(run))
 
 
 @app.get("/api/v1/admin/ingestion/quality/{sport_code}/{entity_kind}")

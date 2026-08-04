@@ -32,6 +32,7 @@ def get_database_settings() -> DatabaseSettings:
 # tests/unit/modules/sports/conftest.py), just applied across all of them for the real engine.
 _ALL_SCHEMAS = [
     "admin",
+    "alerts",
     "billing",
     "features",
     "identity",
@@ -41,6 +42,7 @@ _ALL_SCHEMAS = [
     "predictions",
     "sports",
     "tenancy",
+    "watchlist",
     "webhooks",
 ]
 

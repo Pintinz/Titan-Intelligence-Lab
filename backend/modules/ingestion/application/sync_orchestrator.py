@@ -13,19 +13,28 @@ record — matching the same "shared machinery, explicit per-entity methods" sha
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from modules.ingestion.application.data_quality_engine import IngestionQualityEngine
 from modules.ingestion.application.data_validation_engine import DataValidationEngine
-from modules.ingestion.application.entity_reconciliation_service import EntityReconciliationService
+from modules.ingestion.application.entity_reconciliation_service import (
+    EntityReconciliationService,
+    ReconciliationDependencyError,
+)
 from modules.ingestion.domain.entities import SyncCheckpoint, SyncRun, TimelineEvent
 from modules.ingestion.domain.value_objects import EntityKind, SyncRunId, SyncStatus, SyncTrigger, TimelineEventId, TimelineEventType
 from modules.ingestion.ports.cache import SyncCachePort
 from modules.ingestion.ports.lock import DistributedLockPort
-from modules.ingestion.ports.repositories import SyncCheckpointRepositoryPort, SyncRunRepositoryPort, TimelineEventRepositoryPort
-from modules.sports.domain.value_objects import SportCode
+from modules.ingestion.ports.repositories import (
+    CompetitionFixtureSourceRepositoryPort,
+    SyncCheckpointRepositoryPort,
+    SyncRunRepositoryPort,
+    TimelineEventRepositoryPort,
+)
+from modules.predictions.football.odds_feature_writer import FootballOddsFeatureWriter
+from modules.sports.domain.value_objects import FixtureId, ProviderRef, SportCode
 from modules.sports.infrastructure.providers.provider_router import SportsProviderRouter
 from modules.sports.ports.repositories import SportRepositoryPort
 
@@ -45,6 +54,14 @@ def _ensure_aware(dt: datetime, reference: datetime) -> datetime:
 
 class SportNotReconciledError(RuntimeError):
     """A sync method was called for a sport that reconcile_sport() hasn't been run for yet."""
+
+
+class NoFixtureSourcePreferenceError(RuntimeError):
+    """`sync_upcoming_fixtures` was called for a competition with no
+    `CompetitionFixtureSourcePreference` configured (or the orchestrator wasn't wired with the
+    repository at all). Deliberately not a silent fallback to `sync_fixtures` — this method only
+    exists for competitions an admin explicitly opted into an alternate provider for; every other
+    competition should just keep using `sync_fixtures`/`sync_live_fixtures` as before."""
 
 
 @dataclass(frozen=True)
@@ -67,6 +84,8 @@ class SyncOrchestrator:
     timeline: TimelineEventRepositoryPort
     lock: DistributedLockPort
     cache: SyncCachePort | None = None
+    odds_feature_writers: dict[str, FootballOddsFeatureWriter] = field(default_factory=dict)
+    fixture_source_preferences: CompetitionFixtureSourceRepositoryPort | None = None
 
     async def _get_reconciled_sport(self, sport_code: str):
         sport = await self.sports.get_by_code(SportCode(sport_code))
@@ -197,11 +216,14 @@ class SyncOrchestrator:
     async def sync_teams(
         self, sport_code: str, competition_ref: str, now: datetime, *,
         trigger=SyncTrigger.SCHEDULED, low_priority: bool = False, force: bool = False,
+        season_label: str | None = None,
     ) -> SyncRun | None:
         sport = await self._get_reconciled_sport(sport_code)
 
         async def fetch():
-            return await self.router.fetch_teams(sport_code, competition_ref, now, low_priority=low_priority)
+            return await self.router.fetch_teams(
+                sport_code, competition_ref, now, low_priority=low_priority, season_label=season_label
+            )
 
         async def process_one(record):
             result = self.validator.validate_team(record)
@@ -224,12 +246,66 @@ class SyncOrchestrator:
             result = self.validator.validate_fixture(record, now)
             if not result.is_valid:
                 return RecordOutcome(rejected=True, issue_category="relationship")
-            _, created = await self.reconciler.reconcile_fixture(record, season_id, now)
+            try:
+                _, created = await self.reconciler.reconcile_fixture(record, season_id, now, sport_code=sport_code)
+            except ReconciliationDependencyError:
+                # Home/away team hasn't been synced for this competition yet — reject just this
+                # record rather than crashing the whole run (matches sync_standings' handling of
+                # the same "referenced entity not reconciled" case).
+                return RecordOutcome(rejected=True, issue_category="relationship")
             return RecordOutcome(created=created, updated=not created)
 
         return await self._run_sync(
             sport_code, EntityKind.FIXTURE, f"{competition_ref}:{season_label}", trigger, now,
             fetch=fetch, process_one=process_one, min_interval_seconds=min_interval_seconds, force=force,
+        )
+
+    async def sync_upcoming_fixtures(
+        self, sport_code: str, competition_id: str, season_label: str, season_id, now: datetime, *,
+        trigger=SyncTrigger.MANUAL, low_priority: bool = False, force: bool = False,
+    ) -> SyncRun | None:
+        """The alternate-provider counterpart to sync_fixtures: opt-in per competition via a
+        `CompetitionFixtureSourcePreference` (set through the admin fixture-source endpoints),
+        routes to `router.fetch_upcoming_fixtures` instead of the sport's default adapter, and
+        reconciles with `match_by_teams_and_date=True` so a fixture api-football already created
+        gets updated rather than duplicated. `competition_id` is TitanIQ's own internal
+        competition id (not a provider-specific ref) — the preference row is what supplies the
+        provider-specific ref the adapter actually needs, keeping this call site
+        provider-independent."""
+        if self.fixture_source_preferences is None:
+            raise NoFixtureSourcePreferenceError(
+                "SyncOrchestrator wasn't wired with a fixture_source_preferences repository"
+            )
+        preference = await self.fixture_source_preferences.get_by_competition(competition_id)
+        if preference is None:
+            raise NoFixtureSourcePreferenceError(
+                f"competition '{competition_id}' has no fixture-source preference configured — "
+                "use sync_fixtures for the default provider, or set one via the admin API first"
+            )
+
+        async def fetch():
+            return await self.router.fetch_upcoming_fixtures(
+                sport_code, preference.preferred_provider_key, preference.provider_competition_ref,
+                season_label, now, low_priority=low_priority,
+            )
+
+        async def process_one(record):
+            result = self.validator.validate_fixture(record, now)
+            if not result.is_valid:
+                return RecordOutcome(rejected=True, issue_category="relationship")
+            try:
+                _, created = await self.reconciler.reconcile_fixture(
+                    record, season_id, now, sport_code=sport_code, match_by_teams_and_date=True,
+                )
+            except ReconciliationDependencyError:
+                # Home/away team hasn't been cross-provider-mapped yet — reject just this record
+                # rather than crashing the whole run (matches sync_fixtures' handling above).
+                return RecordOutcome(rejected=True, issue_category="relationship")
+            return RecordOutcome(created=created, updated=not created)
+
+        return await self._run_sync(
+            sport_code, EntityKind.FIXTURE, f"upcoming:{competition_id}:{season_label}", trigger, now,
+            fetch=fetch, process_one=process_one, force=force,
         )
 
     async def sync_live_fixtures(self, sport_code: str, competition_ref: str, season_label: str, season_id, now: datetime) -> SyncRun | None:
@@ -260,5 +336,63 @@ class SyncOrchestrator:
 
         return await self._run_sync(
             sport_code, EntityKind.STANDING, f"{competition_ref}:{season_label}", trigger, now,
+            fetch=fetch, process_one=process_one, force=force,
+        )
+
+    async def sync_odds_for_fixture(
+        self, sport_code: str, fixture_ref: ProviderRef, fixture_id: str, now: datetime, *,
+        trigger=SyncTrigger.SCHEDULED, low_priority: bool = True, force: bool = False,
+    ) -> SyncRun | None:
+        """Per-fixture, not per-competition, like sync_teams/sync_standings — one fixture's odds
+        line, keyed by its own external_id so the incremental-skip window tracks each fixture
+        independently. Silently no-ops the feature write (still records a real SyncRun) for a
+        sport with no registered writer, same posture as EntityReconciliationService's
+        form_differential_calculators — only football has one today."""
+        async def fetch():
+            record = await self.router.fetch_odds(sport_code, fixture_ref, now, low_priority=low_priority)
+            return [record] if record is not None else []
+
+        async def process_one(record):
+            result = self.validator.validate_odds(record)
+            if not result.is_valid:
+                return RecordOutcome(rejected=True, issue_category="invalid")
+            writer = self.odds_feature_writers.get(sport_code)
+            if writer is not None:
+                await writer.compute_and_write(fixture_id, record, now)
+            return RecordOutcome(created=True)
+
+        return await self._run_sync(
+            sport_code, EntityKind.ODDS, fixture_ref.external_id, trigger, now,
+            fetch=fetch, process_one=process_one, force=force,
+        )
+
+    async def sync_team_statistics_for_fixture(
+        self, sport_code: str, fixture_ref: ProviderRef, fixture_id: str, now: datetime, *,
+        trigger=SyncTrigger.SCHEDULED, low_priority: bool = True, force: bool = False,
+    ) -> SyncRun | None:
+        """Per-fixture, like sync_odds_for_fixture — one fixture's two team-statistics rows (home
+        + away), keyed by its own external_id. `fetch_team_statistics`/`validate_team_statistics`/
+        `reconcile_team_statistics` were already real and fully built (audit fix 2026-08-02) but
+        had no orchestration calling them. `reconcile_team_statistics` needs a `MatchId`, which
+        `EntityReconciliationService.get_or_create_match` resolves from this same fixture_id — a
+        Match has no provider identity of its own, so there's nothing to sync for it separately."""
+        async def fetch():
+            return await self.router.fetch_team_statistics(sport_code, fixture_ref, now, low_priority=low_priority)
+
+        async def process_one(record):
+            result = self.validator.validate_team_statistics(record)
+            if not result.is_valid:
+                return RecordOutcome(rejected=True, issue_category="invalid")
+            match = await self.reconciler.get_or_create_match(FixtureId(UUID(fixture_id)), now)
+            try:
+                _, created = await self.reconciler.reconcile_team_statistics(record, match.id, now)
+            except ReconciliationDependencyError:
+                # Team hasn't been synced for this competition yet — reject just this record
+                # rather than crashing the whole run (matches sync_fixtures' handling above).
+                return RecordOutcome(rejected=True, issue_category="relationship")
+            return RecordOutcome(created=created, updated=not created)
+
+        return await self._run_sync(
+            sport_code, EntityKind.TEAM_STATISTICS, fixture_ref.external_id, trigger, now,
             fetch=fetch, process_one=process_one, force=force,
         )

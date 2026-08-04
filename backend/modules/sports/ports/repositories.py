@@ -15,6 +15,7 @@ from modules.sports.domain.entities import (
     Country,
     Fixture,
     Lineup,
+    Match,
     Player,
     Season,
     Sport,
@@ -90,6 +91,16 @@ class FixtureRepositoryPort(Protocol):
         that a single ``get`` by id can't answer. Additive: no existing method changed."""
         ...
 
+    async def find_by_teams_and_date_window(
+        self, home_team_id: TeamId, away_team_id: TeamId, date_from: datetime, date_to: datetime
+    ) -> list[Fixture]:
+        """Fixtures with this exact home/away pairing scheduled within ``[date_from, date_to]`` —
+        the cross-provider identity fallback ``EntityReconciliationService.reconcile_fixture``'s
+        ``match_by_teams_and_date`` opt-in uses to recognize "this is the same real-world match a
+        different provider already reported," since a second provider's own external fixture id
+        never matches the first provider's. Additive: no existing method changed."""
+        ...
+
 
 class StandingRepositoryPort(Protocol):
     async def list_by_season(self, season_id: SeasonId) -> list[Standing]: ...
@@ -101,6 +112,17 @@ class CountryRepositoryPort(Protocol):
     async def get_by_code(self, code: str) -> Country | None: ...
     async def list_all(self) -> list[Country]: ...
     async def upsert(self, country: Country) -> Country: ...
+
+
+class MatchRepositoryPort(Protocol):
+    """``Match`` (started_at/ended_at/final_state — the live-state wrapper around a `Fixture`,
+    docs/database_schema.md `sports.matches`) has no provider-side identity of its own: a
+    fixture's match always exists 1:1 (`MatchModel.fixture_id` is a unique FK), so ``get_or_create``
+    is the only entry point real callers need — there's nothing to reconcile against a provider
+    the way Team/Player/Fixture rows are."""
+
+    async def get_by_fixture(self, fixture_id: FixtureId) -> Match | None: ...
+    async def upsert(self, match: Match) -> Match: ...
 
 
 class TeamStatisticsRepositoryPort(Protocol):

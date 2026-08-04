@@ -22,6 +22,7 @@ from modules.predictions.domain.value_objects import (
     ModelEvaluationId,
     ModelId,
     ModelStatus,
+    OutcomeType,
     PredictionAuditId,
     PredictionId,
     PredictionOutcomeId,
@@ -63,6 +64,10 @@ def market_to_domain(model: MarketDefinitionModel) -> MarketDefinition:
         reviewed_at=model.reviewed_at,
         rejection_reason=model.rejection_reason,
         deprecated_at=model.deprecated_at,
+        outcome_type=OutcomeType(model.outcome_type) if model.outcome_type else None,
+        allowed_values=tuple(model.allowed_values) if model.allowed_values else (),
+        resolver_key=model.resolver_key,
+        gemini_prompt_template=model.gemini_prompt_template,
     )
 
 
@@ -88,6 +93,10 @@ def market_to_model(entity: MarketDefinition, model: MarketDefinitionModel | Non
     model.reviewed_at = entity.reviewed_at
     model.rejection_reason = entity.rejection_reason
     model.deprecated_at = entity.deprecated_at
+    model.outcome_type = entity.outcome_type.value if entity.outcome_type else None
+    model.allowed_values = list(entity.allowed_values) if entity.allowed_values else None
+    model.resolver_key = entity.resolver_key
+    model.gemini_prompt_template = entity.gemini_prompt_template
     return model
 
 
@@ -238,6 +247,13 @@ def prediction_to_domain(model: PredictionModel) -> Prediction:
         status=PredictionStatus(model.status),
         generated_at=model.generated_at,
         data_freshness=model.data_freshness,
+        probability_distribution=dict(model.probability_distribution or {}),
+        confidence_interval=(
+            (model.confidence_interval_low, model.confidence_interval_high)
+            if model.confidence_interval_low is not None and model.confidence_interval_high is not None
+            else None
+        ),
+        expected_error=model.expected_error,
     )
 
 
@@ -255,6 +271,10 @@ def prediction_to_model(entity: Prediction, model: PredictionModel | None = None
     model.status = entity.status.value
     model.generated_at = entity.generated_at
     model.data_freshness = entity.data_freshness
+    model.probability_distribution = dict(entity.probability_distribution)
+    model.confidence_interval_low = entity.confidence_interval[0] if entity.confidence_interval else None
+    model.confidence_interval_high = entity.confidence_interval[1] if entity.confidence_interval else None
+    model.expected_error = entity.expected_error
     return model
 
 

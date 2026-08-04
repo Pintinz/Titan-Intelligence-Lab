@@ -1,4 +1,18 @@
 import { api } from '@/lib/api/client'
+import type {
+  CompetitionFixtureSourceDto,
+  ConnectionTestResultDto,
+  ProviderCategory,
+  ProviderCategorySummaryDto,
+  ProviderCredentialMaskedDto,
+  ProviderDto,
+  ProviderHistoryDto,
+  ProviderStatusSummaryDto,
+  ProviderUsageSummaryDto,
+  SyncRunSummaryDto,
+  TeamMappingSuggestionDto,
+  NewsSourceDto,
+} from '@/lib/api/types'
 
 /**
  * Endpoints defined directly in apps/api/main.py (Provider Management, Feature
@@ -8,13 +22,52 @@ import { api } from '@/lib/api/client'
  * request/response types with them.
  */
 export const adminPlatformApi = {
-  // -- Provider Management --------------------------------------------------------------------
-  listProviders: () =>
-    api.get<Array<{ id: string; key: string; name: string; category: string; status: string; priority: number }>>(
-      '/api/v1/admin/providers',
-    ),
+  // -- Provider Registry (Milestone 11B) --------------------------------------------------------
+  listProviders: () => api.get<ProviderDto[]>('/api/v1/admin/providers'),
+  getProvider: (providerId: string) => api.get<ProviderDto>(`/api/v1/admin/providers/${providerId}`),
+  registerProvider: (input: {
+    key: string
+    name: string
+    category: ProviderCategory
+    priority?: number
+    daily_quota_limit?: number | null
+    monthly_quota_limit?: number | null
+    base_url?: string | null
+    auth_type?: string | null
+    region?: string | null
+    version?: string | null
+    environment?: string
+    timeout_seconds?: number
+    retry_count?: number
+    retry_delay_seconds?: number
+  }) => api.post<ProviderDto>('/api/v1/admin/providers', input),
+  updateProvider: (providerId: string, input: Partial<Record<string, unknown>>) =>
+    api.patch<ProviderDto>(`/api/v1/admin/providers/${providerId}`, input),
+  deleteProvider: (providerId: string) => api.delete<{ id: string; deleted: boolean }>(`/api/v1/admin/providers/${providerId}`),
   activateProvider: (providerId: string) =>
     api.post<{ id: string; status: string }>(`/api/v1/admin/providers/${providerId}/activate`),
+  disableProvider: (providerId: string) =>
+    api.post<{ id: string; status: string }>(`/api/v1/admin/providers/${providerId}/disable`),
+  listProviderCredentials: (providerId: string) =>
+    api.get<ProviderCredentialMaskedDto[]>(`/api/v1/admin/providers/${providerId}/credentials`),
+  addProviderCredential: (providerId: string, input: { label: string; value: string; expires_at?: string | null }) =>
+    api.post<ProviderCredentialMaskedDto>(`/api/v1/admin/providers/${providerId}/credentials`, input),
+  rotateProviderKey: (
+    providerId: string,
+    input: { old_credential_id: string; label: string; value: string; expires_at?: string | null },
+  ) => api.post<ProviderCredentialMaskedDto>(`/api/v1/admin/providers/${providerId}/rotate-key`, input),
+  testProviderConnection: (providerId: string) =>
+    api.post<ConnectionTestResultDto>(`/api/v1/admin/providers/${providerId}/test`),
+  refreshProviderConnection: (providerId: string) =>
+    api.post<ConnectionTestResultDto>(`/api/v1/admin/providers/${providerId}/refresh`),
+  importProviderFromEnv: (input: { env_var_name: string; key: string; name: string; category: ProviderCategory; credential_label?: string }) =>
+    api.post<{ provider: ProviderDto; credential: ProviderCredentialMaskedDto }>('/api/v1/admin/providers/import-from-env', input),
+  providerUsage: (providerId: string, period: 'daily' | 'monthly' = 'daily', limit = 30) =>
+    api.get<ProviderUsageSummaryDto>(`/api/v1/admin/providers/${providerId}/usage`, { period, limit }),
+  providerHistory: (providerId: string, limit = 20) =>
+    api.get<ProviderHistoryDto>(`/api/v1/admin/providers/${providerId}/history`, { limit }),
+  providerCategories: () => api.get<ProviderCategorySummaryDto[]>('/api/v1/admin/providers/categories'),
+  providerStatusSummary: () => api.get<ProviderStatusSummaryDto>('/api/v1/admin/providers/status'),
 
   // -- Provider Health Intelligence ------------------------------------------------------------
   providerHealthSummary: (providerId: string, windowHours = 24) =>
@@ -84,10 +137,21 @@ export const adminPlatformApi = {
     }),
 
   // -- Sports ingestion sync ----------------------------------------------------------------------
+  bootstrapCompetition: (
+    sportCode: string,
+    input: { competition_ref: string; competition_name: string; season_label: string },
+  ) =>
+    api.post<{ sport_id: string; competition_id: string; competition_created: boolean; season_id: string; season_created: boolean }>(
+      `/api/v1/admin/sync/${sportCode}/bootstrap`,
+      input,
+    ),
   triggerSyncCountries: (sportCode: string, force = false) =>
     api.post<Record<string, unknown> | null>(`/api/v1/admin/sync/${sportCode}/countries`, { force }),
-  triggerSyncTeams: (sportCode: string, competitionRef: string, force = false) =>
-    api.post<Record<string, unknown> | null>(`/api/v1/admin/sync/${sportCode}/teams/${competitionRef}`, { force }),
+  triggerSyncTeams: (sportCode: string, competitionRef: string, opts: { force?: boolean; seasonLabel?: string } = {}) =>
+    api.post<Record<string, unknown> | null>(`/api/v1/admin/sync/${sportCode}/teams/${competitionRef}`, {
+      force: opts.force ?? false,
+      season_label: opts.seasonLabel ?? null,
+    }),
   triggerSyncFixtures: (
     sportCode: string,
     competitionRef: string,
@@ -100,6 +164,8 @@ export const adminPlatformApi = {
     seasonLabel: string,
     input: { season_id: string; force?: boolean },
   ) => api.post<Record<string, unknown> | null>(`/api/v1/admin/sync/${sportCode}/standings/${competitionRef}/${seasonLabel}`, input),
+  triggerSyncStatistics: (sportCode: string, fixtureId: string, force = false) =>
+    api.post<Record<string, unknown> | null>(`/api/v1/admin/sync/${sportCode}/statistics/${fixtureId}`, { force }),
   syncStatus: (opts: { sport_code?: string; entity_kind?: string; limit?: number } = {}) =>
     api.get<unknown[]>('/api/v1/admin/sync/status', opts),
   syncStats: (opts: { sport_code?: string; entity_kind?: string; limit?: number } = {}) =>
@@ -107,7 +173,40 @@ export const adminPlatformApi = {
   ingestionQuality: (sportCode: string, entityKind: string) =>
     api.get<Record<string, unknown> | null>(`/api/v1/admin/ingestion/quality/${sportCode}/${entityKind}`),
 
+  // -- football-data.org integration: per-competition fixture source + team mapping --------------
+  getCompetitionFixtureSource: (competitionId: string) =>
+    api.get<CompetitionFixtureSourceDto | null>(`/api/v1/admin/competitions/${competitionId}/fixture-source`),
+  setCompetitionFixtureSource: (
+    competitionId: string,
+    input: { preferred_provider_key: string; provider_competition_ref: string; notes?: string | null },
+  ) => api.put<CompetitionFixtureSourceDto>(`/api/v1/admin/competitions/${competitionId}/fixture-source`, input),
+  clearCompetitionFixtureSource: (competitionId: string) =>
+    api.delete<{ deleted: boolean }>(`/api/v1/admin/competitions/${competitionId}/fixture-source`),
+  suggestTeamMappings: (competitionId: string, providerCompetitionRef: string) =>
+    api.get<TeamMappingSuggestionDto[]>('/api/v1/admin/providers/football-data-org/team-suggestions', {
+      competition_id: competitionId,
+      provider_competition_ref: providerCompetitionRef,
+    }),
+  confirmTeamMappings: (mappings: Array<{ football_data_org_team_id: string; titaniq_team_id: string }>) =>
+    api.post<{ mapped: number }>('/api/v1/admin/providers/football-data-org/team-mappings', { mappings }),
+  triggerUpcomingFixturesSync: (
+    sportCode: string,
+    competitionId: string,
+    input: { season_label: string; season_id: string; force?: boolean },
+  ) =>
+    api.post<SyncRunSummaryDto | null>(
+      `/api/v1/admin/sync/${sportCode}/competitions/${competitionId}/upcoming-fixtures`,
+      input,
+    ),
+
   // -- Redis / KG ---------------------------------------------------------------------------------
   redisHealth: () => api.get<{ healthy: boolean; latency_ms: number | null; error: string | null }>('/api/v1/admin/monitoring/redis'),
   kgNode: (nodeType: string, entityRef: string) => api.get<Record<string, unknown>>(`/api/v1/admin/graph/nodes/${nodeType}/${entityRef}`),
+
+  // -- News ingestion -------------------------------------------------------------------------------
+  registerNewsSource: (input: { name: string; url: string; source_type?: string; is_official?: boolean }) =>
+    api.post<NewsSourceDto>('/api/v1/admin/news/sources', input),
+  listNewsSources: () => api.get<NewsSourceDto[]>('/api/v1/admin/news/sources'),
+  triggerNewsSync: (sourceId: string) =>
+    api.post<Record<string, unknown>>(`/api/v1/admin/news/sources/${sourceId}/sync`),
 }

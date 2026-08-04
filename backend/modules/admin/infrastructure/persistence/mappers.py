@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+
 from modules.admin.domain.entities import (
     FeatureFlag,
     ProviderCredential,
@@ -43,6 +45,21 @@ def provider_to_domain(model: ProviderModel) -> ProviderDefinition:
         monthly_quota_limit=model.monthly_quota_limit,
         cache_ttl_seconds=model.cache_ttl_seconds,
         poll_interval_seconds=model.poll_interval_seconds,
+        base_url=model.base_url,
+        auth_type=model.auth_type,
+        auth_header_name=model.auth_header_name,
+        region=model.region,
+        version=model.version,
+        environment=model.environment,
+        timeout_seconds=model.timeout_seconds,
+        retry_count=model.retry_count,
+        retry_delay_seconds=model.retry_delay_seconds,
+        created_by=str(model.created_by) if model.created_by else None,
+        updated_by=str(model.updated_by) if model.updated_by else None,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+        capability_note=model.capability_note,
+        capability_checked_at=model.capability_checked_at,
     )
 
 
@@ -57,6 +74,19 @@ def provider_to_model(entity: ProviderDefinition, model: ProviderModel | None = 
     model.monthly_quota_limit = entity.monthly_quota_limit
     model.cache_ttl_seconds = entity.cache_ttl_seconds
     model.poll_interval_seconds = entity.poll_interval_seconds
+    model.base_url = entity.base_url
+    model.auth_type = entity.auth_type
+    model.auth_header_name = entity.auth_header_name
+    model.region = entity.region
+    model.version = entity.version
+    model.environment = entity.environment
+    model.timeout_seconds = entity.timeout_seconds
+    model.retry_count = entity.retry_count
+    model.retry_delay_seconds = entity.retry_delay_seconds
+    model.created_by = uuid.UUID(entity.created_by) if entity.created_by else model.created_by
+    model.updated_by = uuid.UUID(entity.updated_by) if entity.updated_by else model.updated_by
+    model.capability_note = entity.capability_note
+    model.capability_checked_at = entity.capability_checked_at
     return model
 
 

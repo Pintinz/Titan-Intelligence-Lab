@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from modules.ingestion.domain.entities import (
+    CompetitionFixtureSourcePreference,
     DataQualityReport,
     ProviderRefIndexEntry,
     SyncCheckpoint,
@@ -16,6 +17,7 @@ from modules.ingestion.domain.entities import (
 from modules.ingestion.domain.value_objects import EntityKind, SyncRunId
 from modules.ingestion.infrastructure.persistence import mappers
 from modules.ingestion.infrastructure.persistence.models import (
+    CompetitionFixtureSourceModel,
     DataQualityReportModel,
     ProviderRefIndexModel,
     SyncCheckpointModel,
@@ -170,3 +172,34 @@ class SqlAlchemyProviderRefIndexRepository:
         self.session.add(model)
         await self.session.flush()
         return mappers.ref_index_to_domain(model)
+
+
+@dataclass
+class SqlAlchemyCompetitionFixtureSourceRepository:
+    session: AsyncSession
+
+    async def get_by_competition(self, competition_id: str) -> CompetitionFixtureSourcePreference | None:
+        stmt = select(CompetitionFixtureSourceModel).where(CompetitionFixtureSourceModel.competition_id == competition_id)
+        model = (await self.session.execute(stmt)).scalar_one_or_none()
+        return mappers.fixture_source_to_domain(model) if model else None
+
+    async def upsert(self, preference: CompetitionFixtureSourcePreference) -> CompetitionFixtureSourcePreference:
+        stmt = select(CompetitionFixtureSourceModel).where(
+            CompetitionFixtureSourceModel.competition_id == preference.competition_id
+        )
+        existing = (await self.session.execute(stmt)).scalar_one_or_none()
+        model = mappers.fixture_source_to_model(preference, existing)
+        self.session.add(model)
+        await self.session.flush()
+        return mappers.fixture_source_to_domain(model)
+
+    async def delete(self, competition_id: str) -> None:
+        stmt = select(CompetitionFixtureSourceModel).where(CompetitionFixtureSourceModel.competition_id == competition_id)
+        existing = (await self.session.execute(stmt)).scalar_one_or_none()
+        if existing is not None:
+            await self.session.delete(existing)
+            await self.session.flush()
+
+    async def list_all(self) -> list[CompetitionFixtureSourcePreference]:
+        result = await self.session.execute(select(CompetitionFixtureSourceModel))
+        return [mappers.fixture_source_to_domain(row) for row in result.scalars().all()]

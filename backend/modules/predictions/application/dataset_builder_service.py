@@ -5,8 +5,11 @@ other feature source is ever read directly, satisfying "No algorithm may bypass 
 Store" by construction: the only place `TrainingSample.features` comes from is a `feature_snapshot`
 that was itself produced by `PredictionContextBuilder`/`FeatureMarketMappingService` (Milestone 9).
 
-See `modules.predictions.domain.dataset` module docstring (ADR-052) for the classification-label
-convention (`actual_value` == "positive"/"negative") this builder relies on.
+See `modules.predictions.domain.dataset` module docstring for the classification-label recovery
+this builder relies on (`_label_from_outcome`) — `PredictionOutcome.actual_value` is a real-world
+fact string (e.g. `"btts_yes"`), not the generic `"positive"`/`"negative"` an earlier version of
+this module assumed; the real training label is recovered via `outcome.error` +
+`real_label_is_positive`, not string-matched off `actual_value` directly.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
 
+from modules.predictions.application.outcome_label_mapper import real_outcome_is_positive
 from modules.predictions.domain.dataset import (
     Dataset,
     DatasetId,
@@ -26,6 +30,7 @@ from modules.predictions.domain.dataset import (
     DatasetStatistics,
     DatasetStatus,
 )
+from modules.predictions.domain.entities import Prediction
 from modules.predictions.domain.value_objects import MarketId, TargetType
 from modules.predictions.ports.ml_model import MIN_TRAINING_SAMPLES, TrainingSample
 from modules.predictions.ports.repositories import (
@@ -42,9 +47,21 @@ class MarketNotFoundError(KeyError):
     pass
 
 
-def _label_from_outcome(target_type: TargetType, actual_value: str) -> float:
+def _label_from_outcome(
+    target_type: TargetType, market_key: str, prediction: Prediction, actual_value: str, error: float | None
+) -> float | None:
+    """Returns the real training label, or ``None`` when it can't be honestly recovered (never a
+    fabricated guess). For CLASSIFICATION: `real_outcome_is_positive` recovers the real outcome's
+    own polarity from what the prediction claimed plus whether that claim matched reality — see
+    that function's docstring. Returns None for markets with no binary polarity at all (e.g. a
+    3-way market like football.match_winner) — those aren't trainable through this binary-
+    classification path and must never be coerced into one. For REGRESSION, unchanged from
+    before: `actual_value` is the stringified continuous realized value."""
     if target_type is TargetType.CLASSIFICATION:
-        return 1.0 if actual_value == "positive" else 0.0
+        matches_positive = real_outcome_is_positive(market_key, prediction.value, error)
+        if matches_positive is None:
+            return None
+        return 1.0 if matches_positive else 0.0
     return float(actual_value)
 
 
@@ -122,7 +139,11 @@ class DatasetBuilder:
             prediction = await self.predictions.get(outcome.prediction_id)
             if prediction is None:
                 continue
-            label = _label_from_outcome(market.target_type, outcome.actual_value)
+            label = _label_from_outcome(
+                market.target_type, market.market_key, prediction, outcome.actual_value, outcome.error
+            )
+            if label is None:
+                continue  # can't honestly recover a training label for this outcome — skip, never fabricate
             samples.append(TrainingSample(features=dict(prediction.feature_snapshot), label=label))
             source_prediction_ids.append(str(prediction.id))
 

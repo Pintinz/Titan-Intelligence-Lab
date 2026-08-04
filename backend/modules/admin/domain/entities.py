@@ -35,6 +35,29 @@ class ProviderDefinition:
     monthly_quota_limit: int | None = None
     cache_ttl_seconds: int = 3600
     poll_interval_seconds: int = 300
+    # Milestone 11B — Provider Registry connection/lifecycle metadata (docs/admin_center.md §2).
+    base_url: str | None = None
+    auth_type: str | None = None  # "bearer" | "api_key_header" | "api_key_query" | "basic" | None
+    # Only meaningful when auth_type == "api_key_header" — the exact header name this provider
+    # expects its key on (e.g. API-Football's "x-apisports-key"). Falls back to "X-API-Key" in
+    # the connection tester when unset, so existing providers keep behaving as before.
+    auth_header_name: str | None = None
+    region: str | None = None
+    version: str | None = None
+    environment: str = "production"
+    timeout_seconds: int = 10
+    retry_count: int = 2
+    retry_delay_seconds: int = 1
+    created_by: str | None = None  # user id, str-typed here to avoid a domain dependency on identity
+    updated_by: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    # Best-effort capability read from the provider's own connection-test response (e.g. an
+    # API-SPORTS account's subscription plan) — see connection_check_service._extract_capability_note.
+    # None means "never detected," not "no limitation" — a provider whose response shape isn't
+    # recognized yet simply has no note.
+    capability_note: str | None = None
+    capability_checked_at: datetime | None = None
 
     def is_usable(self) -> bool:
         return self.status is ProviderStatus.ACTIVE

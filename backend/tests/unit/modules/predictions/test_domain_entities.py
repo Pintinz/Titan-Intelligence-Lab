@@ -25,6 +25,7 @@ from modules.predictions.domain.value_objects import (
     ModelEvaluationId,
     ModelId,
     ModelStatus,
+    OutcomeType,
     PredictionAuditId,
     PredictionId,
     PredictionOutcomeId,
@@ -55,6 +56,35 @@ def test_market_definition_is_production_only_when_status_production():
 
     assert draft.is_production() is False
     assert production.is_production() is True
+
+
+def test_market_definition_outcome_registry_fields_default_empty():
+    """Milestone 9.2 additive fields — every pre-9.2 construction site (market_seeding.py x4
+    sports, this file's own `_market()` helper) omits these and must keep working unchanged."""
+    market = _market()
+
+    assert market.outcome_type is None
+    assert market.allowed_values == ()
+    assert market.resolver_key is None
+    assert market.gemini_prompt_template is None
+
+
+def test_market_definition_accepts_outcome_registry_fields():
+    market = _market(
+        outcome_type=OutcomeType.HOME_DRAW_AWAY,
+        allowed_values=("HOME_WIN", "DRAW", "AWAY_WIN"),
+        resolver_key="football.match_winner",
+        gemini_prompt_template="Explain why {predicted_outcome} was predicted.",
+    )
+
+    assert market.outcome_type is OutcomeType.HOME_DRAW_AWAY
+    assert market.allowed_values == ("HOME_WIN", "DRAW", "AWAY_WIN")
+    assert market.resolver_key == "football.match_winner"
+    assert "predicted_outcome" in market.gemini_prompt_template
+
+
+def test_prediction_status_has_legacy_unresolved():
+    assert PredictionStatus.LEGACY_UNRESOLVED.value == "legacy_unresolved"
 
 
 def test_feature_market_mapping_defaults():

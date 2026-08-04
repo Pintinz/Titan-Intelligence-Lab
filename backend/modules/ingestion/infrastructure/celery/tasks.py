@@ -22,7 +22,7 @@ from uuid import UUID
 
 from modules.ingestion.application.sync_orchestrator import SyncOrchestrator
 from modules.ingestion.infrastructure.celery.celery_app import celery_app
-from modules.sports.domain.value_objects import SeasonId
+from modules.sports.domain.value_objects import ProviderRef, SeasonId
 
 _orchestrator_factory: Callable[[], Awaitable[SyncOrchestrator]] | None = None
 
@@ -91,12 +91,47 @@ def sync_live_fixtures_task(self, sport_code: str, competition_ref: str, season_
     return _run_summary(asyncio.run(_do()))
 
 
+@celery_app.task(name="ingestion.sync_upcoming_fixtures", bind=True, queue="default", **_RETRY_KWARGS)
+def sync_upcoming_fixtures_task(self, sport_code: str, competition_id: str, season_label: str, season_id_str: str, now_iso: str) -> dict | None:
+    async def _do():
+        orchestrator = await _get_orchestrator()
+        return await orchestrator.sync_upcoming_fixtures(
+            sport_code, competition_id, season_label, SeasonId(UUID(season_id_str)), datetime.fromisoformat(now_iso)
+        )
+
+    return _run_summary(asyncio.run(_do()))
+
+
 @celery_app.task(name="ingestion.sync_standings", bind=True, queue="default", **_RETRY_KWARGS)
 def sync_standings_task(self, sport_code: str, competition_ref: str, season_label: str, season_id_str: str, now_iso: str) -> dict | None:
     async def _do():
         orchestrator = await _get_orchestrator()
         return await orchestrator.sync_standings(
             sport_code, competition_ref, season_label, SeasonId(UUID(season_id_str)), datetime.fromisoformat(now_iso)
+        )
+
+    return _run_summary(asyncio.run(_do()))
+
+
+@celery_app.task(name="ingestion.sync_odds", bind=True, queue="default", **_RETRY_KWARGS)
+def sync_odds_task(self, sport_code: str, fixture_ref_provider: str, fixture_ref_external_id: str, fixture_id: str, now_iso: str) -> dict | None:
+    async def _do():
+        orchestrator = await _get_orchestrator()
+        fixture_ref = ProviderRef(provider=fixture_ref_provider, external_id=fixture_ref_external_id)
+        return await orchestrator.sync_odds_for_fixture(sport_code, fixture_ref, fixture_id, datetime.fromisoformat(now_iso))
+
+    return _run_summary(asyncio.run(_do()))
+
+
+@celery_app.task(name="ingestion.sync_team_statistics", bind=True, queue="default", **_RETRY_KWARGS)
+def sync_team_statistics_task(
+    self, sport_code: str, fixture_ref_provider: str, fixture_ref_external_id: str, fixture_id: str, now_iso: str
+) -> dict | None:
+    async def _do():
+        orchestrator = await _get_orchestrator()
+        fixture_ref = ProviderRef(provider=fixture_ref_provider, external_id=fixture_ref_external_id)
+        return await orchestrator.sync_team_statistics_for_fixture(
+            sport_code, fixture_ref, fixture_id, datetime.fromisoformat(now_iso)
         )
 
     return _run_summary(asyncio.run(_do()))

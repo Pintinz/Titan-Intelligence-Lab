@@ -74,7 +74,21 @@ async def test_explain_references_top_features():
         {"feature_importance": [{"feature_key": "football.team.form_index_last5"}]}
     )
 
-    assert "form_index_last5" in explanation
+    assert "Form Index (Last 5)" in explanation
+
+
+@pytest.mark.asyncio
+async def test_explain_humanizes_namespaced_feature_keys():
+    """Explanation text is user-facing narration — it must never leak a raw, dotted backend
+    feature identifier like "football.fixture.form_shots_on_target_diff_last5" verbatim."""
+    adapter = MockGeminiAdapter()
+
+    explanation = await adapter.explain(
+        {"feature_importance": [{"feature_key": "football.fixture.form_shots_on_target_diff_last5"}]}
+    )
+
+    assert "football.fixture" not in explanation
+    assert "Form Shots On Target Diff (Last 5)" in explanation
 
 
 @pytest.mark.asyncio
@@ -83,7 +97,7 @@ async def test_explain_default_text_with_no_feature_importance():
 
     explanation = await adapter.explain({})
 
-    assert explanation == "Mock explanation: no feature importance supplied."
+    assert explanation == "This verdict is grounded in the match's available data — no single factor dominates it."
 
 
 @pytest.mark.asyncio

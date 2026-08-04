@@ -17,6 +17,7 @@ from modules.sports.ports.provider_gateway import (
     ProviderCountryRecord,
     ProviderFixtureRecord,
     ProviderLineupRecord,
+    ProviderOddsRecord,
     ProviderPlayerRecord,
     ProviderStandingRecord,
     ProviderTeamRecord,
@@ -31,6 +32,15 @@ class ProviderThrottledError(RuntimeError):
     degradation", docs/admin_center.md §2)."""
 
 
+class ProviderNotConfiguredError(RuntimeError):
+    """Raised by `fetch_upcoming_fixtures` when the requested `provider_key` isn't registered in
+    `fixture_schedule_adapters`, or is registered but not active/credentialed. Unlike
+    `_resolve_adapter`'s per-sport default (which falls back to a mock so ordinary syncing never
+    breaks), this call is only ever made for a competition that explicitly opted into a specific
+    alternate provider (`CompetitionFixtureSourcePreference`) — silently falling back to mock
+    data here would hide a real setup mistake instead of surfacing it."""
+
+
 @dataclass
 class SportsProviderRouter:
     admin_service: ProviderManagementService
@@ -38,6 +48,12 @@ class SportsProviderRouter:
     circuit_breaker: CircuitBreaker
     real_adapters: dict[str, SportsDataProviderPort]  # keyed by SportCode.value
     mock_adapters: dict[str, SportsDataProviderPort]  # keyed by SportCode.value
+    # Orthogonal to `real_adapters`: a second, provider-key-keyed slot for adapters that only
+    # ever serve one narrow concern (today: upcoming fixture schedules) for a subset of
+    # competitions, opted into explicitly per-competition rather than replacing a sport's
+    # default adapter. Empty by default so existing callers/tests that don't pass this argument
+    # are unaffected. See `fetch_upcoming_fixtures`.
+    fixture_schedule_adapters: dict[str, SportsDataProviderPort] = field(default_factory=dict)
     _cache: dict[tuple, tuple[datetime, object]] = field(default_factory=dict)
 
     async def _resolve_adapter(self, sport_code: str, now: datetime) -> tuple[SportsDataProviderPort, str]:
@@ -101,14 +117,15 @@ class SportsProviderRouter:
         return result
 
     async def fetch_teams(
-        self, sport_code: str, competition_ref: str, now: datetime, *, low_priority: bool = False
+        self, sport_code: str, competition_ref: str, now: datetime, *,
+        low_priority: bool = False, season_label: str | None = None,
     ) -> list[ProviderTeamRecord]:
         return await self._execute(
             sport_code,
-            ("teams", sport_code, competition_ref),
+            ("teams", sport_code, competition_ref, season_label),
             now,
             low_priority,
-            lambda adapter: adapter.fetch_teams(competition_ref),
+            lambda adapter: adapter.fetch_teams(competition_ref, season_label),
         )
 
     async def fetch_fixtures(
@@ -125,7 +142,7 @@ class SportsProviderRouter:
             ("fixtures", sport_code, competition_ref, season_label),
             now,
             low_priority,
-            lambda adapter: adapter.fetch_fixtures(competition_ref, season_label),
+            lambda adapter: adapter.fetch_fixtures(competition_ref, season_label, now),
         )
 
     async def fetch_countries(
@@ -167,3 +184,63 @@ class SportsProviderRouter:
             sport_code, ("lineups", sport_code, fixture_ref.provider, fixture_ref.external_id),
             now, low_priority, lambda adapter: adapter.fetch_lineups(fixture_ref),
         )
+
+    async def fetch_odds(
+        self, sport_code: str, fixture_ref: ProviderRef, now: datetime, *, low_priority: bool = True
+    ) -> ProviderOddsRecord | None:
+        return await self._execute(
+            sport_code, ("odds", sport_code, fixture_ref.provider, fixture_ref.external_id),
+            now, low_priority, lambda adapter: adapter.fetch_odds(fixture_ref),
+        )
+
+    async def _resolve_fixture_schedule_adapter(self, provider_key: str) -> tuple[SportsDataProviderPort, object]:
+        adapter = self.fixture_schedule_adapters.get(provider_key)
+        if adapter is None:
+            raise ProviderNotConfiguredError(f"no fixture-schedule adapter registered for '{provider_key}'")
+        provider = await self.admin_service.providers.get_by_key(adapter.provider_key)
+        if provider is None or not provider.is_usable():
+            raise ProviderNotConfiguredError(f"provider '{provider_key}' is not registered/active")
+        credentials = await self.admin_service.usable_credentials(provider.id)
+        if not credentials:
+            raise ProviderNotConfiguredError(f"provider '{provider_key}' has no usable credential configured")
+        return adapter, provider
+
+    async def fetch_upcoming_fixtures(
+        self, sport_code: str, provider_key: str, competition_ref: str, season_label: str, now: datetime, *,
+        low_priority: bool = False,
+    ) -> list[ProviderFixtureRecord]:
+        """The `fixture_schedule_adapters` counterpart to `fetch_fixtures` — resolves a specific,
+        explicitly-opted-into provider (via `provider_key`, looked up by the caller from a
+        `CompetitionFixtureSourcePreference`) instead of the sport's default adapter, with no
+        mock fallback (see `ProviderNotConfiguredError`). Relies on the resolved adapter's own
+        `fetch_fixtures` to have already scoped its request to not-yet-played matches
+        (`FootballDataOrgAdapter.fetch_fixtures` does this via its `status=SCHEDULED,TIMED`
+        request param) — this method does not re-filter by status, so a future fixture-schedule
+        adapter that doesn't pre-filter would need to do so itself, matching this method's
+        contract of "upcoming fixtures only"."""
+        cache_key = ("upcoming_fixtures", provider_key, competition_ref, season_label)
+        cached = self._cache_get(cache_key, now)
+        if cached is not None:
+            return cached
+
+        adapter, provider = await self._resolve_fixture_schedule_adapter(provider_key)
+        cache_ttl = provider.cache_ttl_seconds if provider else 3600
+
+        if not self.circuit_breaker.allow_request(adapter.provider_key, now):
+            raise ProviderCircuitOpenError(f"circuit open for '{adapter.provider_key}'")
+        if provider and await self.quota_engine.should_throttle(provider.id, now, low_priority=low_priority):
+            raise ProviderThrottledError(f"quota protection throttled '{adapter.provider_key}'")
+        try:
+            result = await adapter.fetch_fixtures(competition_ref, season_label, now)
+        except Exception:
+            self.circuit_breaker.record_failure(adapter.provider_key, now)
+            if provider:
+                await self.quota_engine.record_request(provider.id, now, success=False)
+            raise
+        else:
+            self.circuit_breaker.record_success(adapter.provider_key)
+            if provider:
+                await self.quota_engine.record_request(provider.id, now, success=True)
+
+        self._cache_set(cache_key, result, now, cache_ttl)
+        return result

@@ -67,12 +67,14 @@ from modules.identity.infrastructure.security import (
 from modules.identity.ports.security import JWTValidatorPort
 from modules.ingestion.application.data_quality_engine import IngestionQualityEngine
 from modules.ingestion.application.data_validation_engine import DataValidationEngine
+from modules.ingestion.application.cross_provider_team_mapping_service import CrossProviderTeamMappingService
 from modules.ingestion.application.entity_reconciliation_service import EntityReconciliationService
 from modules.ingestion.application.monitoring_service import MonitoringService
 from modules.ingestion.application.sync_orchestrator import SyncOrchestrator
 from modules.ingestion.infrastructure.cache.redis_lock import RedisDistributedLock
 from modules.ingestion.infrastructure.cache.redis_sync_cache import RedisSyncCache
 from modules.ingestion.infrastructure.persistence.repositories import (
+    SqlAlchemyCompetitionFixtureSourceRepository,
     SqlAlchemyDataQualityReportRepository,
     SqlAlchemyProviderRefIndexRepository,
     SqlAlchemySyncCheckpointRepository,
@@ -97,12 +99,14 @@ from modules.intelligence.application.community_ingestion_service import Communi
 from modules.intelligence.application.entity_extraction_service import EntityExtractionService
 from modules.intelligence.application.event_extraction_service import EventExtractionService
 from modules.intelligence.application.feature_store_enrichment_service import FeatureStoreEnrichmentService
+from modules.intelligence.application.intelligence_enrichment_orchestrator import IntelligenceEnrichmentOrchestrator
 from modules.intelligence.application.intelligence_monitoring_service import IntelligenceMonitoringService
 from modules.intelligence.application.intelligence_retrieval_service import (
     AIReportRetrieval,
     CommunityRetrieval,
     IntelligenceRetrievalService,
     KnowledgeGraphRetrievalAdapter,
+    MatchTeamNamesResolver,
     NewsRetrieval,
 )
 from modules.intelligence.application.knowledge_graph_enrichment_service import KnowledgeGraphEnrichmentService
@@ -111,7 +115,10 @@ from modules.intelligence.application.news_ingestion_service import NewsIngestio
 from modules.intelligence.application.sentiment_service import SentimentService
 from modules.intelligence.application.source_reliability_service import SourceReliabilityService
 from modules.intelligence.application.summarization_service import SummarizationService
+from modules.intelligence.infrastructure.gemini_adapter import GeminiAdapter
 from modules.intelligence.infrastructure.mock_gemini_adapter import MockGeminiAdapter
+from modules.intelligence.infrastructure.providers.rss_news_provider import RssNewsProvider
+from modules.intelligence.infrastructure.text_intelligence_router import TextIntelligenceRouter
 from modules.intelligence.infrastructure.persistence.repositories import (
     SqlAlchemyCommunityPostRepository,
     SqlAlchemyCommunityTopicRepository,
@@ -138,22 +145,30 @@ from modules.predictions.application.model_monitoring_service import ModelMonito
 from modules.predictions.application.model_registry_service import ModelRegistryService
 from modules.predictions.application.model_selection_service import AutomaticModelSelectionService
 from modules.predictions.application.model_version_resolver import ModelVersionResolver
+from modules.predictions.application.outcome_resolution_service import OutcomeResolutionService
 from modules.predictions.application.prediction_admin_service import PredictionAdminService
 from modules.predictions.application.prediction_cache_service import PredictionCacheService
 from modules.predictions.application.prediction_context_builder import PredictionContextBuilder
 from modules.predictions.application.prediction_engine import PredictionEngine
 from modules.predictions.application.prediction_serving_service import AsyncPredictionQueueService, BatchPredictionService
+from modules.predictions.application.calibration_fitting_service import CalibrationFittingService
 from modules.predictions.application.predictor_registry import PredictorRegistry
+from modules.predictions.application.scheduled_retraining_orchestrator import ScheduledRetrainingOrchestrator
 from modules.predictions.application.training_pipeline_service import RetrainingScheduler, TrainingPipelineService
 from modules.predictions.application.windowed_feature_engineering_service import (
+    FixtureExpectedGoalsCalculator,
+    FixtureFormDifferentialCalculator,
     baseball_form_calculator,
     basketball_form_calculator,
+    football_fixture_expected_goals_calculator,
+    football_fixture_stat_differential_calculators,
     football_form_calculator,
     table_tennis_form_calculator,
 )
 from modules.predictions.baseball.market_seeding import BaseballMarketSeeder
 from modules.predictions.basketball.market_seeding import BasketballMarketSeeder
 from modules.predictions.football.market_seeding import FootballMarketSeeder
+from modules.predictions.football.odds_feature_writer import FootballOddsFeatureWriter, football_odds_feature_writer
 from modules.predictions.infrastructure.calibration.isotonic_regression_calibrator import (
     IsotonicRegressionCalibrator,
 )
@@ -178,9 +193,16 @@ from modules.predictions.infrastructure.persistence.repositories import (
     SqlAlchemyPredictionOutcomeRepository,
     SqlAlchemyPredictionRepository,
 )
+from modules.predictions.domain.value_objects import MarketKind
+from modules.predictions.infrastructure.predictors.poisson_goals_threshold_predictor import (
+    PoissonGoalsThresholdMode,
+    PoissonGoalsThresholdPredictor,
+)
+from modules.predictions.infrastructure.predictors.poisson_score_predictor import PoissonScorePredictor
 from modules.predictions.infrastructure.predictors.weighted_scoring import (
     WeightedLinearPredictor,
     WeightedLogisticPredictor,
+    WeightedOrdinalPredictor,
 )
 from modules.predictions.ports.calibrator import CalibratorPort
 from modules.predictions.ports.dataset_repository import DatasetRepositoryPort
@@ -200,12 +222,17 @@ from modules.webhooks.infrastructure.persistence.repositories import (
     SqlAlchemyWebhookDeliveryRepository,
     SqlAlchemyWebhookEndpointRepository,
 )
+from modules.watchlist.application.watchlist_service import WatchlistService
+from modules.watchlist.infrastructure.persistence.repositories import SqlAlchemyWatchlistRepository
+from modules.alerts.application.alert_service import AlertService
+from modules.alerts.infrastructure.persistence.repositories import SqlAlchemyAlertEventRepository
 from modules.sports.infrastructure.persistence.database import build_engine, build_session_factory
 from modules.sports.infrastructure.persistence.repositories import (
     SqlAlchemyCompetitionRepository,
     SqlAlchemyCountryRepository,
     SqlAlchemyFixtureRepository,
     SqlAlchemyLineupRepository,
+    SqlAlchemyMatchRepository,
     SqlAlchemyPlayerRepository,
     SqlAlchemySeasonRepository,
     SqlAlchemySportRepository,
@@ -219,6 +246,7 @@ from modules.sports.infrastructure.providers.api_sports_adapter import (
     ApiBasketballAdapter,
     ApiFootballAdapter,
 )
+from modules.sports.infrastructure.providers.football_data_org_adapter import FootballDataOrgAdapter
 from modules.sports.infrastructure.providers.mock_provider import MockSportsDataProvider
 from modules.sports.infrastructure.providers.provider_router import SportsProviderRouter
 
@@ -377,6 +405,9 @@ def build_graph_monitoring_service(session: AsyncSession) -> GraphMonitoringServ
     )
 
 
+PROVIDER_KEY_BY_SPORT = {"football": "api_football", "basketball": "api_basketball", "baseball": "api_baseball"}
+
+
 def build_entity_reconciliation_service(session: AsyncSession) -> EntityReconciliationService:
     return EntityReconciliationService(
         sports=SqlAlchemySportRepository(session=session),
@@ -387,12 +418,24 @@ def build_entity_reconciliation_service(session: AsyncSession) -> EntityReconcil
         teams=SqlAlchemyTeamRepository(session=session),
         players=SqlAlchemyPlayerRepository(session=session),
         fixtures=SqlAlchemyFixtureRepository(session=session),
+        matches=SqlAlchemyMatchRepository(session=session),
         team_statistics=SqlAlchemyTeamStatisticsRepository(session=session),
         lineups=SqlAlchemyLineupRepository(session=session),
         standings=SqlAlchemyStandingRepository(session=session),
         ref_index=SqlAlchemyProviderRefIndexRepository(session=session),
         kg=build_kg_population_service(session),
         timeline=SqlAlchemyTimelineEventRepository(session=session),
+        alerts=build_alert_service(session),
+        outcome_resolver=build_outcome_resolution_service(session),
+        form_differential_calculators={"football": build_football_form_differential_calculators(session)},
+    )
+
+
+def build_outcome_resolution_service(session: AsyncSession) -> OutcomeResolutionService:
+    return OutcomeResolutionService(
+        predictions=SqlAlchemyPredictionRepository(session=session),
+        markets=SqlAlchemyMarketRepository(session=session),
+        outcomes=SqlAlchemyPredictionOutcomeRepository(session=session),
     )
 
 
@@ -413,12 +456,35 @@ def _make_api_key_getter(admin_service: ProviderManagementService, provider_key:
     return _get
 
 
+FOOTBALL_DATA_ORG_PROVIDER_KEY = "football_data_org"
+
+
+def build_football_data_org_adapter(session: AsyncSession) -> FootballDataOrgAdapter:
+    admin_service = build_provider_management_service(session)
+    return FootballDataOrgAdapter(get_api_key=_make_api_key_getter(admin_service, FOOTBALL_DATA_ORG_PROVIDER_KEY))
+
+
+def get_football_data_org_adapter(session: AsyncSession) -> FootballDataOrgAdapter:
+    """Alias kept for call sites (admin endpoints) that only need the adapter directly, not the
+    full router — same construction as `build_football_data_org_adapter`, just named for its
+    "get me the thing" use rather than "build me a wired-up service" use."""
+    return build_football_data_org_adapter(session)
+
+
+def build_competition_fixture_source_repository(session: AsyncSession) -> SqlAlchemyCompetitionFixtureSourceRepository:
+    return SqlAlchemyCompetitionFixtureSourceRepository(session=session)
+
+
+def build_cross_provider_team_mapping_service(session: AsyncSession) -> CrossProviderTeamMappingService:
+    return CrossProviderTeamMappingService(ref_index=SqlAlchemyProviderRefIndexRepository(session=session))
+
+
 def build_sports_provider_router(session: AsyncSession) -> SportsProviderRouter:
     admin_service = build_provider_management_service(session)
     real_adapters = {
-        "football": ApiFootballAdapter(get_api_key=_make_api_key_getter(admin_service, "api_football")),
-        "basketball": ApiBasketballAdapter(get_api_key=_make_api_key_getter(admin_service, "api_basketball")),
-        "baseball": ApiBaseballAdapter(get_api_key=_make_api_key_getter(admin_service, "api_baseball")),
+        "football": ApiFootballAdapter(get_api_key=_make_api_key_getter(admin_service, PROVIDER_KEY_BY_SPORT["football"])),
+        "basketball": ApiBasketballAdapter(get_api_key=_make_api_key_getter(admin_service, PROVIDER_KEY_BY_SPORT["basketball"])),
+        "baseball": ApiBaseballAdapter(get_api_key=_make_api_key_getter(admin_service, PROVIDER_KEY_BY_SPORT["baseball"])),
     }
     mock_adapters = {
         "football": MockSportsDataProvider(provider_key="api_football", sport_code="football"),
@@ -426,9 +492,13 @@ def build_sports_provider_router(session: AsyncSession) -> SportsProviderRouter:
         "baseball": MockSportsDataProvider(provider_key="api_baseball", sport_code="baseball"),
         "table_tennis": MockSportsDataProvider(provider_key="mock_table_tennis", sport_code="table_tennis"),
     }
+    fixture_schedule_adapters = {
+        FOOTBALL_DATA_ORG_PROVIDER_KEY: build_football_data_org_adapter(session),
+    }
     return SportsProviderRouter(
         admin_service=admin_service, quota_engine=build_quota_intelligence_engine(session),
         circuit_breaker=get_circuit_breaker(), real_adapters=real_adapters, mock_adapters=mock_adapters,
+        fixture_schedule_adapters=fixture_schedule_adapters,
     )
 
 
@@ -454,6 +524,8 @@ def build_sync_orchestrator(session: AsyncSession) -> SyncOrchestrator:
         timeline=SqlAlchemyTimelineEventRepository(session=session),
         lock=get_redis_lock(),
         cache=get_redis_sync_cache(),
+        odds_feature_writers={"football": build_football_odds_feature_writer(session)},
+        fixture_source_preferences=build_competition_fixture_source_repository(session),
     )
 
 
@@ -507,26 +579,46 @@ def build_webhook_service(session: AsyncSession) -> WebhookService:
     )
 
 
+def build_watchlist_service(session: AsyncSession) -> WatchlistService:
+    return WatchlistService(repository=SqlAlchemyWatchlistRepository(session=session))
+
+
+def build_alert_service(session: AsyncSession) -> AlertService:
+    return AlertService(
+        events=SqlAlchemyAlertEventRepository(session=session),
+        watchlist=SqlAlchemyWatchlistRepository(session=session),
+    )
+
+
 # -- Milestone 8: News Intelligence & Community Intelligence Platform ----------------------------
 
 
-@lru_cache
-def get_text_intelligence_provider() -> TextIntelligenceProviderPort:
-    """Mock-first (docs/decisions.md ADR-008): `MockGeminiAdapter` until a real Gemini API key
-    credential is registered via the Provider Management System — the same fallback posture
-    every other external-service port in this codebase takes when no live credential exists in
-    this environment. Wiring the real `GeminiAdapter` behind an async credential lookup
-    (mirroring `build_sports_provider_router`'s pattern) is a same-shaped follow-up once a live
-    key is configured, not a blocker for shipping this milestone's routes."""
-    return MockGeminiAdapter()
+def get_text_intelligence_provider(session: AsyncSession) -> TextIntelligenceProviderPort:
+    """Real `GeminiAdapter` when an active, credentialed "gemini" provider is registered via the
+    Provider Management System; `MockGeminiAdapter` otherwise — resolved per call by
+    `TextIntelligenceRouter`, not once here, so a credential added/disabled after startup takes
+    effect immediately (docs/decisions.md ADR-008 follow-up; previously hardcoded to the mock
+    adapter permanently, even once a working key existed)."""
+    admin_service = build_provider_management_service(session)
+    return TextIntelligenceRouter(
+        admin_service=admin_service,
+        real_adapter=GeminiAdapter(get_api_key=_make_api_key_getter(admin_service, GeminiAdapter.provider_key)),
+        mock_adapter=MockGeminiAdapter(),
+    )
 
 
 def build_news_ingestion_service(session: AsyncSession) -> NewsIngestionService:
+    # Real, working RSS/Atom adapter (no paid API key required) — registered under the
+    # `rss_feed` NewsSourceType value, the only key `NewsIngestionService._resolve_provider`
+    # looks up for a source of that type. Other source types (official club sites, sports
+    # news APIs) have no adapter yet; sources of those types will raise on sync until one
+    # is added, which is correct — no silent mock fallback for a real ingestion pipeline.
     return NewsIngestionService(
         sources=SqlAlchemyNewsSourceRepository(session=session),
         articles=SqlAlchemyNewsArticleRepository(session=session),
         checkpoints=SqlAlchemyIntelligenceSyncCheckpointRepository(session=session),
         sync_runs=SqlAlchemyIntelligenceSyncRunRepository(session=session),
+        providers={"rss_feed": RssNewsProvider()},
     )
 
 
@@ -544,12 +636,12 @@ def build_entity_extraction_service(session: AsyncSession) -> EntityExtractionSe
     resolution = EntityResolutionService(
         nodes=nodes, edges=edges, population=KnowledgeGraphPopulationService(nodes=nodes, edges=edges)
     )
-    return EntityExtractionService(text_intelligence=get_text_intelligence_provider(), entity_resolution=resolution)
+    return EntityExtractionService(text_intelligence=get_text_intelligence_provider(session), entity_resolution=resolution)
 
 
 def build_event_extraction_service(session: AsyncSession) -> EventExtractionService:
     return EventExtractionService(
-        text_intelligence=get_text_intelligence_provider(),
+        text_intelligence=get_text_intelligence_provider(session),
         entity_extraction=build_entity_extraction_service(session),
         events=SqlAlchemyNewsEventRepository(session=session),
     )
@@ -561,7 +653,7 @@ def build_source_reliability_service(session: AsyncSession) -> SourceReliability
 
 def build_sentiment_service(session: AsyncSession) -> SentimentService:
     return SentimentService(
-        text_intelligence=get_text_intelligence_provider(), results=SqlAlchemySentimentResultRepository(session=session)
+        text_intelligence=get_text_intelligence_provider(session), results=SqlAlchemySentimentResultRepository(session=session)
     )
 
 
@@ -575,7 +667,7 @@ def build_news_impact_engine(session: AsyncSession) -> NewsImpactEngine:
 
 def build_summarization_service(session: AsyncSession) -> SummarizationService:
     return SummarizationService(
-        text_intelligence=get_text_intelligence_provider(), summaries=SqlAlchemySummaryRepository(session=session)
+        text_intelligence=get_text_intelligence_provider(session), summaries=SqlAlchemySummaryRepository(session=session)
     )
 
 
@@ -595,16 +687,28 @@ def build_feature_store_enrichment_service(session: AsyncSession) -> FeatureStor
     )
 
 
+def build_intelligence_enrichment_orchestrator(session: AsyncSession) -> IntelligenceEnrichmentOrchestrator:
+    return IntelligenceEnrichmentOrchestrator(
+        event_extraction=build_event_extraction_service(session),
+        news_impact=build_news_impact_engine(session),
+        source_reliability=build_source_reliability_service(session),
+        feature_store=build_feature_store_enrichment_service(session),
+        sources=SqlAlchemyNewsSourceRepository(session=session),
+    )
+
+
 def build_intelligence_retrieval_service(session: AsyncSession) -> IntelligenceRetrievalService:
     nodes = SqlAlchemyKGNodeRepository(session=session)
     edges = SqlAlchemyKGEdgeRepository(session=session)
+    graph_query = GraphQueryService(nodes=nodes, edges=edges)
     return IntelligenceRetrievalService(
         news=NewsRetrieval(events=SqlAlchemyNewsEventRepository(session=session)),
         community=CommunityRetrieval(posts=SqlAlchemyCommunityPostRepository(session=session)),
         knowledge_graph=KnowledgeGraphRetrievalAdapter(
-            graph_retrieval=GraphNativeRetrieval(query=GraphQueryService(nodes=nodes, edges=edges))
+            graph_retrieval=GraphNativeRetrieval(query=graph_query), nodes=nodes
         ),
         ai_reports=AIReportRetrieval(summaries=SqlAlchemySummaryRepository(session=session)),
+        team_names=MatchTeamNamesResolver(nodes=nodes, query=graph_query),
     )
 
 
@@ -639,6 +743,26 @@ def build_feature_market_mapping_service(session: AsyncSession) -> FeatureMarket
     )
 
 
+# (market_key, MarketKind, PoissonGoalsThresholdMode, line, side) — one row per market
+# `poisson_goals_threshold_predictor.py`'s audit finding covers. `line`/`side` are ignored by the
+# predictor for modes that don't use them (CLEAN_SHEET/WIN_TO_NIL ignore `line`; TOTAL_OVER_UNDER
+# ignores `side`) — kept populated here anyway so this table stays a complete, self-documenting
+# per-market spec rather than relying on which fields "happen to" matter for a given mode.
+FOOTBALL_POISSON_THRESHOLD_MARKETS: tuple[tuple[str, MarketKind, PoissonGoalsThresholdMode, float, str], ...] = (
+    ("football.total_goals_over_under", MarketKind.TOTAL, PoissonGoalsThresholdMode.TOTAL_OVER_UNDER, 2.5, "home"),
+    ("football.total_goals_over_under_0_5", MarketKind.TOTAL, PoissonGoalsThresholdMode.TOTAL_OVER_UNDER, 0.5, "home"),
+    ("football.total_goals_over_under_1_5", MarketKind.TOTAL, PoissonGoalsThresholdMode.TOTAL_OVER_UNDER, 1.5, "home"),
+    ("football.total_goals_over_under_3_5", MarketKind.TOTAL, PoissonGoalsThresholdMode.TOTAL_OVER_UNDER, 3.5, "home"),
+    ("football.total_goals_over_under_4_5", MarketKind.TOTAL, PoissonGoalsThresholdMode.TOTAL_OVER_UNDER, 4.5, "home"),
+    ("football.home_team_total_goals", MarketKind.TEAM_TOTAL, PoissonGoalsThresholdMode.TEAM_TOTAL_OVER_UNDER, 1.5, "home"),
+    ("football.away_team_total_goals", MarketKind.TEAM_TOTAL, PoissonGoalsThresholdMode.TEAM_TOTAL_OVER_UNDER, 1.5, "away"),
+    ("football.home_clean_sheet", MarketKind.BINARY, PoissonGoalsThresholdMode.CLEAN_SHEET, 0.5, "home"),
+    ("football.away_clean_sheet", MarketKind.BINARY, PoissonGoalsThresholdMode.CLEAN_SHEET, 0.5, "away"),
+    ("football.home_win_to_nil", MarketKind.BINARY, PoissonGoalsThresholdMode.WIN_TO_NIL, 0.5, "home"),
+    ("football.away_win_to_nil", MarketKind.BINARY, PoissonGoalsThresholdMode.WIN_TO_NIL, 0.5, "away"),
+)
+
+
 @lru_cache
 def get_predictor_registry() -> PredictorRegistry:
     """Every `MarketKind` this milestone supports resolves to one of the two generic weighted
@@ -647,6 +771,20 @@ def get_predictor_registry() -> PredictorRegistry:
     registry = PredictorRegistry()
     registry.register_many(WeightedLogisticPredictor.SUPPORTED_KINDS, WeightedLogisticPredictor())
     registry.register_many(WeightedLinearPredictor.SUPPORTED_KINDS, WeightedLinearPredictor())
+    registry.register_many(WeightedOrdinalPredictor.SUPPORTED_KINDS, WeightedOrdinalPredictor())
+    # Registered after WeightedLinearPredictor so it wins CORRECT_SCORE — a real independent-
+    # Poisson scoreline model instead of that predictor's raw-number placeholder (audit fix
+    # 2026-08-02, poisson_score_predictor.py).
+    registry.register_many(PoissonScorePredictor.SUPPORTED_KINDS, PoissonScorePredictor())
+    # Audit fix (2026-08-03): these eleven markets all share MarketKind.TOTAL/TEAM_TOTAL/BINARY
+    # with other markets that correctly stay on the generic weighted predictors (e.g.
+    # football.both_teams_to_score), so they're overridden per-market_key, not per-kind — each
+    # gets its own real, line/side-aware Poisson answer instead of an identical formula result
+    # (see poisson_goals_threshold_predictor.py's module docstring for the full finding).
+    for market_key, kind, mode, line, side in FOOTBALL_POISSON_THRESHOLD_MARKETS:
+        registry.register_for_market(
+            market_key, PoissonGoalsThresholdPredictor(market_kind=kind, mode=mode, line=line, side=side)
+        )
     return registry
 
 
@@ -665,7 +803,7 @@ def get_confidence_engine() -> ConfidenceEngine:
 
 def build_explainability_engine(session: AsyncSession) -> ExplainabilityEngine:
     return ExplainabilityEngine(
-        retrieval=build_intelligence_retrieval_service(session), text_intelligence=get_text_intelligence_provider()
+        retrieval=build_intelligence_retrieval_service(session), text_intelligence=get_text_intelligence_provider(session)
     )
 
 
@@ -689,6 +827,7 @@ def build_prediction_engine(session: AsyncSession) -> PredictionEngine:
         outcomes=SqlAlchemyPredictionOutcomeRepository(session=session),
         model_evaluations=SqlAlchemyModelEvaluationRepository(session=session),
         predictions=SqlAlchemyPredictionRepository(session=session),
+        model_loader=get_model_loader_service(),
     )
 
 
@@ -698,6 +837,7 @@ def build_prediction_cache_service(session: AsyncSession) -> PredictionCacheServ
         markets=SqlAlchemyMarketRepository(session=session),
         predictions=SqlAlchemyPredictionRepository(session=session),
         audits=SqlAlchemyPredictionAuditRepository(session=session),
+        alerts=build_alert_service(session),
     )
 
 
@@ -784,11 +924,33 @@ def build_automatic_model_selection_service(session: AsyncSession) -> AutomaticM
         training_pipeline=build_training_pipeline_service(),
         model_registry=build_model_registry_service(session),
         experiments=build_experiment_tracking_service(session),
+        artifact_store=get_model_artifact_store(),
     )
 
 
 def build_retraining_scheduler(session: AsyncSession) -> RetrainingScheduler:
     return RetrainingScheduler(dataset_registry=build_dataset_registry_service(session))
+
+
+def build_scheduled_retraining_orchestrator(session: AsyncSession) -> ScheduledRetrainingOrchestrator:
+    return ScheduledRetrainingOrchestrator(
+        markets=SqlAlchemyMarketRepository(session=session),
+        models=SqlAlchemyModelRepository(session=session),
+        scheduler=build_retraining_scheduler(session),
+        dataset_builder=build_dataset_builder(session),
+        dataset_registry=build_dataset_registry_service(session),
+        model_selection=build_automatic_model_selection_service(session),
+    )
+
+
+def build_calibration_fitting_service(session: AsyncSession) -> CalibrationFittingService:
+    return CalibrationFittingService(
+        markets=SqlAlchemyMarketRepository(session=session),
+        models=SqlAlchemyModelRepository(session=session),
+        predictions=SqlAlchemyPredictionRepository(session=session),
+        outcomes=SqlAlchemyPredictionOutcomeRepository(session=session),
+        calibrator=get_calibrator(),
+    )
 
 
 def build_model_monitoring_service(session: AsyncSession) -> ModelMonitoringService:
@@ -824,6 +986,26 @@ def get_shap_explainer_service() -> SHAPExplainerService:
     return SHAPExplainerService()
 
 
+def build_football_form_differential_calculators(session: AsyncSession) -> tuple[FixtureFormDifferentialCalculator, ...]:
+    return football_fixture_stat_differential_calculators(
+        build_feature_registration_service(session),
+        build_feature_store_service(session),
+        SqlAlchemyTeamStatisticsRepository(session=session),
+    )
+
+
+def build_football_odds_feature_writer(session: AsyncSession) -> FootballOddsFeatureWriter:
+    return football_odds_feature_writer(build_feature_store_service(session))
+
+
+def build_football_expected_goals_calculator(session: AsyncSession) -> FixtureExpectedGoalsCalculator:
+    return football_fixture_expected_goals_calculator(
+        build_feature_registration_service(session),
+        build_feature_store_service(session),
+        SqlAlchemyFixtureRepository(session=session),
+    )
+
+
 def build_football_market_seeder(session: AsyncSession) -> FootballMarketSeeder:
     team_statistics = SqlAlchemyTeamStatisticsRepository(session=session)
     return FootballMarketSeeder(
@@ -833,6 +1015,8 @@ def build_football_market_seeder(session: AsyncSession) -> FootballMarketSeeder:
         windowed_calculator=football_form_calculator(
             build_feature_registration_service(session), build_feature_store_service(session), team_statistics
         ),
+        differential_calculators=build_football_form_differential_calculators(session),
+        expected_goals_calculator=build_football_expected_goals_calculator(session),
     )
 
 

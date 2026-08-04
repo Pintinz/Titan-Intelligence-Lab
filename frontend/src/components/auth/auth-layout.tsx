@@ -1,4 +1,4 @@
-import { ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import { IntelligenceCanvas } from './intelligence-canvas'
 import { cn } from '@/lib/cn'
 

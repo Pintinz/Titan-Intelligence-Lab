@@ -5,6 +5,14 @@ CHALLENGER through the EXISTING `ModelRegistryService` (Milestone 9, extended ad
 #163) — human approval to CHAMPION still goes through that service's own `promote_to_champion`,
 untouched here. "Never hardcode algorithm selection" (Milestone 9.1 spec) is satisfied by ranking
 real benchmark numbers, not by this service ever picking one algorithm by name.
+
+Audit finding (2026-08-02): registration previously left `artifact_ref` unset, so a Challenger's
+actual fitted model was never persisted anywhere — `ModelLoaderService`/`TrainedModelPredictor`
+(real, tested classes built specifically to serve a trained model in production) had nothing to
+load, and every live prediction fell back to the generic weighted-formula predictors regardless
+of what the Model Registry said. `select_and_register_challenger` now serializes the winning
+model and saves it via `ModelArtifactStorePort` before registering, so a later Champion promotion
+has a real artifact `PredictionEngine` can actually serve.
 """
 
 from __future__ import annotations
@@ -26,6 +34,7 @@ from modules.predictions.infrastructure.ml.sklearn_adapter import SklearnAdapter
 from modules.predictions.infrastructure.ml.xgboost_adapter import XGBoostAdapter
 from modules.predictions.ports.ml_model import (
     InsufficientTrainingDataError,
+    ModelArtifactStorePort,
     PredictionModelPort,
     UnsupportedAlgorithmForTargetTypeError,
 )
@@ -82,6 +91,7 @@ class AutomaticModelSelectionService:
     training_pipeline: TrainingPipelineService
     model_registry: ModelRegistryService
     experiments: ExperimentTrackingService
+    artifact_store: ModelArtifactStorePort
 
     async def select(
         self,
@@ -146,18 +156,29 @@ class AutomaticModelSelectionService:
         CHALLENGER (offline benchmark already just ran), and records the full benchmark as an
         `Experiment` (Milestone 9's "no market's production model changes without one of these
         existing first" rule) — promotion to CHAMPION remains a separate, human-gated call to
-        `model_registry.promote_to_champion()`."""
+        `model_registry.promote_to_champion()`.
+
+        The winning model's fitted weights are serialized and saved via `artifact_store` before
+        registration, so `artifact_ref` is always real for a model this method produces — the
+        gap that previously left `TrainedModelPredictor`/`ModelLoaderService` with nothing to
+        load even after a human promoted a Challenger to Champion."""
         selection = await self.select(dataset, target_type, candidates=candidates, split_strategy=split_strategy, **split_kwargs)
+
+        model_key = f"{model_key_prefix}.{selection.winning_candidate.algorithm.value}"
+        artifact_ref = await self.artifact_store.save(
+            f"{model_key}/v{next_version}.bin", selection.winning_model.serialize()
+        )
 
         model_def = await self.model_registry.register(
             market_id=market_id,
-            model_key=f"{model_key_prefix}.{selection.winning_candidate.algorithm.value}",
+            model_key=model_key,
             version=next_version,
             algorithm=selection.winning_candidate.algorithm.value,
             framework=selection.winning_candidate.framework.value,
             dataset_version=dataset.version,
             trained_at=now,
             now=now,
+            artifact_ref=artifact_ref,
         )
         challenger = await self.model_registry.promote_to_challenger(model_def.id)
 

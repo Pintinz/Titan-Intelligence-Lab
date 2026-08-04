@@ -27,6 +27,7 @@ from modules.predictions.domain.value_objects import (
     ModelEvaluationId,
     ModelId,
     ModelStatus,
+    OutcomeType,
     PredictionAuditId,
     PredictionId,
     PredictionOutcomeId,
@@ -76,6 +77,44 @@ async def test_market_repository_round_trip(sqlite_session):
     assert by_key.market_kind is MarketKind.BINARY
     assert by_key.target_type is TargetType.CLASSIFICATION
     assert by_key.status is MarketStatus.PRODUCTION
+
+
+@pytest.mark.asyncio
+async def test_market_repository_round_trips_outcome_registry_fields(sqlite_session):
+    """Milestone 9.2: outcome_type/allowed_values/resolver_key/gemini_prompt_template must
+    survive a real DB round trip, not just live on the in-memory dataclass."""
+    repo = SqlAlchemyMarketRepository(session=sqlite_session)
+    market = _market(
+        market_key="football.match_winner",
+        outcome_type=OutcomeType.HOME_DRAW_AWAY,
+        allowed_values=("HOME_WIN", "DRAW", "AWAY_WIN"),
+        resolver_key="football.match_winner",
+        gemini_prompt_template="Explain the {predicted_outcome} prediction.",
+    )
+
+    await repo.upsert(market)
+    await sqlite_session.commit()
+
+    reloaded = await repo.get_by_key("football.match_winner")
+    assert reloaded.outcome_type is OutcomeType.HOME_DRAW_AWAY
+    assert reloaded.allowed_values == ("HOME_WIN", "DRAW", "AWAY_WIN")
+    assert reloaded.resolver_key == "football.match_winner"
+    assert reloaded.gemini_prompt_template == "Explain the {predicted_outcome} prediction."
+
+
+@pytest.mark.asyncio
+async def test_market_repository_outcome_registry_fields_default_none_for_legacy_rows(sqlite_session):
+    """A market registered before Milestone 9.2 (no outcome-registry kwargs supplied) must round
+    trip with these fields as None/empty, not error or silently invent a value."""
+    repo = SqlAlchemyMarketRepository(session=sqlite_session)
+    await repo.upsert(_market())
+    await sqlite_session.commit()
+
+    reloaded = await repo.get_by_key("football.match_result")
+    assert reloaded.outcome_type is None
+    assert reloaded.allowed_values == ()
+    assert reloaded.resolver_key is None
+    assert reloaded.gemini_prompt_template is None
 
 
 @pytest.mark.asyncio
@@ -224,6 +263,73 @@ async def test_prediction_repository_round_trip_preserves_confidence_and_explana
     assert fetched.explanation.top_positive_features == (("team_form", 0.5),)
     assert fetched.explanation.feature_importance == {"team_form": 0.7, "injuries": 0.3}
     assert fetched.feature_snapshot == {"team_form": 0.8}
+
+
+@pytest.mark.asyncio
+async def test_prediction_repository_round_trip_preserves_probability_distribution(sqlite_session):
+    """Universal Probability Engine additive fields — a classification-shaped prediction's full
+    outcome distribution round-trips through the JSON column."""
+    markets = SqlAlchemyMarketRepository(session=sqlite_session)
+    models = SqlAlchemyModelRepository(session=sqlite_session)
+    predictions = SqlAlchemyPredictionRepository(session=sqlite_session)
+    market = _market()
+    model = ModelDefinition(id=ModelId(uuid4()), market_id=market.id, model_key="m1", version=1, algorithm="heuristic_logistic_v1")
+    await markets.upsert(market)
+    await models.upsert(model)
+
+    prediction = Prediction(
+        id=PredictionId(uuid4()),
+        market_id=market.id,
+        model_id=model.id,
+        subject_ref="fixture-1",
+        value="HOME_WIN",
+        probability=0.55,
+        confidence=ConfidenceBreakdown(*([0.6] * 9)),
+        explanation=ExplanationBundle(),
+        feature_snapshot={},
+        model_version="1",
+        probability_distribution={"HOME_WIN": 0.55, "DRAW": 0.25, "AWAY_WIN": 0.2},
+    )
+    await predictions.record(prediction)
+    await sqlite_session.commit()
+
+    fetched = await predictions.get(prediction.id)
+    assert fetched.probability_distribution == {"HOME_WIN": 0.55, "DRAW": 0.25, "AWAY_WIN": 0.2}
+    assert fetched.confidence_interval is None
+    assert fetched.expected_error is None
+
+
+@pytest.mark.asyncio
+async def test_prediction_repository_round_trip_preserves_regression_uncertainty_fields(sqlite_session):
+    markets = SqlAlchemyMarketRepository(session=sqlite_session)
+    models = SqlAlchemyModelRepository(session=sqlite_session)
+    predictions = SqlAlchemyPredictionRepository(session=sqlite_session)
+    market = _market()
+    model = ModelDefinition(id=ModelId(uuid4()), market_id=market.id, model_key="m1", version=1, algorithm="heuristic_linear_v1")
+    await markets.upsert(market)
+    await models.upsert(model)
+
+    prediction = Prediction(
+        id=PredictionId(uuid4()),
+        market_id=market.id,
+        model_id=model.id,
+        subject_ref="fixture-1",
+        value="24.5000",
+        probability=0.5,
+        confidence=ConfidenceBreakdown(*([0.6] * 9)),
+        explanation=ExplanationBundle(),
+        feature_snapshot={},
+        model_version="1",
+        confidence_interval=(21.5, 27.5),
+        expected_error=3.0,
+    )
+    await predictions.record(prediction)
+    await sqlite_session.commit()
+
+    fetched = await predictions.get(prediction.id)
+    assert fetched.confidence_interval == pytest.approx((21.5, 27.5))
+    assert fetched.expected_error == pytest.approx(3.0)
+    assert fetched.probability_distribution == {}
 
 
 @pytest.mark.asyncio

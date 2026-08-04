@@ -76,6 +76,17 @@ class ProviderRefIndexModel(Base):
     entity_id: Mapped[str] = mapped_column(String(64))
 
 
+class CompetitionFixtureSourceModel(Base):
+    __tablename__ = "competition_fixture_source_preferences"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    competition_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    preferred_provider_key: Mapped[str] = mapped_column(String(64))
+    provider_competition_ref: Mapped[str] = mapped_column(String(64))
+    notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class DataQualityReportModel(Base):
     __tablename__ = "data_quality_reports"
 

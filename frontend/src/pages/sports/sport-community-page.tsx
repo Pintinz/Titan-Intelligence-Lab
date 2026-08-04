@@ -33,9 +33,9 @@ export default function SportCommunityPage() {
   const isError = teamsQuery.isError || topicsQuery.isError
   const teamNames = (teamsQuery.data ?? []).flatMap((t) => [t.name, t.short_name])
   const topics = (topicsQuery.data ?? []).filter((topic) =>
-    teamNames.some((name) => topic.title.toLowerCase().includes(name.toLowerCase())),
+    teamNames.some((name) => topic.topic_label.toLowerCase().includes(name.toLowerCase())),
   )
-  const maxVolume = Math.max(1, ...topics.map((t) => t.volume))
+  const maxVolume = Math.max(1, ...topics.map((t) => t.post_count))
 
   return (
     <div className="space-y-6">
@@ -56,19 +56,30 @@ export default function SportCommunityPage() {
 
       {isError && <ErrorState error={teamsQuery.error ?? topicsQuery.error} onRetry={() => { void teamsQuery.refetch(); void topicsQuery.refetch() }} />}
 
-      {!isPending && !isError && topics.length === 0 && (
-        <EmptyState icon={MessageCircle} title="No community signal yet" description={`No tracked topics mention a ${sport.label} team right now.`} />
+      {!isPending && !isError && topics.length === 0 && (topicsQuery.data ?? []).length === 0 && (
+        <EmptyState
+          icon={MessageCircle}
+          title="No community signal yet"
+          description="No real social-media or forum provider is connected yet — this isn't a quiet day, there's no live source configured to pull from."
+        />
+      )}
+      {!isPending && !isError && topics.length === 0 && (topicsQuery.data ?? []).length > 0 && (
+        <EmptyState
+          icon={MessageCircle}
+          title="No community signal yet"
+          description={`No tracked topics mention a ${sport.label} team right now.`}
+        />
       )}
 
       {topics.length > 0 && (
         <div className="space-y-3">
           {topics.map((topic) => (
             <div key={topic.id} className="flex items-center gap-4">
-              <span className="w-48 shrink-0 truncate text-sm text-text-primary">{topic.title}</span>
+              <span className="w-48 shrink-0 truncate text-sm text-text-primary">{topic.topic_label}</span>
               <div className="h-2 flex-1 overflow-hidden rounded-full bg-bg-secondary">
-                <div className="h-full rounded-full bg-accent-primary" style={{ width: `${(topic.volume / maxVolume) * 100}%` }} />
+                <div className="h-full rounded-full bg-accent-primary" style={{ width: `${(topic.post_count / maxVolume) * 100}%` }} />
               </div>
-              <span className="w-16 shrink-0 text-right font-mono text-xs text-text-muted">{topic.volume.toLocaleString()}</span>
+              <span className="w-16 shrink-0 text-right font-mono text-xs text-text-muted">{topic.post_count.toLocaleString()}</span>
             </div>
           ))}
         </div>

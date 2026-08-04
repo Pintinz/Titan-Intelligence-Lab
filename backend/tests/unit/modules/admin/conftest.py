@@ -50,6 +50,9 @@ class InMemoryProviderRepository:
         self.store[provider.id] = provider
         return provider
 
+    async def delete(self, provider_id):
+        self.store.pop(provider_id, None)
+
 
 @dataclass
 class InMemoryCredentialRepository:
@@ -84,6 +87,12 @@ class InMemoryUsageRepository:
             self._key(record.provider_id, record.period, record.window_key, record.credential_id)
         ] = record
         return record
+
+    async def list_by_provider(self, provider_id, period, limit=30):
+        matching = [
+            r for r in self.store.values() if r.provider_id == provider_id and r.period == period
+        ]
+        return sorted(matching, key=lambda r: r.window_key, reverse=True)[:limit]
 
 
 @dataclass

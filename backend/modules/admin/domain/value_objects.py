@@ -14,6 +14,9 @@ from uuid import UUID
 class ProviderCategory(str, Enum):
     SPORTS_DATA = "sports_data"
     AI = "ai"
+    NEWS = "news"
+    ODDS = "odds"
+    GENERAL = "general"
 
 
 class ProviderStatus(str, Enum):

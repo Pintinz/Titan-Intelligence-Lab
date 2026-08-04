@@ -12,6 +12,7 @@ per Milestone 8's "maintain complete separation" instruction.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import uuid4
@@ -60,8 +61,17 @@ class NewsIngestionService:
     providers: dict[str, NewsProviderPort] = field(default_factory=dict)  # source_type.value -> adapter
 
     async def sync_source(
-        self, source_id: NewsSourceId, now: datetime, trigger: SyncTrigger = SyncTrigger.SCHEDULED
+        self,
+        source_id: NewsSourceId,
+        now: datetime,
+        trigger: SyncTrigger = SyncTrigger.SCHEDULED,
+        on_article_created: Callable[[NewsArticle], Awaitable[object]] | None = None,
     ) -> IntelligenceSyncRun:
+        """``on_article_created`` (optional, additive) fires once per genuinely new article —
+        never for a duplicate/rejected record — so a caller can chain real downstream work (event
+        extraction, impact scoring, Feature Store enrichment) without this service needing to
+        know anything about what happens after ingestion. Same shape as
+        `TrainingPipelineService.train`'s ``on_checkpoint`` hook."""
         source = await self.sources.get(source_id)
         if source is None:
             raise ValueError(f"Unknown news source: {source_id}")
@@ -95,9 +105,11 @@ class NewsIngestionService:
 
         run.items_fetched = len(records)
         for record in records:
-            outcome = await self._ingest_record(source.id, record, now)
+            outcome, article = await self._ingest_record(source.id, record, now)
             if outcome == "created":
                 run.items_created += 1
+                if on_article_created is not None and article is not None:
+                    await on_article_created(article)
             elif outcome == "duplicate":
                 run.items_duplicate += 1
             else:
@@ -109,13 +121,15 @@ class NewsIngestionService:
         run.mark_succeeded(now)
         return await self.sync_runs.update(run)
 
-    async def _ingest_record(self, source_id: NewsSourceId, record: RawArticleRecord, now: datetime) -> str:
+    async def _ingest_record(
+        self, source_id: NewsSourceId, record: RawArticleRecord, now: datetime
+    ) -> tuple[str, NewsArticle | None]:
         if not record.title.strip() or not record.body.strip():
-            return "rejected"
+            return "rejected", None
 
         digest = content_hash(record.title, record.body)
         if await self.articles.get_by_content_hash(digest) is not None:
-            return "duplicate"
+            return "duplicate", None
 
         existing = await self.articles.get_by_url(record.url)
         article = NewsArticle(
@@ -129,8 +143,8 @@ class NewsIngestionService:
             fetched_at=now,
             version=(existing.version + 1) if existing else 1,
         )
-        await self.articles.upsert(article)
-        return "created"
+        saved = await self.articles.upsert(article)
+        return "created", saved
 
     def _resolve_provider(self, source: NewsSource) -> NewsProviderPort:
         provider = self.providers.get(source.source_type.value) or self.providers.get("default")

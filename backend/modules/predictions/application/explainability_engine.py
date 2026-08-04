@@ -55,6 +55,7 @@ class ExplainabilityEngine:
                 "probability": probability,
                 "top_positive_features": positive,
                 "top_negative_features": negative,
+                "feature_importance": [{"feature_key": key, "importance": value} for key, value in ranked],
                 "knowledge_graph_evidence": knowledge_graph_evidence,
                 "news_contribution": news_contribution,
                 "community_contribution": community_contribution,

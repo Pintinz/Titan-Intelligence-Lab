@@ -55,9 +55,14 @@ export function NewsIntelligenceSection() {
               ))}
             </div>
 
-            <span className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-text-muted">
+            <a
+              href={item.article.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-accent-primary hover:text-accent-primary-hover"
+            >
               Read original source <ArrowRight className="size-3" />
-            </span>
+            </a>
           </Card>
         ))}
       </div>

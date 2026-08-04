@@ -24,6 +24,37 @@ def is_valid_fixture_transition(current: FixtureStatus, target: FixtureStatus) -
     return target in _ALLOWED_TRANSITIONS[current]
 
 
+# API-Sports' "short status" vocabulary is shared across its football/basketball/baseball
+# products (same response envelope shape), so one pattern-based normalizer covers all sports
+# rather than a table per sport — classifying by pattern instead of an exhaustive per-code list
+# also survives sport-specific codes this wasn't tested against (e.g. baseball's inning codes)
+# without silently dropping a live match back to "scheduled".
+_FINISHED_CODES = {"FT", "AET", "PEN", "FT_PEN", "AOT", "FINISHED", "FINAL", "GAME OVER", "AWD", "WO"}
+_SCHEDULED_CODES = {"NS", "TBD", "SCHEDULED"}
+_POSTPONED_CODES = {"PST", "SUSP", "INT"}
+_CANCELLED_CODES = {"CANC", "CANCELLED", "ABD"}
+
+
+def normalize_provider_fixture_status(raw: str | None) -> FixtureStatus:
+    """Maps a raw provider status code onto TitanIQ's own FixtureStatus vocabulary. Unrecognized
+    non-empty codes fall back to LIVE — a match is either not-yet-started, finished, postponed,
+    or cancelled (all closed, enumerable sets); anything else reported while a fixture has
+    actually begun is safest classified as in-progress rather than silently reverting to
+    "scheduled"."""
+    if not raw:
+        return FixtureStatus.SCHEDULED
+    code = raw.strip().upper()
+    if code in _FINISHED_CODES or "PEN" in code:
+        return FixtureStatus.COMPLETED
+    if code in _SCHEDULED_CODES:
+        return FixtureStatus.SCHEDULED
+    if code in _POSTPONED_CODES:
+        return FixtureStatus.POSTPONED
+    if code in _CANCELLED_CODES:
+        return FixtureStatus.CANCELLED
+    return FixtureStatus.LIVE
+
+
 @dataclass(frozen=True)
 class MatchLifecycleRules:
     """Declares how a sport subdivides a match.

@@ -1,3 +1,158 @@
+# TitanIQ Design System
+
+**Version**: 1.2
+**Status**: Implemented and verified
+
+This document covers three Milestone 10.3 bodies of work: the premium authentication redesign,
+the Trust/Legal/Compliance/Navigation ecosystem, and the footer simplification below — in that
+order, oldest first.
+
+## Footer Simplification
+
+**Mode**: Persuade/Operate hybrid (footer appears on every logged-out page)
+**Objective**: The full-ecosystem footer (47 links across 4 columns + a Connect column) worked but
+read as a sitemap dump. Cut it to a scannable 4-column, ~25-link footer — same information
+architecture pattern (Platform/Resources/Company/Legal) but each column holds only its highest-
+value items. No page was deleted or made unreachable.
+
+**What changed**:
+- `FOOTER_COLUMNS` (`marketing-nav-config.ts`) cut from 4 columns totaling 47 links to 4 columns
+  totaling ~19 (Platform 6, Resources 5, Company 3, Legal 5) + a "View all policies →" link under
+  Legal pointing to Trust Center.
+- Social icons cut to exactly Facebook / Instagram / X (brief-specified) — dropped Email, LinkedIn,
+  GitHub, YouTube from the icon row. `brand-icons.tsx` now only carries the three marks actually
+  used; added hand-authored Facebook and Instagram paths.
+- Footer bottom bar simplified to the brief's exact spec: copyright, version, status indicator,
+  "Built with Intelligence." — dropped the betting-disclaimer sentence and the build-number field
+  (that disclaimer language still lives prominently on `/disclaimer` and `/terms`, so nothing is
+  lost, just decluttered here).
+- Left section gained a short description line (`BRAND.description` in `nav-config.ts`, new field)
+  alongside the existing tagline.
+- Social icon hover: border + icon color shift to accent-primary plus a subtle `-translate-y-0.5`
+  lift, using the CSS-var motion-duration pattern (`motion-reduce:` guarded) rather than a fixed
+  duration, so it collapses correctly under reduced-motion like the rest of the system.
+
+**Where the dropped links moved** (every one confirmed reachable, none deleted):
+- **Header mega-menu** picked up the bulk: Learning Intelligence (Platform), Release Notes +
+  Roadmap (Resources), Trust Center + Partners + Press Kit + Brand Assets (Company). Developer
+  Portal, API Reference, Blog, Knowledge Graph, Insights were already there from the original
+  ecosystem build.
+- **Trust Center**'s policy grid gained Licenses (was missing) — it already listed Security,
+  Editorial, Advertising, Copyright, DMCA, Acceptable Use, GDPR, CCPA from the original build, so
+  every legal document dropped from the footer is one click from Trust Center, which is now itself
+  one click from the header.
+- **About page** gained a "Partnerships, press & brand" section (4 cards: Partners, Press Kit,
+  Brand Assets, Trust Center) — the brief names About page as an explicit acceptable channel for
+  exactly these three.
+- **System Status** (`/status`) reachability moved from a footer Resources link to the bottom bar's
+  live status indicator, which already linked there.
+- FAQ and Pricing stayed in the footer (both brief-specified); Support and Help Center were never
+  footer links even before this change (Support lives in the header top-level links; Help Center is
+  cross-linked from FAQ/Support) — no regression.
+
+**Verification**: `tsc --noEmit` clean · production build succeeds · Impeccable detector zero
+findings across every touched file · every dropped page's new home confirmed present in the
+rendered DOM (mobile nav, About page, Trust Center) · light theme spot-checked on the footer via
+`data-theme="light"` — border/background/icon colors all resolve through the existing token system,
+no hardcoded colors introduced.
+
+---
+
+## Trust, Legal, Compliance & Navigation Ecosystem
+
+**Mode**: Persuade (logged-out marketing/legal surface) and Read (legal documents)
+**Objective**: Make TitanIQ present as a legitimate, AdSense/AdMob-ready, enterprise-credible
+technology company — complete global navigation, a full legal/compliance corpus, and every
+informational page a company at this stage needs, with zero placeholder pages reachable from
+navigation.
+
+### What was built
+
+- **Global navigation**: `SiteHeader` (mega-menu: Platform / Resources / Company + Pricing/Support
+  + auth-aware user menu, Radix NavigationMenu + DropdownMenu, full mobile Dialog nav) and
+  `SiteFooter` (5-column enterprise footer: Platform, Resources, Company, Legal, Connect + bottom
+  bar with version/build/status). Single source of truth in
+  `components/layout/marketing-nav-config.ts` — header and footer both read from it.
+- **32 new pages**: 14 legal/compliance policies (Privacy, Terms, Cookie, Advertising, Editorial,
+  Responsible AI, Security, Copyright, DMCA, Acceptable Use, Disclaimer, Licenses, GDPR, CCPA) +
+  Trust Center, 8 company/informational pages (About, Contact, Pricing, Careers, Partners, Press
+  Kit, Brand Assets, FAQ), 10 developer/resource pages (Documentation, Developer Portal, API
+  Reference, Methodology, Blog, Release Notes, Roadmap, System Status, Help Center, Support), and
+  3 error pages (404, 500, Maintenance) — all with original, production-quality copy, no Lorem
+  Ipsum, no placeholders.
+- **Shared primitives**: `LegalPageLayout`/`LegalSection` (legal docs — hero + sticky TOC + prose),
+  `PageHero`/`ValueCard`/`FaqAccordion`/`PricingTierCard`/`TimelineStep`/`StatusRow`/`DocCard`/etc.
+  (`components/marketing/`), reused across every new page instead of one-off layouts.
+- **SEO**: `components/seo/seo.tsx` — per-page title/description/OG/Twitter Card/canonical via
+  direct `document.head` writes (no dependency added); every new page calls it.
+- **Contact form**: real client-side validation (react-hook-form + zod), routes to the correct team
+  inbox via `mailto:` — honest about not having a backend endpoint rather than faking a submission.
+- **Code-splitting**: all 32+ pages are `React.lazy` + `Suspense` in `router.tsx` (see `lazyPage`
+  helper) — none of this ships in the initial bundle.
+
+### Compliance decisions worth knowing
+
+- **AdSense/AdMob readiness**: Advertising Policy explicitly states ads are not yet active;
+  Cookie Policy has a "Marketing (future)" category pre-declared so enabling ads later is a content
+  update, not a new consent-flow build. Editorial independence from advertising is stated in both
+  Advertising Policy and Editorial Policy.
+- **News Intelligence copyright**: audited both live pages (`news-intelligence-page.tsx`,
+  `sport-news-page.tsx`) — headline + entities + a real `<a href={article.url}>` attribution link,
+  never full-article reproduction. Found and fixed one gap: `sport-news-page.tsx` was missing the
+  attribution link entirely (added, matching the pattern already correct on the main News
+  Intelligence page). Zero `<img>` tags exist anywhere in the frontend — no hotlinking risk.
+- **Jurisdiction-specific legal facts** (governing law, registered office) use standard legal
+  drafting language ("the jurisdiction in which Titan Intelligence Labs is incorporated") rather
+  than a fabricated specific country/address — accurate placeholder practice for a legal template,
+  not a content gap.
+- **Out of scope, left untouched**: `/app` dashboard index, `/app/analytics`, all `/app/ops/*`,
+  `/app/settings/organization`, `/app/billing`, `/app/notifications`, `/auth/callback` — all
+  pre-existing authenticated/admin RebuildingPage placeholders tied to backend business logic
+  outside this task's constraints. None are linked from the new public navigation (the header's
+  "Analytics" concept intentionally routes to the already-shipped `/app/insights` instead).
+
+### Bugs found and fixed during this work (adjacent to the task, not caused by it)
+
+- `signupSchema` (`lib/validation/auth-schemas.ts`) was missing `confirmPassword` — the signup
+  form's confirm-password field existed in the UI but was never actually validated. Fixed to match
+  the `resetPasswordSchema` refine pattern.
+- Signup's "terms of service" checkbox linked to `/docs` instead of a real Terms page (didn't exist
+  until this work) — fixed, and added a paired Privacy Policy link.
+- Several pre-existing unused-variable/type-only-import TypeScript errors (`auth-card.tsx`,
+  `auth-layout.tsx`, `feature-contribution.tsx`, `reset-password-page.tsx`) — fixed for a clean
+  `tsc --noEmit` and production build.
+
+### Files
+
+**Created**: `components/layout/{site-header,site-footer,brand-icons,marketing-nav-config}.tsx`,
+`components/marketing/{legal-layout,marketing-primitives}.tsx`, `components/seo/seo.tsx`,
+`components/ui/textarea.tsx`, `pages/{about,contact,pricing,documentation,developer-portal,
+api-reference,methodology,blog,faq,help-center,support,release-notes,roadmap,trust-center,
+system-status,careers,partners,press-kit,brand-assets}-page.tsx`, `pages/legal/*` (14 files),
+`pages/errors/*` (4 files).
+
+**Modified**: `router.tsx` (full route wiring + lazy-loading), `components/layout/marketing-shell.tsx`
+(now just `SiteHeader` + `Outlet` + `SiteFooter`), `pages/landing-page.tsx` (swapped to
+`SiteHeader`/`SiteFooter`), `pages/landing/news-intelligence-section.tsx` and
+`pages/sports/sport-news-page.tsx` (source-attribution links), `lib/validation/auth-schemas.ts`.
+
+**Deleted**: `pages/landing/{landing-nav,landing-footer}.tsx` (fully superseded by `SiteHeader`/`SiteFooter`).
+
+### Verification performed
+
+`tsc --noEmit` clean · production build succeeds (32 pages code-split into their own chunks) ·
+`vitest run` passes (67/67 once isolated from sandbox timeout contention) · Impeccable detector:
+zero findings across every new/modified file · every header and footer link cross-checked
+programmatically against `router.tsx` — all 30+ resolve · every new page loaded in-browser with
+zero console errors · mobile nav Dialog open/close verified functionally.
+
+**Not fully verified**: the desktop mega-menu's hover-open interaction couldn't be driven reliably
+by this session's browser-automation tooling (Radix `NavigationMenu` opens on continuous pointer
+presence, which discrete tool calls don't replicate) — the menu's structure, links, and DOM are
+confirmed correct, but a real-browser hover pass is recommended before shipping.
+
+---
+
 # TitanIQ Authentication Design System
 
 **Version**: 1.0  

@@ -43,6 +43,7 @@ celery_app.conf.update(
     task_routes={
         "ingestion.sync_live_fixtures": {"queue": "live"},
         "ingestion.*": {"queue": "default"},
+        "admin.*": {"queue": "default"},
     },
     task_default_retry_delay=30,
 )
