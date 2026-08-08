@@ -143,6 +143,10 @@ MARKET_OUTCOME_CATALOG: dict[str, MarketOutcomeSpec] = {
     ),
     "football.correct_score": MarketOutcomeSpec(
         "football.correct_score", "football", "Correct Score", OutcomeType.CORRECT_SCORE, _correct_score_grid(),
+        # Audit fix (2026-08-06): this market never had a resolver_key, unlike every other member
+        # of NOT_YET_TRAINED_MARKET_KEYS — the reason its outcomes never accumulated even before
+        # the Poisson-predictor removal. See outcome_resolution_service.py's GRID_MARKET_RESOLVERS.
+        resolver_key="football.correct_score",
     ),
     "football.home_clean_sheet": MarketOutcomeSpec(
         "football.home_clean_sheet", "football", "Home Clean Sheet", OutcomeType.BINARY_YES_NO, ("YES", "NO"),

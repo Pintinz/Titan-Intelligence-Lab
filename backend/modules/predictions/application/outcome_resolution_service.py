@@ -37,6 +37,18 @@ HOME_WIN/DRAW/AWAY_WIN) rather than an affirmative/negative pair. There's no "po
 draw, so `real_label_is_positive`'s binary polarity check doesn't apply here — `WeightedOrdinalPredictor`
 already emits the exact real label (never "positive"/"negative"), so this path is direct label
 equality against the resolved actual result, nothing to map.
+
+ML-architecture consolidation follow-up (2026-08-06): `GRID_MARKET_RESOLVERS` is a third resolution
+shape, same direct-label-equality mechanics as `THREE_WAY_MARKET_RESOLVERS` but for a market whose
+real answer is one of an arbitrarily large finite set of labels rather than exactly three —
+`football.correct_score`'s own `_correct_score_grid()` (`market_outcome_registry.py`) bucketed
+scoreline, resolved straight from the final score with no stored line/threshold needed. This is the
+resolver `football.correct_score` never had (its catalog entry's `resolver_key` was `None` since
+the market was first added) — the gap that left it permanently unable to accumulate real training
+outcomes even before the Poisson-predictor removal, confirmed by dev.db showing 0 resolved outcomes
+against 12 stale predictions versus every other formerly-Poisson-served market already resolving
+real outcomes as its (already-wired) resolver runs. `_label_from_outcome` (dataset_builder_service.py)
+is the piece that turns this resolver's output into a trainable multiclass label.
 """
 
 from __future__ import annotations
@@ -46,14 +58,39 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
 
-from modules.predictions.application.outcome_label_mapper import real_label_is_positive
+from modules.predictions.application.outcome_label_mapper import (
+    MARKET_OUTCOME_LABELS,
+    real_label_is_positive,
+    real_outcome_is_positive,
+)
 from modules.predictions.domain.entities import PredictionOutcome
+from modules.predictions.domain.market_outcome_registry import MARKET_OUTCOME_CATALOG
 from modules.predictions.domain.value_objects import PredictionOutcomeId
 from modules.predictions.ports.repositories import (
     MarketRepositoryPort,
     PredictionOutcomeRepositoryPort,
     PredictionRepositoryPort,
 )
+
+
+@dataclass
+class MarketReview:
+    """One market's real reading for the AI Review surface — predicted vs actual, when known."""
+
+    market_id: str
+    market_key: str
+    market_name: str
+    predicted_value: str
+    probability: float
+    confidence: float
+    probability_distribution: dict[str, float]
+    top_positive_features: list[tuple[str, float]]
+    top_negative_features: list[tuple[str, float]]
+    ai_explanation: str | None
+    generated_at: datetime | None
+    actual_value: str | None
+    is_correct: bool | None
+    evaluated_at: datetime | None
 
 
 @dataclass(frozen=True)
@@ -151,6 +188,21 @@ MARKET_OUTCOME_RESOLVERS: dict[str, Callable[[MatchResult], ResolvedOutcome | No
 }
 
 
+def _correct_score(result: MatchResult) -> str:
+    """Buckets the real final score into `football.correct_score`'s own declared grid
+    (`MARKET_OUTCOME_CATALOG`'s `allowed_values`, sourced from `_correct_score_grid()`) — any score
+    outside the grid (either side scoring beyond the grid's `max_goals`) resolves to the same
+    "OTHER" catch-all the grid itself reserves for that case, never a fabricated cell."""
+    scoreline = f"{result.home_score}-{result.away_score}"
+    allowed_values = MARKET_OUTCOME_CATALOG["football.correct_score"].allowed_values
+    return scoreline if scoreline in allowed_values else "OTHER"
+
+
+GRID_MARKET_RESOLVERS: dict[str, Callable[[MatchResult], str]] = {
+    "football.correct_score": _correct_score,
+}
+
+
 def _match_winner_home_draw_away(result: MatchResult) -> str:
     if result.home_score > result.away_score:
         return "HOME_WIN"
@@ -165,6 +217,25 @@ def _match_winner_home_draw_away(result: MatchResult) -> str:
 THREE_WAY_MARKET_RESOLVERS: dict[str, Callable[[MatchResult], str]] = {
     "football.match_winner": _match_winner_home_draw_away,
 }
+
+
+def _display_actual_value(market_key: str, prediction_value: str, outcome: PredictionOutcome | None) -> str | None:
+    """`PredictionOutcome.actual_value` is a raw internal fact string for the nine `MARKET_OUTCOME_RESOLVERS`
+    binary markets (e.g. "away_win_to_nil_yes") — accurate for training/calibration, which read it
+    through `real_outcome_is_positive` rather than the string itself, but not something a user should
+    read verbatim next to a "YES"/"NO" predicted value. For exactly those markets, re-derive the same
+    real label (`MARKET_OUTCOME_LABELS`) the predicted value already uses, via the same polarity
+    recovery the Dataset Builder and Calibration Fitting already share. Every other market (three-way,
+    grid) already stores its real label directly and passes through unchanged."""
+    if outcome is None:
+        return None
+    pair = MARKET_OUTCOME_LABELS.get(market_key)
+    if pair is None:
+        return outcome.actual_value
+    positive = real_outcome_is_positive(market_key, prediction_value, outcome.error)
+    if positive is None:
+        return outcome.actual_value
+    return pair.positive_label if positive else pair.negative_label
 
 
 @dataclass
@@ -192,9 +263,11 @@ class OutcomeResolutionService:
             if market is None:
                 continue
 
-            three_way_resolver = THREE_WAY_MARKET_RESOLVERS.get(market.market_key)
-            if three_way_resolver is not None:
-                actual_label = three_way_resolver(result)
+            exact_label_resolver = THREE_WAY_MARKET_RESOLVERS.get(market.market_key) or GRID_MARKET_RESOLVERS.get(
+                market.market_key
+            )
+            if exact_label_resolver is not None:
+                actual_label = exact_label_resolver(result)
                 error = 0.0 if prediction.value == actual_label else 1.0
                 outcome = PredictionOutcome(
                     id=PredictionOutcomeId(uuid4()),
@@ -231,3 +304,38 @@ class OutcomeResolutionService:
             )
             recorded.append(await self.outcomes.record(outcome))
         return recorded
+
+    async def review_for_fixture(self, fixture_id: str) -> list[MarketReview]:
+        """Real per-market rows for the AI Review surface (Match Discovery's "Recently Completed
+        Intelligence" and the Match Review page): every PUBLISHED prediction on this fixture,
+        joined with its resolved `PredictionOutcome` when one exists (only fixtures
+        `resolve_for_fixture` has already evaluated carry one — a market with no registered
+        resolver, or a fixture not yet completed, legitimately has none and is reported as
+        unresolved rather than guessed at). Read-only — never writes an outcome itself."""
+        rows: list[MarketReview] = []
+        for prediction in await self.predictions.list_by_subject(fixture_id):
+            if not prediction.is_published():
+                continue
+            market = await self.markets.get(prediction.market_id)
+            if market is None:
+                continue
+            outcome = await self.outcomes.get_for_prediction(prediction.id)
+            rows.append(
+                MarketReview(
+                    market_id=str(market.id),
+                    market_key=market.market_key,
+                    market_name=market.name,
+                    predicted_value=prediction.value,
+                    probability=prediction.probability,
+                    confidence=prediction.confidence.composite,
+                    probability_distribution=dict(prediction.probability_distribution),
+                    top_positive_features=list(prediction.explanation.top_positive_features),
+                    top_negative_features=list(prediction.explanation.top_negative_features),
+                    ai_explanation=prediction.explanation.ai_explanation or None,
+                    generated_at=prediction.generated_at,
+                    actual_value=_display_actual_value(market.market_key, prediction.value, outcome),
+                    is_correct=(outcome.error == 0.0) if outcome and outcome.error is not None else None,
+                    evaluated_at=outcome.evaluated_at if outcome else None,
+                )
+            )
+        return rows

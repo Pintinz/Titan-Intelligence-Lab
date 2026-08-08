@@ -102,6 +102,17 @@ def sync_upcoming_fixtures_task(self, sport_code: str, competition_id: str, seas
     return _run_summary(asyncio.run(_do()))
 
 
+@celery_app.task(name="ingestion.sync_completed_fixtures", bind=True, queue="default", **_RETRY_KWARGS)
+def sync_completed_fixtures_task(self, sport_code: str, competition_id: str, season_label: str, season_id_str: str, now_iso: str) -> dict | None:
+    async def _do():
+        orchestrator = await _get_orchestrator()
+        return await orchestrator.sync_completed_fixtures(
+            sport_code, competition_id, season_label, SeasonId(UUID(season_id_str)), datetime.fromisoformat(now_iso)
+        )
+
+    return _run_summary(asyncio.run(_do()))
+
+
 @celery_app.task(name="ingestion.sync_standings", bind=True, queue="default", **_RETRY_KWARGS)
 def sync_standings_task(self, sport_code: str, competition_ref: str, season_label: str, season_id_str: str, now_iso: str) -> dict | None:
     async def _do():

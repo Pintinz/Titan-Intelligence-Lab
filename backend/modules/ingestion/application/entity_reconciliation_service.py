@@ -307,22 +307,34 @@ class EntityReconciliationService:
     # -- Fixture ----------------------------------------------------------------------------------
 
     @staticmethod
-    def _resolve_fixture_status(existing: Fixture | None, raw_status: str | None) -> FixtureStatus:
+    def _resolve_fixture_status(
+        existing: Fixture | None, raw_status: str | None, *, allow_skip_live: bool = False
+    ) -> FixtureStatus:
         """Previously always froze at ``existing.status`` (or SCHEDULED for a new fixture),
         forever — even ``sync_live_fixtures``'s 30-second poll never actually moved a fixture
         past SCHEDULED, so kickoff/live/final-result never happened anywhere in the system. Now
         applies the provider's reported status through ``Fixture.transition_to``, which itself
         rejects illegal transitions (e.g. a flaky provider briefly reporting a match live again
         after FT) — on rejection this keeps the fixture's current status rather than raising and
-        failing the whole sync run over one bad record."""
+        failing the whole sync run over one bad record.
+
+        ``allow_skip_live`` is the one deliberate, narrow exception to that lifecycle: it's set
+        only by ``sync_completed_fixtures``'s football-data.org path, whose free-tier adapter
+        structurally never reports IN_PLAY (it only ever polls SCHEDULED/TIMED, then later
+        FINISHED — see ``FootballDataOrgAdapter``'s module docstring), so a real, legitimate
+        finished match would otherwise be permanently rejected by the SCHEDULED->COMPLETED ban and
+        sit stuck at SCHEDULED forever. Every other transition rule (including the "never go
+        backward out of COMPLETED" rule this exception does not touch) still applies unchanged."""
         if existing is None:
             return normalize_provider_fixture_status(raw_status)
         target = normalize_provider_fixture_status(raw_status)
         if target == existing.status:
             return existing.status
-        if not is_valid_fixture_transition(existing.status, target):
-            return existing.status
-        return target
+        if is_valid_fixture_transition(existing.status, target):
+            return target
+        if allow_skip_live and existing.status is FixtureStatus.SCHEDULED and target is FixtureStatus.COMPLETED:
+            return target
+        return existing.status
 
     async def _find_fixture_by_teams_and_date(
         self, home_team_id: TeamId, away_team_id: TeamId, scheduled_at: datetime
@@ -344,7 +356,7 @@ class EntityReconciliationService:
 
     async def reconcile_fixture(
         self, record: ProviderFixtureRecord, season_id: SeasonId, now: datetime, venue_id: VenueId | None = None,
-        sport_code: str | None = None, match_by_teams_and_date: bool = False,
+        sport_code: str | None = None, match_by_teams_and_date: bool = False, allow_skip_live: bool = False,
     ) -> tuple[Fixture, bool]:
         home_id = await self._resolve(record.home_team_ref.provider, record.home_team_ref.external_id, EntityKind.TEAM)
         away_id = await self._resolve(record.away_team_ref.provider, record.away_team_ref.external_id, EntityKind.TEAM)
@@ -359,7 +371,7 @@ class EntityReconciliationService:
                 TeamId(_as_uuid(home_id)), TeamId(_as_uuid(away_id)), record.scheduled_at
             )
         created = existing is None
-        status = self._resolve_fixture_status(existing, record.status)
+        status = self._resolve_fixture_status(existing, record.status, allow_skip_live=allow_skip_live)
         entity = Fixture(
             id=existing.id if existing else FixtureId(uuid4()), season_id=season_id,
             home_team_id=TeamId(_as_uuid(home_id)), away_team_id=TeamId(_as_uuid(away_id)),

@@ -135,13 +135,13 @@ def test_redis_health_endpoint_reports_healthy(client):
 
 
 def test_kg_node_not_found_returns_404(client):
-    response = client.get("/api/v1/admin/graph/nodes/team/does-not-exist")
+    response = client.get("/api/v1/graph/entities/team/does-not-exist")
 
     assert response.status_code == 404
 
 
 def test_kg_node_rejects_unknown_node_type(client):
-    response = client.get("/api/v1/admin/graph/nodes/nonsense/some-id")
+    response = client.get("/api/v1/graph/entities/nonsense/some-id")
 
     assert response.status_code == 422
 
@@ -316,6 +316,23 @@ def test_trigger_upcoming_fixtures_sync_requires_preference(client, db_session_f
     assert response.status_code == 409
 
 
+def test_trigger_completed_fixtures_sync_requires_preference(client, db_session_factory):
+    asyncio.run(_seed_reconciled_sport(db_session_factory))
+    bootstrap = client.post(
+        "/api/v1/admin/sync/football/bootstrap",
+        json={"competition_ref": "39", "competition_name": "Premier League", "season_label": "2026"},
+    )
+    competition_id = bootstrap.json()["data"]["competition_id"]
+    season_id = bootstrap.json()["data"]["season_id"]
+
+    response = client.post(
+        f"/api/v1/admin/sync/football/competitions/{competition_id}/completed-fixtures",
+        json={"season_label": "2026", "season_id": season_id},
+    )
+
+    assert response.status_code == 409
+
+
 def test_team_suggestions_matches_by_name_against_existing_teams(client, db_session_factory, monkeypatch):
     import apps.api.main as main_module
 
@@ -380,7 +397,7 @@ def test_kg_node_read_returns_edges_after_sync(client, db_session_factory):
     client.post("/api/v1/admin/sync/football/teams/39", json={"force": False})
     team_id = asyncio.run(_first_reconciled_team_id(db_session_factory))
 
-    response = client.get(f"/api/v1/admin/graph/nodes/team/{team_id}")
+    response = client.get(f"/api/v1/graph/entities/team/{team_id}")
 
     assert response.status_code == 200
     data = response.json()["data"]

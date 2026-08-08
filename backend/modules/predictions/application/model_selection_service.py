@@ -60,14 +60,22 @@ DEFAULT_REGRESSION_CANDIDATES: tuple[CandidateSpec, ...] = tuple(
 )
 
 
-def _build_model(candidate: CandidateSpec, target_type: TargetType) -> PredictionModelPort:
+def _build_model(
+    candidate: CandidateSpec, target_type: TargetType, class_labels: tuple[str, ...] = ()
+) -> PredictionModelPort:
+    """``class_labels`` (multiclass classification support, 2026-08-06) is set on every candidate
+    before `fit()` — empty for a binary-classification/regression market (every adapter's default),
+    non-empty (the market's `MARKET_OUTCOME_CATALOG` label ordering) for a market like
+    football.match_winner/football.correct_score with more than two real outcomes."""
     if candidate.framework is MLFramework.LIGHTGBM:
-        return LightGBMAdapter(target_type=target_type, params=dict(candidate.params))
+        return LightGBMAdapter(target_type=target_type, params=dict(candidate.params), class_labels=class_labels)
     if candidate.framework is MLFramework.XGBOOST:
-        return XGBoostAdapter(target_type=target_type, params=dict(candidate.params))
+        return XGBoostAdapter(target_type=target_type, params=dict(candidate.params), class_labels=class_labels)
     if candidate.framework is MLFramework.CATBOOST:
-        return CatBoostAdapter(target_type=target_type, params=dict(candidate.params))
-    return SklearnAdapter(algorithm=candidate.algorithm, target_type=target_type, params=dict(candidate.params))
+        return CatBoostAdapter(target_type=target_type, params=dict(candidate.params), class_labels=class_labels)
+    return SklearnAdapter(
+        algorithm=candidate.algorithm, target_type=target_type, params=dict(candidate.params), class_labels=class_labels
+    )
 
 
 def _ranking_metric_name(target_type: TargetType) -> str:
@@ -109,7 +117,7 @@ class AutomaticModelSelectionService:
         skipped: list[tuple[CandidateSpec, str]] = []
 
         for candidate in roster:
-            model = _build_model(candidate, target_type)
+            model = _build_model(candidate, target_type, dataset.lineage.class_labels)
             try:
                 result = await self.training_pipeline.train(model, dataset, split_strategy=split_strategy, **split_kwargs)
             except (InsufficientTrainingDataError, UnsupportedAlgorithmForTargetTypeError) as exc:

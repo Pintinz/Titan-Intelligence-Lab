@@ -154,11 +154,11 @@ class SportsProviderRouter:
         )
 
     async def fetch_players(
-        self, sport_code: str, team_ref: ProviderRef, now: datetime, *, low_priority: bool = False
+        self, sport_code: str, team_ref: ProviderRef, now: datetime, *, low_priority: bool = False, season_label: str | None = None
     ) -> list[ProviderPlayerRecord]:
         return await self._execute(
-            sport_code, ("players", sport_code, team_ref.provider, team_ref.external_id), now, low_priority,
-            lambda adapter: adapter.fetch_players(team_ref),
+            sport_code, ("players", sport_code, team_ref.provider, team_ref.external_id, season_label), now, low_priority,
+            lambda adapter: adapter.fetch_players(team_ref, season_label),
         )
 
     async def fetch_standings(
@@ -232,6 +232,46 @@ class SportsProviderRouter:
             raise ProviderThrottledError(f"quota protection throttled '{adapter.provider_key}'")
         try:
             result = await adapter.fetch_fixtures(competition_ref, season_label, now)
+        except Exception:
+            self.circuit_breaker.record_failure(adapter.provider_key, now)
+            if provider:
+                await self.quota_engine.record_request(provider.id, now, success=False)
+            raise
+        else:
+            self.circuit_breaker.record_success(adapter.provider_key)
+            if provider:
+                await self.quota_engine.record_request(provider.id, now, success=True)
+
+        self._cache_set(cache_key, result, now, cache_ttl)
+        return result
+
+    async def fetch_completed_fixtures(
+        self, sport_code: str, provider_key: str, competition_ref: str, season_label: str, now: datetime, *,
+        low_priority: bool = False,
+    ) -> list[ProviderFixtureRecord]:
+        """`fetch_upcoming_fixtures`'s counterpart for final scores — same resolution, circuit-
+        breaker, quota, and caching behavior, but calls the adapter's `fetch_completed_fixtures`
+        instead. Not every `fixture_schedule_adapters` entry necessarily implements this (it's
+        not part of `SportsDataProviderPort`), so a missing method raises `ProviderNotConfiguredError`
+        rather than an opaque `AttributeError`, matching this router's existing "no silent
+        fallback" discipline for provider-specific capabilities."""
+        cache_key = ("completed_fixtures", provider_key, competition_ref, season_label)
+        cached = self._cache_get(cache_key, now)
+        if cached is not None:
+            return cached
+
+        adapter, provider = await self._resolve_fixture_schedule_adapter(provider_key)
+        fetch_completed = getattr(adapter, "fetch_completed_fixtures", None)
+        if fetch_completed is None:
+            raise ProviderNotConfiguredError(f"provider '{provider_key}' does not support completed-fixture sync")
+        cache_ttl = provider.cache_ttl_seconds if provider else 3600
+
+        if not self.circuit_breaker.allow_request(adapter.provider_key, now):
+            raise ProviderCircuitOpenError(f"circuit open for '{adapter.provider_key}'")
+        if provider and await self.quota_engine.should_throttle(provider.id, now, low_priority=low_priority):
+            raise ProviderThrottledError(f"quota protection throttled '{adapter.provider_key}'")
+        try:
+            result = await fetch_completed(competition_ref, season_label, now)
         except Exception:
             self.circuit_breaker.record_failure(adapter.provider_key, now)
             if provider:

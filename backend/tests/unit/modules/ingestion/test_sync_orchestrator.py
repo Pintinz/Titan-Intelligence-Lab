@@ -52,6 +52,7 @@ from modules.sports.ports.provider_gateway import (
     ProviderCountryRecord,
     ProviderFixtureRecord,
     ProviderOddsRecord,
+    ProviderPlayerRecord,
     ProviderStandingRecord,
     ProviderTeamRecord,
     ProviderTeamStatisticsRecord,
@@ -69,8 +70,11 @@ class FakeRouter:
     standings_to_return: list = field(default_factory=list)
     odds_to_return: object = None
     team_statistics_to_return: list = field(default_factory=list)
+    players_to_return: list = field(default_factory=list)
     upcoming_fixtures_calls: list = field(default_factory=list)
     upcoming_fixtures_to_return: list = field(default_factory=list)
+    completed_fixtures_calls: list = field(default_factory=list)
+    completed_fixtures_to_return: list = field(default_factory=list)
     raise_on_fetch: Exception | None = None
 
     async def fetch_teams(self, sport_code, competition_ref, now, *, low_priority=False, season_label=None):
@@ -104,11 +108,22 @@ class FakeRouter:
             raise self.raise_on_fetch
         return self.team_statistics_to_return
 
+    async def fetch_players(self, sport_code, team_ref, now, *, low_priority=True, season_label=None):
+        if self.raise_on_fetch:
+            raise self.raise_on_fetch
+        return self.players_to_return
+
     async def fetch_upcoming_fixtures(self, sport_code, provider_key, competition_ref, season_label, now, *, low_priority=False):
         self.upcoming_fixtures_calls.append((sport_code, provider_key, competition_ref, season_label))
         if self.raise_on_fetch:
             raise self.raise_on_fetch
         return self.upcoming_fixtures_to_return
+
+    async def fetch_completed_fixtures(self, sport_code, provider_key, competition_ref, season_label, now, *, low_priority=False):
+        self.completed_fixtures_calls.append((sport_code, provider_key, competition_ref, season_label))
+        if self.raise_on_fetch:
+            raise self.raise_on_fetch
+        return self.completed_fixtures_to_return
 
 
 @dataclass
@@ -380,6 +395,79 @@ async def test_sync_upcoming_fixtures_uses_a_scope_key_distinct_from_sync_fixtur
 
     assert default_run is not None
     assert upcoming_run is not None  # not skipped by sync_fixtures' checkpoint for the same competition
+
+
+@pytest.mark.asyncio
+async def test_sync_completed_fixtures_raises_when_orchestrator_not_wired_with_repository(orchestrator):
+    with pytest.raises(NoFixtureSourcePreferenceError):
+        await orchestrator.sync_completed_fixtures("football", "comp-1", "2026", SeasonId(uuid4()), T0)
+
+
+@pytest.mark.asyncio
+async def test_sync_completed_fixtures_raises_when_no_preference_configured(orchestrator_with_fixture_source):
+    with pytest.raises(NoFixtureSourcePreferenceError):
+        await orchestrator_with_fixture_source.sync_completed_fixtures("football", "comp-1", "2026", SeasonId(uuid4()), T0)
+
+
+@pytest.mark.asyncio
+async def test_sync_completed_fixtures_updates_a_previously_upcoming_fixture_with_its_final_score(
+    orchestrator_with_fixture_source, session, router, fixture_source_preferences
+):
+    """The core value of this sync path: a fixture `sync_upcoming_fixtures` created while
+    SCHEDULED gets its final score and COMPLETED status once football-data.org reports it
+    FINISHED — without this, such a fixture (which api-football never sees, since it wasn't the
+    provider that scheduled it) would sit at SCHEDULED forever."""
+    home = await _seed_team(orchestrator_with_fixture_source, session, "t1")
+    away, _ = await orchestrator_with_fixture_source.reconciler.reconcile_team(
+        ProviderTeamRecord(external_ref=ProviderRef("mock", "t2"), name="Chelsea", short_name="CHE", country="England"),
+        home.sport_id, T0,
+    )
+    await session.commit()
+    await orchestrator_with_fixture_source.reconciler.ref_index.upsert(
+        ProviderRefIndexEntry("football_data_org", "fd-t1", EntityKind.TEAM, str(home.id.value))
+    )
+    await orchestrator_with_fixture_source.reconciler.ref_index.upsert(
+        ProviderRefIndexEntry("football_data_org", "fd-t2", EntityKind.TEAM, str(away.id.value))
+    )
+    await session.commit()
+
+    fixture_source_preferences.store["comp-1"] = CompetitionFixtureSourcePreference(
+        competition_id="comp-1", preferred_provider_key="football_data_org", provider_competition_ref="PL",
+    )
+    router.upcoming_fixtures_to_return = [
+        ProviderFixtureRecord(
+            external_ref=ProviderRef("football_data_org", "fd-fx1"),
+            home_team_ref=ProviderRef("football_data_org", "fd-t1"),
+            away_team_ref=ProviderRef("football_data_org", "fd-t2"),
+            scheduled_at=T0, competition_ref="PL", season_label="2026", status="SCHEDULED",
+        )
+    ]
+    upcoming_run = await orchestrator_with_fixture_source.sync_upcoming_fixtures("football", "comp-1", "2026", SeasonId(uuid4()), T0)
+    await session.commit()
+    assert upcoming_run.records_created == 1
+
+    router.completed_fixtures_to_return = [
+        ProviderFixtureRecord(
+            external_ref=ProviderRef("football_data_org", "fd-fx1"),
+            home_team_ref=ProviderRef("football_data_org", "fd-t1"),
+            away_team_ref=ProviderRef("football_data_org", "fd-t2"),
+            scheduled_at=T0, competition_ref="PL", season_label="2026", status="FINISHED",
+            home_score=2, away_score=1,
+        )
+    ]
+    completed_run = await orchestrator_with_fixture_source.sync_completed_fixtures(
+        "football", "comp-1", "2026", SeasonId(uuid4()), T0 + timedelta(hours=2),
+    )
+    await session.commit()
+
+    assert completed_run.status is SyncStatus.SUCCEEDED
+    assert completed_run.records_updated == 1
+    assert router.completed_fixtures_calls == [("football", "football_data_org", "PL", "2026")]
+    fixture_id = await orchestrator_with_fixture_source.reconciler.ref_index.get("football_data_org", "fd-fx1", EntityKind.FIXTURE)
+    saved = await orchestrator_with_fixture_source.reconciler.fixtures.get(FixtureId(uuid.UUID(fixture_id)))
+    assert saved.home_score == 2
+    assert saved.away_score == 1
+    assert saved.status.value == "completed"
 
 
 async def _seed_sport(orchestrator, session):
@@ -783,3 +871,65 @@ async def test_sync_team_statistics_rejects_when_team_not_reconciled(orchestrato
 
     assert run.status is SyncStatus.PARTIAL
     assert run.records_rejected == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_players_creates_roster_linked_to_team(orchestrator, session, router):
+    team = await _seed_team(orchestrator, session)
+    team_ref = ProviderRef("mock", "t1")
+    router.players_to_return = [
+        ProviderPlayerRecord(
+            external_ref=ProviderRef("mock", "p1"), team_ref=team_ref, name="Bruno Fernandes",
+            date_of_birth=datetime(1994, 9, 8, tzinfo=timezone.utc), position="Midfielder",
+        ),
+        ProviderPlayerRecord(
+            external_ref=ProviderRef("mock", "p2"), team_ref=team_ref, name="Andre Onana",
+            date_of_birth=datetime(1996, 4, 2, tzinfo=timezone.utc), position="Goalkeeper",
+        ),
+    ]
+
+    run = await orchestrator.sync_players("football", team_ref, T0)
+    await session.commit()
+
+    assert run.status is SyncStatus.SUCCEEDED
+    assert run.records_fetched == 2
+    assert run.records_created == 2
+    players = await orchestrator.reconciler.players.list_by_sport(team.sport_id, limit=10)
+    assert {p.name for p in players} == {"Bruno Fernandes", "Andre Onana"}
+    assert all(p.team_id == team.id for p in players)
+
+
+@pytest.mark.asyncio
+async def test_sync_players_rejects_invalid_record(orchestrator, session, router):
+    team = await _seed_team(orchestrator, session)
+    team_ref = ProviderRef("mock", "t1")
+    router.players_to_return = [
+        ProviderPlayerRecord(external_ref=ProviderRef("mock", "p1"), team_ref=team_ref, name="   ", date_of_birth=None, position=None),
+    ]
+
+    run = await orchestrator.sync_players("football", team_ref, T0)
+
+    assert run.status is SyncStatus.PARTIAL
+    assert run.records_rejected == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_players_re_run_updates_existing_roster_instead_of_duplicating(orchestrator, session, router):
+    team = await _seed_team(orchestrator, session)
+    team_ref = ProviderRef("mock", "t1")
+    router.players_to_return = [
+        ProviderPlayerRecord(external_ref=ProviderRef("mock", "p1"), team_ref=team_ref, name="Bruno Fernandes", date_of_birth=None, position="Midfielder"),
+    ]
+    await orchestrator.sync_players("football", team_ref, T0)
+    await session.commit()
+
+    router.players_to_return = [
+        ProviderPlayerRecord(external_ref=ProviderRef("mock", "p1"), team_ref=team_ref, name="Bruno Fernandes", date_of_birth=None, position="Midfielder"),
+    ]
+    run = await orchestrator.sync_players("football", team_ref, T0 + timedelta(days=1), force=True)
+    await session.commit()
+
+    assert run.status is SyncStatus.SUCCEEDED
+    assert run.records_updated == 1
+    players = await orchestrator.reconciler.players.list_by_sport(team.sport_id, limit=10)
+    assert len(players) == 1

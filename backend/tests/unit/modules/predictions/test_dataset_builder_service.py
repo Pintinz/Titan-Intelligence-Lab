@@ -144,11 +144,12 @@ async def test_classification_label_recovers_real_polarity_from_prediction_value
 async def test_unresolvable_market_skips_samples_instead_of_mislabeling(
     builder, market_repo, prediction_repo, prediction_outcome_repo
 ):
-    """A CLASSIFICATION market with no binary-polarity mapping (e.g. a 3-way market, or any
-    market_key outcome_label_mapper doesn't cover) must never silently mislabel every sample as
-    negative — every outcome is skipped instead, and the resulting dataset is correctly flagged
-    as not usable for training rather than looking deceptively "built"."""
-    market = await _market(market_repo, market_key="football.match_winner", market_kind=MarketKind.HOME_DRAW_AWAY)
+    """A CLASSIFICATION market with no binary-polarity mapping AND no MARKET_OUTCOME_CATALOG entry
+    at all (so it's neither binary-resolvable via real_outcome_is_positive nor multiclass-
+    resolvable via a class_labels ordering) must never silently mislabel every sample as negative —
+    every outcome is skipped instead, and the resulting dataset is correctly flagged as not usable
+    for training rather than looking deceptively "built"."""
+    market = await _market(market_repo, market_key="football.totally_uncatalogued_market")
     for i in range(30):
         prediction = await prediction_repo.record(
             _prediction(market.id, {"feature_a": float(i)}, value="HOME_WIN")
@@ -165,6 +166,54 @@ async def test_unresolvable_market_skips_samples_instead_of_mislabeling(
     assert dataset.samples == []
     assert dataset.statistics.sample_count == 0
     assert DatasetQualityIssue.TOO_FEW_SAMPLES in dataset.quality_issues
+
+
+async def test_multiclass_market_recovers_class_index_labels(
+    builder, market_repo, prediction_repo, prediction_outcome_repo
+):
+    """(2026-08-06) A market with more than two MARKET_OUTCOME_CATALOG outcomes (football.match_winner's
+    HOME_WIN/DRAW/AWAY_WIN) — previously unresolvable through this builder at all (see the
+    unresolvable-market test above, which used to cite this exact market as its example) — now
+    recovers a real class-index label directly from the resolver's own output, no polarity mapping
+    involved. This is the fix that also makes football.correct_score trainable."""
+    market = await _market(market_repo, market_key="football.match_winner", market_kind=MarketKind.HOME_DRAW_AWAY)
+    labels = ["HOME_WIN", "DRAW", "AWAY_WIN"] * 10
+    for i, actual_label in enumerate(labels):
+        prediction = await prediction_repo.record(_prediction(market.id, {"feature_a": float(i)}, value=actual_label))
+        await prediction_outcome_repo.record(
+            PredictionOutcome(
+                id=PredictionOutcomeId(uuid4()), prediction_id=prediction.id,
+                actual_value=actual_label, error=0.0, evaluated_at=T0,
+            )
+        )
+
+    dataset = await builder.build(market.id, now=T0)
+
+    assert dataset.statistics.sample_count == 30
+    assert dataset.lineage.class_labels == ("HOME_WIN", "DRAW", "AWAY_WIN")
+    recovered_labels = {s.label for s in dataset.samples}
+    assert recovered_labels == {0.0, 1.0, 2.0}
+    # Multiclass labels are class indices, not a 0/1 polarity — positive_rate is honestly None.
+    assert dataset.statistics.positive_rate is None
+
+
+async def test_multiclass_market_skips_unrecognized_actual_value(
+    builder, market_repo, prediction_repo, prediction_outcome_repo
+):
+    """An outcome whose actual_value somehow isn't one of the market's own declared allowed_values
+    is skipped, never coerced into a fabricated class index."""
+    market = await _market(market_repo, market_key="football.match_winner", market_kind=MarketKind.HOME_DRAW_AWAY)
+    prediction = await prediction_repo.record(_prediction(market.id, {"feature_a": 1.0}, value="HOME_WIN"))
+    await prediction_outcome_repo.record(
+        PredictionOutcome(
+            id=PredictionOutcomeId(uuid4()), prediction_id=prediction.id,
+            actual_value="NOT_A_REAL_LABEL", error=0.0, evaluated_at=T0,
+        )
+    )
+
+    dataset = await builder.build(market.id, now=T0)
+
+    assert dataset.samples == []
 
 
 async def test_regression_label_parses_actual_value_as_float(builder, market_repo, prediction_repo, prediction_outcome_repo):

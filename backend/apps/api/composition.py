@@ -193,12 +193,6 @@ from modules.predictions.infrastructure.persistence.repositories import (
     SqlAlchemyPredictionOutcomeRepository,
     SqlAlchemyPredictionRepository,
 )
-from modules.predictions.domain.value_objects import MarketKind
-from modules.predictions.infrastructure.predictors.poisson_goals_threshold_predictor import (
-    PoissonGoalsThresholdMode,
-    PoissonGoalsThresholdPredictor,
-)
-from modules.predictions.infrastructure.predictors.poisson_score_predictor import PoissonScorePredictor
 from modules.predictions.infrastructure.predictors.weighted_scoring import (
     WeightedLinearPredictor,
     WeightedLogisticPredictor,
@@ -743,48 +737,21 @@ def build_feature_market_mapping_service(session: AsyncSession) -> FeatureMarket
     )
 
 
-# (market_key, MarketKind, PoissonGoalsThresholdMode, line, side) — one row per market
-# `poisson_goals_threshold_predictor.py`'s audit finding covers. `line`/`side` are ignored by the
-# predictor for modes that don't use them (CLEAN_SHEET/WIN_TO_NIL ignore `line`; TOTAL_OVER_UNDER
-# ignores `side`) — kept populated here anyway so this table stays a complete, self-documenting
-# per-market spec rather than relying on which fields "happen to" matter for a given mode.
-FOOTBALL_POISSON_THRESHOLD_MARKETS: tuple[tuple[str, MarketKind, PoissonGoalsThresholdMode, float, str], ...] = (
-    ("football.total_goals_over_under", MarketKind.TOTAL, PoissonGoalsThresholdMode.TOTAL_OVER_UNDER, 2.5, "home"),
-    ("football.total_goals_over_under_0_5", MarketKind.TOTAL, PoissonGoalsThresholdMode.TOTAL_OVER_UNDER, 0.5, "home"),
-    ("football.total_goals_over_under_1_5", MarketKind.TOTAL, PoissonGoalsThresholdMode.TOTAL_OVER_UNDER, 1.5, "home"),
-    ("football.total_goals_over_under_3_5", MarketKind.TOTAL, PoissonGoalsThresholdMode.TOTAL_OVER_UNDER, 3.5, "home"),
-    ("football.total_goals_over_under_4_5", MarketKind.TOTAL, PoissonGoalsThresholdMode.TOTAL_OVER_UNDER, 4.5, "home"),
-    ("football.home_team_total_goals", MarketKind.TEAM_TOTAL, PoissonGoalsThresholdMode.TEAM_TOTAL_OVER_UNDER, 1.5, "home"),
-    ("football.away_team_total_goals", MarketKind.TEAM_TOTAL, PoissonGoalsThresholdMode.TEAM_TOTAL_OVER_UNDER, 1.5, "away"),
-    ("football.home_clean_sheet", MarketKind.BINARY, PoissonGoalsThresholdMode.CLEAN_SHEET, 0.5, "home"),
-    ("football.away_clean_sheet", MarketKind.BINARY, PoissonGoalsThresholdMode.CLEAN_SHEET, 0.5, "away"),
-    ("football.home_win_to_nil", MarketKind.BINARY, PoissonGoalsThresholdMode.WIN_TO_NIL, 0.5, "home"),
-    ("football.away_win_to_nil", MarketKind.BINARY, PoissonGoalsThresholdMode.WIN_TO_NIL, 0.5, "away"),
-)
-
-
 @lru_cache
 def get_predictor_registry() -> PredictorRegistry:
-    """Every `MarketKind` this milestone supports resolves to one of the two generic weighted
-    scoring predictors (docs/decisions.md — data-driven market registry) — a process-wide
-    singleton since neither predictor holds per-request state."""
+    """Formula-fallback predictors for markets whose Champion has no real trained artifact yet.
+    ML-architecture consolidation (2026-08-04): this registry no longer contains a Poisson (or
+    any other single-purpose statistical) predictor — `football.correct_score` and the eleven
+    Over/Under-style markets that used to fall back to one now have NO entry here at all (see
+    `scripts/seed_football_markets.py`'s `NOT_YET_TRAINED_MARKET_KEYS`) and never reach this
+    registry in the first place: `PredictionContextBuilder.build()` raises `NoChampionModelError`
+    for them until a real trained model exists, which the API surfaces as an honest "insufficient
+    historical data" response rather than silently substituting a formula guess. The remaining
+    three generic weighted predictors stay the production path for every other market kind."""
     registry = PredictorRegistry()
     registry.register_many(WeightedLogisticPredictor.SUPPORTED_KINDS, WeightedLogisticPredictor())
     registry.register_many(WeightedLinearPredictor.SUPPORTED_KINDS, WeightedLinearPredictor())
     registry.register_many(WeightedOrdinalPredictor.SUPPORTED_KINDS, WeightedOrdinalPredictor())
-    # Registered after WeightedLinearPredictor so it wins CORRECT_SCORE — a real independent-
-    # Poisson scoreline model instead of that predictor's raw-number placeholder (audit fix
-    # 2026-08-02, poisson_score_predictor.py).
-    registry.register_many(PoissonScorePredictor.SUPPORTED_KINDS, PoissonScorePredictor())
-    # Audit fix (2026-08-03): these eleven markets all share MarketKind.TOTAL/TEAM_TOTAL/BINARY
-    # with other markets that correctly stay on the generic weighted predictors (e.g.
-    # football.both_teams_to_score), so they're overridden per-market_key, not per-kind — each
-    # gets its own real, line/side-aware Poisson answer instead of an identical formula result
-    # (see poisson_goals_threshold_predictor.py's module docstring for the full finding).
-    for market_key, kind, mode, line, side in FOOTBALL_POISSON_THRESHOLD_MARKETS:
-        registry.register_for_market(
-            market_key, PoissonGoalsThresholdPredictor(market_kind=kind, mode=mode, line=line, side=side)
-        )
     return registry
 
 
@@ -813,6 +780,7 @@ def build_prediction_context_builder(session: AsyncSession) -> PredictionContext
         models=SqlAlchemyModelRepository(session=session),
         mapping_service=build_feature_market_mapping_service(session),
         feature_values=SqlAlchemyFeatureValueRepository(session=session),
+        definitions=SqlAlchemyFeatureDefinitionRepository(session=session),
     )
 
 

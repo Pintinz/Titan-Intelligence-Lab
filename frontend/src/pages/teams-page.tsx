@@ -1,85 +1,141 @@
-import { useState } from 'react'
-import { Link } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
-import { Users } from 'lucide-react'
-import { sportsApi } from '@/lib/api/sports'
-import { SPORT_SLUGS } from '@/lib/hooks/use-sport'
+import { useMemo, useState, type ReactNode } from 'react'
+import { Trophy, Star, Users } from 'lucide-react'
+import { SPORT_SLUGS, type SportMeta } from '@/lib/hooks/use-sport'
 import { useWatchlist } from '@/lib/hooks/use-watchlist'
+import { useTeamIntelligence, type EnrichedTeam } from '@/lib/hooks/use-team-intelligence'
 import { ErrorState } from '@/components/ui/error-state'
-import { InfinityLabel } from '@/components/infinity/primitives/panel'
-import { InfinitySkeleton } from '@/components/infinity/primitives/skeleton'
-import { InfinityEmptyState } from '@/components/infinity/primitives/empty-state'
-import { InfinityButton } from '@/components/infinity/primitives/button'
-import { InfinityTeamCard } from '@/components/infinity/cards/team-card'
+import { TeamHero } from '@/components/command-deck/team-hero'
+import { TeamCard } from '@/components/command-deck/team-card'
+import { CountryFilter } from '@/components/command-deck/country-filter'
+import { TeamBrowseList } from '@/components/command-deck/team-browse-list'
+import { MissionSection, MissionSkeletonGrid, MissionEmptyState } from '@/components/command-deck/mission-control/mission-section'
 import type { DomainKey } from '@/components/infinity/primitives/badge'
 
-/** Cross-sport Teams — the top-level nav destination. Same sport-switcher-over-existing-logic
- * approach as CompetitionsPage: a team always belongs to one sport, so this reuses
- * team-list-page.tsx's query/card/follow logic behind a sport switcher instead of a URL param. */
+const FEATURED_LIMIT = 6
+
+/** Wider breakpoints than the generic `MissionCardGrid` — these cards carry crest, name, league,
+ * country, AI badge and a CTA, and truncate real club names at that grid's 1024px 3-column
+ * density (the same overflow already found and fixed on Competition Center). */
+function TeamGrid({ children }: { children: ReactNode }) {
+  return <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">{children}</div>
+}
+
+/**
+ * Team Intelligence — the cross-sport nav destination, redesigned per the shaped brief. Every
+ * league/AI-ready/Generate-Intelligence signal traces to `useTeamIntelligence` (real fetched
+ * fixtures grouped per team, no fabrication). Recently Updated is omitted entirely — no timestamp
+ * exists anywhere on Team in the backend, and the brief's own instruction is to hide the section
+ * rather than build an always-empty one.
+ */
 export default function TeamsPage() {
-  const [sport, setSport] = useState(SPORT_SLUGS[0])
+  const [sport, setSport] = useState<SportMeta>(SPORT_SLUGS[0])
+  const [search, setSearch] = useState('')
+  const [country, setCountry] = useState<string | null>(null)
   const watchlist = useWatchlist()
 
-  const { data, isPending, isError, error, refetch } = useQuery({
-    queryKey: ['sports', 'teams', sport.code],
-    queryFn: () => sportsApi.listTeams(sport.code),
-  })
-
+  const { teams, aiReady, isLoading, isError, error, refetch } = useTeamIntelligence(sport.code)
   const domain = sport.slug as Extract<DomainKey, 'football' | 'basketball' | 'baseball' | 'table-tennis'>
 
+  const backdropLogos = useMemo(() => teams.map((t) => t.logo_url).filter((u): u is string => !!u), [teams])
+
+  const countryCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const t of teams) {
+      if (!t.country) continue
+      counts.set(t.country, (counts.get(t.country) ?? 0) + 1)
+    }
+    return [...counts.entries()].sort(([, a], [, b]) => b - a).map(([c, count]) => ({ country: c, count }))
+  }, [teams])
+
+  const countryFiltered = useMemo(() => (country ? teams.filter((t) => t.country === country) : teams), [teams, country])
+
+  const searching = search.trim().length > 0
+  const searchResults = useMemo(() => {
+    if (!searching) return []
+    const q = search.trim().toLowerCase()
+    return teams.filter(
+      (t) => t.name.toLowerCase().includes(q) || (t.country ?? '').toLowerCase().includes(q) || (t.competitionName ?? '').toLowerCase().includes(q),
+    )
+  }, [teams, search, searching])
+
+  const featured = useMemo(
+    () =>
+      teams
+        .filter((t) => t.competitionTier === 1)
+        .sort((a, b) => Number(b.liveNow) - Number(a.liveNow) || Number(!!b.nextFixtureId) - Number(!!a.nextFixtureId))
+        .slice(0, FEATURED_LIMIT),
+    [teams],
+  )
+  const featuredIds = useMemo(() => new Set(featured.map((t) => t.id)), [featured])
+  const discoverTeams = useMemo(() => countryFiltered.filter((t) => !featuredIds.has(t.id)), [countryFiltered, featuredIds])
+
+  function cardFor(team: EnrichedTeam, size?: 'featured' | 'default') {
+    return (
+      <TeamCard
+        key={team.id}
+        team={team}
+        href={`/app/${sport.slug}/teams/${team.id}`}
+        generateHref={aiReady && team.nextFixtureId ? `/app/${sport.slug}/matches/${team.nextFixtureId}` : null}
+        sportDomain={domain}
+        aiReady={aiReady}
+        following={watchlist.isFollowing('team', team.id)}
+        onToggleFollow={() => watchlist.toggle('team', team.id)}
+        size={size}
+      />
+    )
+  }
+
   return (
-    <div className="space-y-6">
-      <div>
-        <InfinityLabel tone="var(--infinity-signal)">Teams</InfinityLabel>
-        <h2 className="mt-1 font-infinity-display text-lg font-semibold text-infinity-text-primary">
-          Every team TitanIQ covers
-        </h2>
-      </div>
-
-      <div className="flex flex-wrap gap-2">
-        {SPORT_SLUGS.map((s) => (
-          <InfinityButton
-            key={s.slug}
-            type="button"
-            size="sm"
-            variant={sport.slug === s.slug ? 'secondary' : 'ghost'}
-            onClick={() => setSport(s)}
-          >
-            {s.label}
-          </InfinityButton>
-        ))}
-      </div>
-
-      {isPending && (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {Array.from({ length: 8 }).map((_, i) => (
-            <InfinitySkeleton key={i} className="h-20" />
-          ))}
-        </div>
-      )}
+    <div className="command-deck space-y-8 rounded-[var(--cd-radius-xl)]" style={{ backgroundColor: 'var(--cd-bg)', padding: '1.5rem' }}>
+      <TeamHero sport={sport} onSportChange={setSport} search={search} onSearchChange={setSearch} backdropLogos={backdropLogos} />
 
       {isError && <ErrorState error={error} onRetry={() => void refetch()} />}
 
-      {data && data.length === 0 && (
-        <InfinityEmptyState icon={Users} title="No teams found" description={`No ${sport.label} teams are under coverage.`} />
+      {!isError && isLoading && <MissionSkeletonGrid count={6} />}
+
+      {!isError && !isLoading && searching && (
+        <MissionSection title={`Results for "${search.trim()}"`} subtitle={`${searchResults.length} team${searchResults.length === 1 ? '' : 's'} matched`}>
+          {searchResults.length === 0 ? (
+            <MissionEmptyState
+              icon={Users}
+              title="TitanIQ is synchronizing team intelligence."
+              description="Browse another sport or competition, or try a different search."
+            />
+          ) : (
+            <TeamGrid>{searchResults.map((t) => cardFor(t))}</TeamGrid>
+          )}
+        </MissionSection>
       )}
 
-      {data && data.length > 0 && (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {data.map((team) => (
-            <Link key={team.id} to={`/app/${sport.slug}/teams/${team.id}`} className="block">
-              <InfinityTeamCard
-                name={team.name}
-                domain={domain}
-                country={team.country}
-                venueName={team.venue_name}
-                logoUrl={team.logo_url}
-                following={watchlist.isFollowing('team', team.id)}
-                onToggleFollow={() => watchlist.toggle('team', team.id)}
+      {!isError && !isLoading && !searching && (
+        <>
+          {featured.length > 0 && (
+            <MissionSection title="Featured Teams" subtitle="Top-flight clubs, ranked by current activity" icon={<Star className="size-4" aria-hidden="true" />} domain={domain}>
+              <TeamGrid>{featured.map((t) => cardFor(t, 'featured'))}</TeamGrid>
+            </MissionSection>
+          )}
+
+          <MissionSection title="Discover Teams" subtitle={`Every ${sport.label} club under TitanIQ coverage`} icon={<Trophy className="size-4" aria-hidden="true" />}>
+            {countryCounts.length > 0 && <div className="mb-4"><CountryFilter countryCounts={countryCounts} selected={country} onSelect={setCountry} sportDomain={domain} /></div>}
+            {teams.length === 0 ? (
+              <MissionEmptyState
+                icon={Users}
+                title="TitanIQ is synchronizing team intelligence."
+                description={`Browse another sport or competition — ${sport.label} coverage is still coming online.`}
               />
-            </Link>
-          ))}
-        </div>
+            ) : discoverTeams.length === 0 ? (
+              <MissionEmptyState icon={Users} title="TitanIQ is synchronizing team intelligence." description="Browse another sport or competition." />
+            ) : (
+              <TeamGrid>{discoverTeams.map((t) => cardFor(t))}</TeamGrid>
+            )}
+          </MissionSection>
+
+          {teams.length > 0 && (
+            <MissionSection title="Browse All Teams" subtitle={`All ${teams.length} ${sport.label} clubs, alphabetically`} icon={<Users className="size-4" aria-hidden="true" />}>
+              <TeamBrowseList teams={countryFiltered} sportSlug={sport.slug} sportDomain={domain} />
+            </MissionSection>
+          )}
+        </>
       )}
     </div>
   )

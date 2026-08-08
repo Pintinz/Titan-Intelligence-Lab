@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from modules.predictions.domain.entities import Prediction
 from modules.predictions.domain.value_objects import MarketId, MarketStatus
 from modules.predictions.ports.repositories import (
     MarketRepositoryPort,
@@ -24,6 +25,25 @@ from modules.predictions.ports.repositories import (
     PredictionOutcomeRepositoryPort,
     PredictionRepositoryPort,
 )
+
+
+def serialize_prediction_summary(prediction: Prediction) -> dict:
+    """The one "prediction summary row" shape shared by every list/export surface (AI Picks,
+    monitoring summary, CSV export) — previously hand-rolled separately in
+    `prediction_analytics_router.py` and here, which had silently drifted (this file's export was
+    missing `market_id`/`model_id`). Full-fidelity serialization for a single prediction lives in
+    `prediction_router._serialize_prediction` instead; this is deliberately the thinner row shape."""
+    return {
+        "id": str(prediction.id),
+        "market_id": str(prediction.market_id),
+        "model_id": str(prediction.model_id),
+        "subject_ref": prediction.subject_ref,
+        "value": prediction.value,
+        "probability": prediction.probability,
+        "confidence_composite": prediction.confidence.composite,
+        "status": prediction.status.value,
+        "generated_at": prediction.generated_at.isoformat() if prediction.generated_at else None,
+    }
 
 _CONFIDENCE_FACTORS = (
     "feature_quality",
@@ -133,15 +153,4 @@ class PredictionAdminService:
 
     async def export_market_predictions(self, market_id: MarketId, limit: int = 500) -> list[dict]:
         predictions = await self.predictions.list_by_market(market_id, limit=limit)
-        return [
-            {
-                "id": str(p.id),
-                "subject_ref": p.subject_ref,
-                "value": p.value,
-                "probability": p.probability,
-                "confidence_composite": p.confidence.composite,
-                "status": p.status.value,
-                "generated_at": p.generated_at.isoformat() if p.generated_at else None,
-            }
-            for p in predictions
-        ]
+        return [serialize_prediction_summary(p) for p in predictions]

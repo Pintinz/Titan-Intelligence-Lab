@@ -49,9 +49,13 @@ def mapping_service(feature_mapping_repo, market_repo, feature_definition_repo):
 
 
 @pytest.fixture
-def builder(market_repo, model_repo, mapping_service, feature_value_repo):
+def builder(market_repo, model_repo, mapping_service, feature_value_repo, feature_definition_repo):
     return PredictionContextBuilder(
-        markets=market_repo, models=model_repo, mapping_service=mapping_service, feature_values=feature_value_repo
+        markets=market_repo,
+        models=model_repo,
+        mapping_service=mapping_service,
+        feature_values=feature_value_repo,
+        definitions=feature_definition_repo,
     )
 
 
@@ -73,7 +77,7 @@ async def _production_market_with_champion(market_registry, model_registry, key=
     return market, champion
 
 
-async def _active_feature(feature_definition_repo, key: str):
+async def _active_feature(feature_definition_repo, key: str, online_ttl_seconds: int = 3600):
     definition = FeatureDefinition(
         id=FeatureDefinitionId(uuid4()),
         feature_key=FeatureKey(key),
@@ -86,6 +90,7 @@ async def _active_feature(feature_definition_repo, key: str):
         owner="data-team",
         entity_type=EntityType.FIXTURE,
         status=FeatureStatus.ACTIVE,
+        online_ttl_seconds=online_ttl_seconds,
     )
     await feature_definition_repo.upsert(definition)
     return definition
@@ -213,3 +218,36 @@ async def test_build_reflects_stale_and_missing_features_in_confidence_inputs(
     assert by_key[str(optional.feature_key)].quality_score == 0.0
     assert by_key[str(optional.feature_key)].freshness_score == 0.0
     assert context.resolved_features == {"football.team.avg_goals_scored": 1.4}
+
+
+@pytest.mark.asyncio
+async def test_freshness_uses_each_feature_own_registered_ttl_not_a_global_hardcoded_one(
+    builder, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo
+):
+    """A batch-computed, slow-moving feature (team-form differential, historical rate) with a
+    multi-day TTL is genuinely fresh a couple of days after it was last computed — it must not be
+    scored as if it were live/streaming data going stale within an hour."""
+    market, _ = await _production_market_with_champion(market_registry, model_registry, key="football.slow_moving")
+    week_long_ttl = 7 * 24 * 3600
+    definition = await _active_feature(feature_definition_repo, "football.team.form_index_last10", online_ttl_seconds=week_long_ttl)
+    await mapping_service.map_feature(
+        market_key=market.market_key, feature_key=str(definition.feature_key), is_required=True
+    )
+    await feature_value_repo.record(
+        FeatureValue(
+            id=FeatureValueId(uuid4()),
+            feature_key=definition.feature_key,
+            entity_type=EntityType.FIXTURE,
+            entity_id="fixture-1",
+            as_of=T0 - timedelta(days=2),
+            value=0.6,
+            quality_flags=(QualityFlag.OK,),
+        )
+    )
+    await market_registry.submit_for_review(market.market_key)
+    await market_registry.approve(market.market_key, reviewer="cto", now=T0)
+    await market_registry.promote_to_production(market.market_key, now=T0)
+
+    context = await builder.build(market.market_key, EntityType.FIXTURE, "fixture-1", now=T0)
+
+    assert context.feature_confidence_inputs[0].freshness_score == pytest.approx(1.0)

@@ -55,6 +55,24 @@ async def test_predict_before_fit_raises():
         await predictor.predict(MarketKind.BINARY, {"x1": 1.0}, {})
 
 
+async def test_predict_passes_through_multiclass_distribution():
+    """(2026-08-06) A multiclass-fitted model's own `ModelPrediction.distribution` (already keyed
+    by the market's real labels, e.g. football.correct_score's scoreline grid) is passed straight
+    through rather than being reinterpreted as a binary positive/negative split."""
+    distribution = {"0-0": 0.1, "1-0": 0.5, "0-1": 0.4}
+    model = _FakeModel(
+        _fitted=True,
+        _prediction=ModelPrediction(raw_score=0.0, probability=0.5, value="1-0", distribution=distribution),
+        _importance={"x1": 1.0},
+    )
+    predictor = TrainedModelPredictor(market_kind=MarketKind.CORRECT_SCORE, model=model)
+
+    output = await predictor.predict(MarketKind.CORRECT_SCORE, {"x1": 2.0}, {})
+
+    assert output.value == "1-0"
+    assert output.distribution == distribution
+
+
 async def test_missing_importance_key_contributes_zero():
     model = _FakeModel(
         _fitted=True,

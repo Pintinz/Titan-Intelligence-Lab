@@ -12,6 +12,7 @@ from modules.predictions.application.outcome_resolution_service import (
     _away_team_total_goals_over_under_1_5,
     _away_win_to_nil,
     _both_teams_to_score,
+    _correct_score,
     _home_clean_sheet,
     _home_team_total_goals_over_under_1_5,
     _home_win_to_nil,
@@ -103,6 +104,12 @@ class TestResolverFunctions:
 
     def test_moneyline_tie_is_unresolved_not_fabricated(self):
         assert _moneyline_home_win(MatchResult(3, 3)) is None
+
+    def test_correct_score_within_grid(self):
+        assert _correct_score(MatchResult(2, 1)) == "2-1"
+
+    def test_correct_score_outside_grid_is_other(self):
+        assert _correct_score(MatchResult(7, 0)) == "OTHER"
 
     def test_match_winner_home_win(self):
         assert _match_winner_home_draw_away(MatchResult(2, 1)) == "HOME_WIN"
@@ -392,3 +399,101 @@ class TestThreeWayResolution:
 
         assert len(recorded) == 1
         assert recorded[0].actual_value == "DRAW"
+
+
+@pytest.mark.asyncio
+class TestGridResolution:
+    """(2026-08-06) football.correct_score's grid resolver — same direct-label-equality mechanics
+    as TestThreeWayResolution, but the real answer is one of 37 labels rather than 3. This is the
+    resolver football.correct_score never had before (its resolver_key was None from the market's
+    original addition), which was the reason its outcomes never resolved even before the Poisson
+    predictor removal."""
+
+    async def test_records_correct_scoreline(self, prediction_repo, market_repo, prediction_outcome_repo):
+        market = _market("football.correct_score", market_kind=MarketKind.CORRECT_SCORE)
+        await market_repo.upsert(market)
+        await prediction_repo.record(_prediction(market.id, value="2-1"))
+        service = OutcomeResolutionService(predictions=prediction_repo, markets=market_repo, outcomes=prediction_outcome_repo)
+
+        recorded = await service.resolve_for_fixture("fx-1", home_score=2, away_score=1, now=T0)
+
+        assert recorded[0].actual_value == "2-1"
+        assert recorded[0].error == 0.0
+
+    async def test_records_incorrect_scoreline(self, prediction_repo, market_repo, prediction_outcome_repo):
+        market = _market("football.correct_score", market_kind=MarketKind.CORRECT_SCORE)
+        await market_repo.upsert(market)
+        await prediction_repo.record(_prediction(market.id, value="1-0"))
+        service = OutcomeResolutionService(predictions=prediction_repo, markets=market_repo, outcomes=prediction_outcome_repo)
+
+        recorded = await service.resolve_for_fixture("fx-1", home_score=2, away_score=1, now=T0)
+
+        assert recorded[0].actual_value == "2-1"
+        assert recorded[0].error == 1.0
+
+    async def test_out_of_grid_score_resolves_to_other(self, prediction_repo, market_repo, prediction_outcome_repo):
+        market = _market("football.correct_score", market_kind=MarketKind.CORRECT_SCORE)
+        await market_repo.upsert(market)
+        await prediction_repo.record(_prediction(market.id, value="OTHER"))
+        service = OutcomeResolutionService(predictions=prediction_repo, markets=market_repo, outcomes=prediction_outcome_repo)
+
+        recorded = await service.resolve_for_fixture("fx-1", home_score=8, away_score=0, now=T0)
+
+        assert recorded[0].actual_value == "OTHER"
+        assert recorded[0].error == 0.0
+
+
+@pytest.mark.asyncio
+class TestReviewForFixture:
+    """The AI Review read path — real predicted-vs-actual per market, never guessed at."""
+
+    async def test_resolved_market_reports_correctness(self, prediction_repo, market_repo, prediction_outcome_repo):
+        market = _market("football.both_teams_to_score")
+        await market_repo.upsert(market)
+        await prediction_repo.record(_prediction(market.id, value="YES"))
+        service = OutcomeResolutionService(predictions=prediction_repo, markets=market_repo, outcomes=prediction_outcome_repo)
+        await service.resolve_for_fixture("fx-1", home_score=2, away_score=1, now=T0)
+
+        rows = await service.review_for_fixture("fx-1")
+
+        assert len(rows) == 1
+        assert rows[0].market_key == "football.both_teams_to_score"
+        assert rows[0].predicted_value == "YES"
+        assert rows[0].actual_value == "YES"
+        assert rows[0].is_correct is True
+        assert rows[0].evaluated_at == T0
+
+    async def test_unresolved_market_reports_none_rather_than_guessing(
+        self, prediction_repo, market_repo, prediction_outcome_repo
+    ):
+        market = _market("football.first_half_goals")  # no registered resolver
+        await market_repo.upsert(market)
+        await prediction_repo.record(_prediction(market.id, value="OVER"))
+        service = OutcomeResolutionService(predictions=prediction_repo, markets=market_repo, outcomes=prediction_outcome_repo)
+
+        rows = await service.review_for_fixture("fx-1")
+
+        assert len(rows) == 1
+        assert rows[0].actual_value is None
+        assert rows[0].is_correct is None
+        assert rows[0].evaluated_at is None
+
+    async def test_skips_draft_predictions(self, prediction_repo, market_repo, prediction_outcome_repo):
+        market = _market("football.both_teams_to_score")
+        await market_repo.upsert(market)
+        await prediction_repo.record(_prediction(market.id, value="YES", status=PredictionStatus.DRAFT))
+        service = OutcomeResolutionService(predictions=prediction_repo, markets=market_repo, outcomes=prediction_outcome_repo)
+
+        rows = await service.review_for_fixture("fx-1")
+
+        assert rows == []
+
+    async def test_only_reviews_the_given_fixture(self, prediction_repo, market_repo, prediction_outcome_repo):
+        market = _market("football.both_teams_to_score")
+        await market_repo.upsert(market)
+        await prediction_repo.record(_prediction(market.id, value="YES", subject_ref="fx-other"))
+        service = OutcomeResolutionService(predictions=prediction_repo, markets=market_repo, outcomes=prediction_outcome_repo)
+
+        rows = await service.review_for_fixture("fx-1")
+
+        assert rows == []

@@ -40,6 +40,14 @@ from modules.sports.ports.repositories import FixtureRepositoryPort, TeamStatist
 
 SYSTEM_REVIEWER = "prediction-platform"
 
+# These features only change when `compute_and_write` runs — once per fixture reconciliation
+# cycle for the entity involved, not continuously — so the registry default of 3600s (built for
+# live/streaming data) wrongly read a normal few-hours-to-a-day gap between reconciliation runs
+# as "completely stale," capping every prediction's confidence composite regardless of actual
+# data quality. 24h matches a conservative "needs at least a daily refresh" expectation without
+# claiming freshness the data doesn't have.
+ENGINEERED_FEATURE_TTL_SECONDS = 24 * 3600
+
 
 def _is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -72,6 +80,7 @@ class RollingTeamStatAverageCalculator:
                 data_type=FeatureDataType.FLOAT,
                 owner=SYSTEM_REVIEWER,
                 entity_type=EntityType.TEAM,
+                online_ttl_seconds=ENGINEERED_FEATURE_TTL_SECONDS,
             )
         except FeatureAlreadyRegisteredError:
             return
@@ -123,6 +132,7 @@ class FixtureFormDifferentialCalculator:
                 data_type=FeatureDataType.FLOAT,
                 owner=SYSTEM_REVIEWER,
                 entity_type=EntityType.FIXTURE,
+                online_ttl_seconds=ENGINEERED_FEATURE_TTL_SECONDS,
             )
         except FeatureAlreadyRegisteredError:
             return
@@ -187,6 +197,7 @@ class FixtureExpectedGoalsCalculator:
                     data_type=FeatureDataType.FLOAT,
                     owner=SYSTEM_REVIEWER,
                     entity_type=EntityType.FIXTURE,
+                    online_ttl_seconds=ENGINEERED_FEATURE_TTL_SECONDS,
                 )
             except FeatureAlreadyRegisteredError:
                 continue

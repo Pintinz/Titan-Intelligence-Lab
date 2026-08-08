@@ -225,7 +225,10 @@ returned lists, and a News Center detail page needs a stable per-article URL.
     "model_version": "1",
     "status": "published",
     "generated_at": "2026-07-26T10:00:00Z",
-    "data_freshness": "2026-07-26T10:00:00Z"
+    "data_freshness": "2026-07-26T10:00:00Z",
+    "probability_distribution": { "HOME": 0.62, "DRAW": 0.23, "AWAY": 0.15 },
+    "confidence_interval": null,
+    "expected_error": null
   },
   "meta": {},
   "error": null
@@ -233,7 +236,10 @@ returned lists, and a News Center detail page needs a stable per-article URL.
 ```
 
 Matches the mandatory fields in the constitution's Confidence Engine / Explainable AI sections
-— a prediction payload missing `confidence` or `explanation` is a contract violation. `risk_score`
+— a prediction payload missing `confidence` or `explanation` is a contract violation.
+`probability_distribution` carries the full outcome distribution for classification markets
+(empty/omitted for regression markets, which use `confidence_interval`/`expected_error` instead).
+`risk_score`
 from the original illustrative shape doesn't exist as a separate field — `1 - probability` (for
 the disfavored side) or `1 - composite confidence` serve that purpose today; a dedicated risk
 score is a documented future addition, not a silently dropped field.

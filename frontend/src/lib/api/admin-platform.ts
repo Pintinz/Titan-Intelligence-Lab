@@ -198,10 +198,21 @@ export const adminPlatformApi = {
       `/api/v1/admin/sync/${sportCode}/competitions/${competitionId}/upcoming-fixtures`,
       input,
     ),
+  triggerCompletedFixturesSync: (
+    sportCode: string,
+    competitionId: string,
+    input: { season_label: string; season_id: string; force?: boolean },
+  ) =>
+    api.post<SyncRunSummaryDto | null>(
+      `/api/v1/admin/sync/${sportCode}/competitions/${competitionId}/completed-fixtures`,
+      input,
+    ),
 
-  // -- Redis / KG ---------------------------------------------------------------------------------
+  // -- Redis ----------------------------------------------------------------------------------------
   redisHealth: () => api.get<{ healthy: boolean; latency_ms: number | null; error: string | null }>('/api/v1/admin/monitoring/redis'),
-  kgNode: (nodeType: string, entityRef: string) => api.get<Record<string, unknown>>(`/api/v1/admin/graph/nodes/${nodeType}/${entityRef}`),
+  // KG single-entity lookup moved to graphApi.getEntity() — the admin-only duplicate endpoint
+  // this called was removed (see backend/apps/api/main.py); that endpoint now also returns
+  // edges_out/edges_in, so nothing was lost.
 
   // -- News ingestion -------------------------------------------------------------------------------
   registerNewsSource: (input: { name: string; url: string; source_type?: string; is_official?: boolean }) =>

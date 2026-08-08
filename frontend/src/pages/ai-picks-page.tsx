@@ -1,16 +1,15 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery, useQueries } from '@tanstack/react-query'
 import { Sparkles } from 'lucide-react'
 import { predictionsApi } from '@/lib/api/predictions'
 import { sportsApi } from '@/lib/api/sports'
 import { SPORT_SLUGS } from '@/lib/hooks/use-sport'
 import { ErrorState } from '@/components/ui/error-state'
-import { InfinityLabel } from '@/components/infinity/primitives/panel'
 import { InfinitySkeleton } from '@/components/infinity/primitives/skeleton'
 import { InfinityEmptyState } from '@/components/infinity/primitives/empty-state'
-import { InfinityButton } from '@/components/infinity/primitives/button'
-import { InfinityPredictionCard } from '@/components/infinity/cards/prediction-card'
-import type { PredictionPickDto } from '@/lib/api/types'
+import { AiPickCard, AI_PICK_CONFIDENCE_FLOOR } from '@/components/command-deck/ai-picks/ai-pick-card'
+import { dedupeByFixture } from '@/lib/predictions/dedupe-by-fixture'
+import type { PredictionPickDto, FixtureSummaryDto } from '@/lib/api/types'
 import type { SportCode } from '@/lib/api/sports'
 
 const SPORT_FILTERS: Array<{ label: string; code: SportCode | null }> = [
@@ -18,102 +17,104 @@ const SPORT_FILTERS: Array<{ label: string; code: SportCode | null }> = [
   ...SPORT_SLUGS.map((s) => ({ label: s.label, code: s.code })),
 ]
 
+const DISPLAY_LIMIT = 24
+
+function sportSlugFor(code: string): string {
+  return SPORT_SLUGS.find((s) => s.code === code)?.slug ?? code
+}
+
 export default function AiPicksPage() {
   const [sportCode, setSportCode] = useState<SportCode | null>(null)
 
   const query = useQuery({
     queryKey: ['predictions', 'picks', sportCode],
-    queryFn: () => predictionsApi.picks({ sport_code: sportCode ?? undefined, limit: 30 }),
+    queryFn: () => predictionsApi.picks({ sport_code: sportCode ?? undefined, limit: 100 }),
   })
 
+  const topPicks = useMemo(
+    () =>
+      dedupeByFixture(query.data ?? [])
+        .filter((pick) => pick.confidence_composite >= AI_PICK_CONFIDENCE_FLOOR)
+        .slice(0, DISPLAY_LIMIT),
+    [query.data]
+  )
+
+  const fixtureQueries = useQueries({
+    queries: topPicks.map((pick) => ({
+      queryKey: ['sports', 'fixtures', pick.subject_ref],
+      queryFn: () => sportsApi.getFixture(pick.subject_ref),
+      retry: false,
+      staleTime: 60_000,
+    })),
+  })
+
+  const cards = topPicks
+    .map((pick, i) => ({ pick, fixture: fixtureQueries[i]?.data }))
+    .filter((row): row is { pick: PredictionPickDto; fixture: FixtureSummaryDto } => !!row.fixture)
+
   return (
-    <div className="space-y-6">
+    <div className="command-deck space-y-6 rounded-[var(--cd-radius-xl)]" style={{ backgroundColor: 'var(--cd-bg)', padding: '1.5rem' }}>
       <div>
-        <InfinityLabel tone="var(--infinity-domain-predictions)">AI Picks</InfinityLabel>
-        <h2 className="mt-1 font-infinity-display text-lg font-semibold text-infinity-text-primary">
-          Today's highest-confidence predictions
+        <span className="font-[var(--cd-font-telemetry)] text-[11px] font-medium uppercase tracking-[0.08em]" style={{ color: 'var(--cd-accent)' }}>
+          AI Picks
+        </span>
+        <h2 className="mt-1 font-[var(--cd-font-display)] text-lg font-semibold" style={{ color: 'var(--cd-text-primary)' }}>
+          TitanIQ's strongest daily recommendations
         </h2>
-        <p className="mt-1 font-infinity-body text-[12px] text-infinity-text-secondary">
-          Every pick here is a real, already-published prediction — ranked by confidence, never fabricated.
+        <p className="mt-1 font-[var(--cd-font-body)] text-[12px]" style={{ color: 'var(--cd-text-secondary)' }}>
+          One card per match — TitanIQ's highest-confidence published prediction, ranked by confidence.
         </p>
       </div>
 
-      <div className="flex flex-wrap gap-2">
-        {SPORT_FILTERS.map((filter) => (
-          <InfinityButton
-            key={filter.label}
-            type="button"
-            size="sm"
-            variant={sportCode === filter.code ? 'secondary' : 'ghost'}
-            onClick={() => setSportCode(filter.code)}
-          >
-            {filter.label}
-          </InfinityButton>
-        ))}
+      <div className="flex flex-wrap gap-1.5">
+        {SPORT_FILTERS.map((filter) => {
+          const active = sportCode === filter.code
+          return (
+            <button
+              key={filter.label}
+              type="button"
+              onClick={() => setSportCode(filter.code)}
+              className="rounded-full border px-3 py-1.5 font-[var(--cd-font-body)] text-[12px] font-medium transition-colors"
+              style={{
+                borderColor: active ? 'var(--cd-accent-strong)' : 'var(--cd-border-default)',
+                backgroundColor: active ? 'var(--cd-accent-muted)' : 'transparent',
+                color: active ? 'var(--cd-accent)' : 'var(--cd-text-secondary)',
+              }}
+            >
+              {filter.label}
+            </button>
+          )
+        })}
       </div>
 
-      {query.isPending && (
+      {(query.isPending || (topPicks.length > 0 && cards.length === 0 && fixtureQueries.some((q) => q.isPending))) && (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 6 }).map((_, i) => (
-            <InfinitySkeleton key={i} className="h-28" />
+            <InfinitySkeleton key={i} className="h-72" />
           ))}
         </div>
       )}
 
       {query.isError && <ErrorState error={query.error} onRetry={() => void query.refetch()} />}
 
-      {query.data && query.data.length === 0 && (
+      {query.data && topPicks.length === 0 && (
         <InfinityEmptyState
           icon={Sparkles}
           title="No AI Picks yet"
-          description="Picks appear here once TitanIQ has published high-confidence predictions for upcoming matches."
+          description="Picks appear here once TitanIQ has published a prediction with at least moderate confidence for an upcoming match."
         />
       )}
 
-      {query.data && query.data.length > 0 && (
+      {cards.length > 0 && (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {query.data.map((pick) => (
-            <PickCard key={pick.id} pick={pick} />
-          ))}
+          {cards
+            .slice()
+            .sort((a, b) => b.pick.confidence_composite - a.pick.confidence_composite)
+            .map(({ pick, fixture }) => (
+              <AiPickCard key={pick.id} pick={pick} fixture={fixture} sportSlug={sportSlugFor(pick.sport_code)} />
+            ))}
         </div>
       )}
-    </div>
-  )
-}
-
-function PickCard({ pick }: { pick: PredictionPickDto }) {
-  const fixtureQuery = useQueries({
-    queries: [
-      {
-        queryKey: ['sports', 'fixtures', pick.subject_ref],
-        queryFn: () => sportsApi.getFixture(pick.subject_ref),
-        retry: false,
-      },
-    ],
-  })[0]
-
-  const fixture = fixtureQuery.data
-
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between gap-2">
-        <span className="font-infinity-mono text-[10px] uppercase tracking-[0.06em] text-infinity-text-muted">
-          {pick.sport_code.replace('_', ' ')}
-        </span>
-        {fixture && (
-          <span className="truncate font-infinity-body text-[11px] text-infinity-text-secondary">
-            {fixture.home_team?.short_name ?? fixture.home_team?.name} vs{' '}
-            {fixture.away_team?.short_name ?? fixture.away_team?.name}
-          </span>
-        )}
-      </div>
-      <InfinityPredictionCard
-        market={pick.market_name}
-        selection={String(pick.value)}
-        probability={pick.probability}
-        confidence={pick.confidence_composite}
-        evidenceCount={pick.evidence_count}
-      />
     </div>
   )
 }

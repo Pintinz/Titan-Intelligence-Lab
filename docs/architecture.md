@@ -766,4 +766,9 @@ These are targets to design against from Milestone 1, not just aspirations for l
 Detailed schema → [database_schema.md](database_schema.md). Endpoint-level API contracts →
 [api_specification.md](api_specification.md). Feature/model lifecycle detail →
 [feature_catalog.md](feature_catalog.md) and the AI sections of the constitution. Milestone
-sequencing → [roadmap.md](roadmap.md).
+sequencing → [roadmap.md](roadmap.md). The end-to-end narrative of one prediction request, ingestion
+to model improvement → [ai_intelligence_flow.md](ai_intelligence_flow.md) (request-scoped) and
+[intelligence_lifecycle.md](intelligence_lifecycle.md) (system-over-time). Gemini's real,
+specific role (narration only — never scoring) → [gemini_intelligence_specification.md](gemini_intelligence_specification.md).
+Per-page frontend reference → [frontend_intelligence_architecture.md](frontend_intelligence_architecture.md).
+Product-level view of how AI surfaces across the app → [ai_product_architecture.md](ai_product_architecture.md).

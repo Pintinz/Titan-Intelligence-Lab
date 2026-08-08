@@ -6,7 +6,6 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { SportShell } from '@/components/layout/sport-shell'
 import { SPORT_SLUGS } from '@/lib/hooks/use-sport'
 import SportHubPage from './sport-hub-page'
-import MatchListPage from './match-list-page'
 import PredictionLabPage from './prediction-lab-page'
 import type { FixtureSummaryDto, PredictionDto, PredictionMarketDto } from '@/lib/api/types'
 
@@ -81,6 +80,9 @@ const PREDICTION: PredictionDto = {
   status: 'draft',
   generated_at: new Date().toISOString(),
   data_freshness: null,
+  probability_distribution: { Yes: 0.81, No: 0.19 },
+  confidence_interval: null,
+  expected_error: null,
 }
 
 function renderAtSport(path: string, element: React.ReactNode) {
@@ -109,7 +111,9 @@ describe('SportShell', () => {
   it('renders the sub-nav for a known sport', () => {
     renderAtSport('/app/football', <div />)
     expect(screen.getByText('Football')).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Prediction Laboratory' })).toBeInTheDocument()
+    // Prediction Laboratory/News/Community were deliberately pulled from the tab bar
+    // (sport-shell.tsx) — only Live/Matches/Teams/Players/Competitions carry primary nav weight.
+    expect(screen.getByRole('link', { name: 'Matches' })).toBeInTheDocument()
   })
 })
 
@@ -125,17 +129,6 @@ describe('SportHubPage', () => {
     vi.mocked(sportsApi.listFixtures).mockResolvedValue([])
     renderAtSport('/app/football', <SportHubPage />)
     await waitFor(() => expect(screen.getByText('No fixtures under coverage')).toBeInTheDocument())
-  })
-})
-
-describe('MatchListPage', () => {
-  it('renders an error state when the fixture query fails, and recovers on retry', async () => {
-    vi.mocked(sportsApi.listFixtures).mockRejectedValueOnce(new Error('network down')).mockResolvedValueOnce([FIXTURE])
-    renderAtSport('/app/football/matches', <MatchListPage />)
-    await waitFor(() => expect(screen.getByText("Couldn't load this")).toBeInTheDocument())
-    await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
-    await waitFor(() => expect(screen.getByText('Arsenal')).toBeInTheDocument())
-    expect(screen.getByText('Chelsea')).toBeInTheDocument()
   })
 })
 

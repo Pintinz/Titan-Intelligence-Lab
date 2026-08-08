@@ -70,10 +70,17 @@ class DataValidationEngine:
         if not record.name.strip():
             issues.append("player name is required")
         if record.date_of_birth is not None:
-            if record.date_of_birth > now:
+            # Providers (e.g. api-football's date-only "1994-09-08") parse to a naive datetime via
+            # `datetime.fromisoformat` — same SQLite/naive-datetime class of bug documented as
+            # `_ensure_aware` in sync_orchestrator.py/data_quality_engine.py (docs/decisions.md
+            # ADR-007). Assumed UTC and stamped to match `now`'s awareness before comparing.
+            birth = record.date_of_birth
+            if birth.tzinfo is None and now.tzinfo is not None:
+                birth = birth.replace(tzinfo=now.tzinfo)
+            if birth > now:
                 issues.append(f"date_of_birth {record.date_of_birth} is in the future")
-            elif record.date_of_birth.year < MIN_REASONABLE_BIRTH_YEAR:
-                issues.append(f"date_of_birth year {record.date_of_birth.year} predates {MIN_REASONABLE_BIRTH_YEAR}")
+            elif birth.year < MIN_REASONABLE_BIRTH_YEAR:
+                issues.append(f"date_of_birth year {birth.year} predates {MIN_REASONABLE_BIRTH_YEAR}")
         return ValidationResult.failed(*issues) if issues else ValidationResult.ok()
 
     def validate_fixture(self, record: ProviderFixtureRecord, now: datetime) -> ValidationResult:

@@ -186,6 +186,49 @@ def test_generate_prediction_returns_published_prediction(client, db_session_fac
     assert data["explanation"]["ai_explanation"]
 
 
+async def _seed_production_market_without_champion(db_session_factory, market_key: str) -> MarketId:
+    """A PRODUCTION market with genuinely no CHAMPION model — the "not yet trained" state the ML-
+    architecture consolidation (2026-08-04) leaves `football.correct_score` and the eleven
+    Over/Under-style markets in, since their old Poisson formula fallback was removed."""
+    async with db_session_factory() as session:
+        markets = SqlAlchemyMarketRepository(session=session)
+        market = MarketDefinition(
+            id=MarketId(uuid4()),
+            market_key=market_key,
+            sport_code="football",
+            name="Test Not-Yet-Trained Market",
+            category="match_outcome",
+            market_kind=MarketKind.CORRECT_SCORE,
+            target_type=TargetType.CLASSIFICATION,
+            status=MarketStatus.PRODUCTION,
+            confidence_threshold=0.0,
+        )
+        await markets.upsert(market)
+        await session.commit()
+        return market.id
+
+
+def test_generate_prediction_for_untrained_market_returns_insufficient_data(client, db_session_factory):
+    headers = _auth_headers(client)
+    import asyncio
+
+    asyncio.run(_seed_production_market_without_champion(db_session_factory, "football.not_yet_trained_test_market"))
+
+    response = client.post(
+        "/api/v1/predictions/generate",
+        json={
+            "market_key": "football.not_yet_trained_test_market",
+            "entity_type": "fixture",
+            "entity_id": "fixture-1",
+            "subject_ref": "fixture-1",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 409
+    assert "insufficient historical data" in response.json()["detail"].lower()
+
+
 def test_generate_prediction_unknown_market_returns_404(client):
     headers = _auth_headers(client)
 

@@ -221,6 +221,19 @@ class SqlAlchemyFixtureRepository:
         result = await self.session.execute(stmt)
         return [mappers.fixture_to_domain(row) for row in result.scalars().all()]
 
+    async def list_upcoming_by_team(self, team_id: TeamId, after: datetime, limit: int = 10) -> list[Fixture]:
+        stmt = (
+            select(FixtureModel)
+            .where(
+                or_(FixtureModel.home_team_id == team_id.value, FixtureModel.away_team_id == team_id.value),
+                FixtureModel.scheduled_at >= after,
+            )
+            .order_by(FixtureModel.scheduled_at.asc())
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return [mappers.fixture_to_domain(row) for row in result.scalars().all()]
+
     async def find_by_teams_and_date_window(
         self, home_team_id: TeamId, away_team_id: TeamId, date_from: datetime, date_to: datetime
     ) -> list[Fixture]:

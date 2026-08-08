@@ -22,8 +22,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.auth_deps import get_current_user
-from apps.api.composition import get_session
+from apps.api.composition import build_monitoring_service, get_session
 from modules.identity.domain.entities import User
+from modules.ingestion.domain.value_objects import SyncStatus
 from modules.sports.domain.entities import Competition, Fixture, Player, Season, Team
 from modules.sports.domain.value_objects import (
     CompetitionId,
@@ -37,11 +38,13 @@ from modules.sports.domain.value_objects import (
 from modules.sports.infrastructure.persistence.repositories import (
     SqlAlchemyCompetitionRepository,
     SqlAlchemyFixtureRepository,
+    SqlAlchemyMatchRepository,
     SqlAlchemyPlayerRepository,
     SqlAlchemySeasonRepository,
     SqlAlchemySportRepository,
     SqlAlchemyStandingRepository,
     SqlAlchemyTeamRepository,
+    SqlAlchemyTeamStatisticsRepository,
     SqlAlchemyVenueRepository,
 )
 
@@ -315,6 +318,7 @@ async def get_team_players(team_id: str, session: AsyncSession = Depends(get_ses
 async def get_team_fixtures(
     team_id: str,
     limit: int = Query(default=10, ge=1, le=100),
+    when: str = Query(default="recent", pattern="^(recent|upcoming)$"),
     session: AsyncSession = Depends(get_session),
     _user: User = Depends(get_current_user),
 ):
@@ -322,7 +326,12 @@ async def get_team_fixtures(
     team = await SqlAlchemyTeamRepository(session=session).get(tid)
     if team is None:
         raise HTTPException(status_code=404, detail="team not found")
-    fixtures = await SqlAlchemyFixtureRepository(session=session).list_recent_by_team(tid, _now(), limit=limit)
+    fixture_repo = SqlAlchemyFixtureRepository(session=session)
+    fixtures = (
+        await fixture_repo.list_recent_by_team(tid, _now(), limit=limit)
+        if when == "recent"
+        else await fixture_repo.list_upcoming_by_team(tid, _now(), limit=limit)
+    )
 
     competitions = SqlAlchemyCompetitionRepository(session=session)
     seasons = SqlAlchemySeasonRepository(session=session)
@@ -332,6 +341,50 @@ async def get_team_fixtures(
         competition = await competitions.get(season.competition_id) if season else None
         data.append(await _serialize_fixture(session, fixture, competition))
     return envelope(data, meta={"count": len(data)})
+
+
+_TEAM_STATISTIC_KEYS = (
+    "possession_pct",
+    "shots_total",
+    "shots_on_target",
+    "corners",
+    "fouls",
+    "cards_yellow",
+    "cards_red",
+)
+
+
+@router.get("/teams/{team_id}/statistics")
+async def get_team_statistics(
+    team_id: str,
+    limit: int = Query(default=20, ge=1, le=50),
+    session: AsyncSession = Depends(get_session),
+    _user: User = Depends(get_current_user),
+):
+    """Averages real per-match `TeamStatistics.stat_set` rows (`list_recent_by_team`, already
+    populated by the API-Football stat sync — see composition.py) over the team's most recent
+    matches. Never fabricated: a key with zero recorded samples across the window comes back
+    `null`, and `sample_size` always reports how many matches actually had *any* stats recorded,
+    so the frontend can show honest coverage instead of implying a full-season average."""
+    tid = TeamId(_parse_uuid(team_id, "team_id"))
+    team = await SqlAlchemyTeamRepository(session=session).get(tid)
+    if team is None:
+        raise HTTPException(status_code=404, detail="team not found")
+
+    rows = await SqlAlchemyTeamStatisticsRepository(session=session).list_recent_by_team(tid, _now(), limit=limit)
+
+    sums: dict[str, float] = {key: 0.0 for key in _TEAM_STATISTIC_KEYS}
+    counts: dict[str, int] = {key: 0 for key in _TEAM_STATISTIC_KEYS}
+    for row in rows:
+        for key in _TEAM_STATISTIC_KEYS:
+            value = row.stat_set.get(key)
+            if value is None:
+                continue
+            sums[key] += float(value)
+            counts[key] += 1
+
+    averages = {key: (sums[key] / counts[key] if counts[key] > 0 else None) for key in _TEAM_STATISTIC_KEYS}
+    return envelope({"sample_size": len(rows), **averages})
 
 
 # -- Players ------------------------------------------------------------------------------------
@@ -379,6 +432,25 @@ async def get_fixture(fixture_id: str, session: AsyncSession = Depends(get_sessi
     return envelope(await _serialize_fixture(session, fixture, competition))
 
 
+@router.get("/fixtures/{fixture_id}/statistics")
+async def get_fixture_statistics(
+    fixture_id: str, session: AsyncSession = Depends(get_session), _user: User = Depends(get_current_user),
+):
+    """Real per-fixture team stats (Milestone 9.3 "AI Match Snapshot") — genuinely different from
+    `/teams/{id}/statistics` above, which is a rolling-window average across recent matches. This
+    reads the exact `TeamStatistics` row(s) recorded for one specific completed match, via the
+    `SqlAlchemyMatchRepository.get_by_fixture` -> `SqlAlchemyTeamStatisticsRepository.list_by_match`
+    pair (both pre-existing, never previously wired to a route). Coverage is honestly sparse today
+    (the sync job isn't on the Celery beat schedule yet) — a fixture with no `Match` row yet, or a
+    `Match` with zero synced stat rows, both return an empty list, never a fabricated stat."""
+    fid = _parse_uuid(fixture_id, "fixture_id")
+    match = await SqlAlchemyMatchRepository(session=session).get_by_fixture(FixtureId(fid))
+    if match is None:
+        return envelope(data=[])
+    stats = await SqlAlchemyTeamStatisticsRepository(session=session).list_by_match(match.id)
+    return envelope(data=[{"team_id": str(s.team_id.value), "stats": s.stat_set} for s in stats])
+
+
 @router.get("/{sport_code}/fixtures")
 async def list_sport_fixtures(
     sport_code: str,
@@ -410,14 +482,17 @@ async def list_sport_fixtures(
     else:
         competitions = await competitions_repo.list_by_sport(sport.id)
 
+    # Every season across a competition's history, not just the "current" one — this schema has
+    # no authoritative season-closed flag (dev data even has every season marked ACTIVE), so
+    # scoping to one picked season would silently hide real completed fixtures that live in an
+    # older season. The fixture's own `status`/`scheduled_at` are the real source of truth for
+    # filtering below, not which season it happens to belong to.
     all_fixtures: list[tuple[Fixture, Competition]] = []
     for competition in competitions:
         seasons = await seasons_repo.list_by_competition(competition.id)
-        season = _pick_current_season(seasons)
-        if season is None:
-            continue
-        fixtures = await fixtures_repo.list_by_season(season.id)
-        all_fixtures.extend((f, competition) for f in fixtures)
+        for season in seasons:
+            fixtures = await fixtures_repo.list_by_season(season.id)
+            all_fixtures.extend((f, competition) for f in fixtures)
 
     parsed_status = _parse_fixture_status(status) if status is not None else None
     if parsed_status is not None:
@@ -454,3 +529,19 @@ async def list_sport_fixtures(
         list(data),
         meta={"count": len(data), "total": total, "offset": offset, "limit": limit, "has_more": offset + limit < total},
     )
+
+
+@router.get("/sync-status")
+async def get_platform_sync_status(
+    session: AsyncSession = Depends(get_session), _user: User = Depends(get_current_user),
+):
+    """A regular-user-safe sliver of `MonitoringService.sync_status` (Milestone 5, otherwise
+    admin-only under `/api/v1/admin/sync/status`): just the most recent successful-or-partial
+    provider sync timestamp, with no per-run error messages or operational detail. Exists because
+    Mission Control's Hero needs an honest "last synced" reading rather than deriving one from
+    unrelated content timestamps (e.g. a fixture's future kickoff time)."""
+    monitoring = build_monitoring_service(session)
+    runs = await monitoring.sync_status(limit=50)
+    completed = [r for r in runs if r.status in (SyncStatus.SUCCEEDED.value, SyncStatus.PARTIAL.value)]
+    last_synced_at = max((r.started_at for r in completed), default=None)
+    return envelope(data={"last_synced_at": last_synced_at.isoformat() if last_synced_at else None})

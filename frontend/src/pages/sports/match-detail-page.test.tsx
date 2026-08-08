@@ -4,22 +4,19 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import MatchDetailPage from './match-detail-page'
-import { ApiError } from '@/lib/api/client'
-import type { FixtureSummaryDto, KgNodeDto, PredictionDto, PredictionMarketDto } from '@/lib/api/types'
+import type { FixtureSummaryDto, PredictionDto, PredictionMarketDto } from '@/lib/api/types'
 
 vi.mock('@/lib/api/sports', async () => {
   const actual = await vi.importActual<typeof import('@/lib/api/sports')>('@/lib/api/sports')
-  return { ...actual, sportsApi: { getFixture: vi.fn(), teamFixtures: vi.fn() } }
+  return { ...actual, sportsApi: { getFixture: vi.fn(), teamFixtures: vi.fn(), fixtureStatistics: vi.fn() } }
 })
 vi.mock('@/lib/api/markets', () => ({ marketsApi: { list: vi.fn() } }))
 vi.mock('@/lib/api/predictions', () => ({ predictionsApi: { generate: vi.fn() } }))
-vi.mock('@/lib/api/graph', () => ({ graphApi: { getEntity: vi.fn(), context: vi.fn() } }))
 vi.mock('@/lib/hooks/use-realtime-invalidate', () => ({ useRealtimeInvalidate: vi.fn() }))
 
 const { sportsApi } = await import('@/lib/api/sports')
 const { marketsApi } = await import('@/lib/api/markets')
 const { predictionsApi } = await import('@/lib/api/predictions')
-const { graphApi } = await import('@/lib/api/graph')
 
 const FIXTURE: FixtureSummaryDto = {
   id: 'fx-1',
@@ -40,9 +37,11 @@ const RELATED_FIXTURE: FixtureSummaryDto = {
   home_team: { id: 't1', name: 'Arsenal', short_name: 'ARS' },
   away_team: { id: 't3', name: 'Fulham', short_name: 'FUL' },
   venue_name: 'Emirates Stadium',
-  scheduled_at: new Date(Date.now() + 7 * 24 * 3600_000).toISOString(),
-  status: 'scheduled',
-  final_state: null,
+  // A real recent-form entry is a completed match with a real score — Recent Form now renders
+  // only fixtures with a real recorded result (never a fabricated 0-0 for a scoreless fixture).
+  scheduled_at: new Date(Date.now() - 7 * 24 * 3600_000).toISOString(),
+  status: 'completed',
+  final_state: { home: 2, away: 1 },
 }
 
 const MARKET: PredictionMarketDto = {
@@ -93,17 +92,9 @@ const PREDICTION: PredictionDto = {
   status: 'draft',
   generated_at: new Date().toISOString(),
   data_freshness: null,
-}
-
-const KG_NODE: KgNodeDto = {
-  id: 'node-1',
-  node_type: 'match',
-  entity_ref: 'fx-1',
-  attributes: {},
-  aliases: [],
-  status: 'active',
-  confidence: 0.92,
-  version: 1,
+  probability_distribution: { Yes: 0.81, No: 0.19 },
+  confidence_interval: null,
+  expected_error: null,
 }
 
 function renderPage(matchId = 'fx-1') {
@@ -125,7 +116,6 @@ describe('MatchDetailPage', () => {
     vi.mocked(sportsApi.teamFixtures).mockResolvedValue([])
     vi.mocked(marketsApi.list).mockResolvedValue([MARKET])
     vi.mocked(predictionsApi.generate).mockResolvedValue(PREDICTION)
-    vi.mocked(graphApi.getEntity).mockRejectedValue(new ApiError(404, 'entity not found'))
 
     renderPage()
 
@@ -134,7 +124,7 @@ describe('MatchDetailPage', () => {
     expect(screen.getByText('Emirates Stadium')).toBeInTheDocument()
 
     await userEvent.click(await screen.findByText('Both Teams to Score'))
-    await userEvent.click(await screen.findByRole('button', { name: 'Generate Intelligence' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Generate Intelligence — Both Teams to Score' }))
 
     await waitFor(() => expect(screen.getByText('Both attacks are in strong scoring form.')).toBeInTheDocument())
     expect(predictionsApi.generate).toHaveBeenCalledWith({
@@ -144,26 +134,15 @@ describe('MatchDetailPage', () => {
       subject_ref: 'fx-1',
     })
     expect(screen.getByText('Form Shots On Target (Last 5)', { exact: false })).toBeInTheDocument()
-
-    expect(await screen.findByText('Still building context for this fixture')).toBeInTheDocument()
   })
 
-  it('splits recent form into home/away columns excluding the current fixture, and shows a real match context summary', async () => {
+  it('splits recent form into home/away columns excluding the current fixture', async () => {
     vi.mocked(sportsApi.getFixture).mockResolvedValue(FIXTURE)
     vi.mocked(sportsApi.teamFixtures).mockImplementation((teamId: string) =>
       Promise.resolve(teamId === 't1' ? [FIXTURE, RELATED_FIXTURE] : []),
     )
+    vi.mocked(sportsApi.fixtureStatistics).mockResolvedValue([])
     vi.mocked(marketsApi.list).mockResolvedValue([])
-    vi.mocked(graphApi.getEntity).mockResolvedValue(KG_NODE)
-    // Real shape of `/api/v1/graph/context/{node_id}` (`_serialize_context`,
-    // graph_router.py) — {subject, neighborhood, related_by_type, generated_at}, not
-    // {node, related, summary}.
-    vi.mocked(graphApi.context).mockResolvedValue({
-      subject: KG_NODE,
-      neighborhood: { nodes: [], edges: [] },
-      related_by_type: { team: [{ ...KG_NODE, id: 'node-2', node_type: 'team', entity_ref: 't1' }] },
-      generated_at: new Date().toISOString(),
-    })
 
     renderPage()
 
@@ -175,9 +154,5 @@ describe('MatchDetailPage', () => {
     // Away form (Chelsea, t2) is mocked with [] — its own empty state must render, not a
     // duplicate of the current match card.
     expect(await screen.findByText('No recent matches yet')).toBeInTheDocument()
-
-    // Match context never renders a raw entity_ref (e.g. "t1") — only a plain-language count.
-    expect(await screen.findByText('1 team', { exact: false })).toBeInTheDocument()
-    expect(screen.queryByText('t1')).not.toBeInTheDocument()
   })
 })

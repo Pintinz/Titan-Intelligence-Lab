@@ -47,13 +47,23 @@ first two runs, before this fix) was written under an unreadable key — invisib
 never raising an error, just silently never resolving. Both loops now normalize to the dashed
 form before writing.
 
-A fifth fix (2026-08-02): `football.correct_score` used `WeightedLinearPredictor`, whose value is
-a raw regression number — meaningless for a scoreline market. Now served by `PoissonScorePredictor`
-(independent-Poisson scoreline model) over two new real features,
+A fifth fix (2026-08-02): `football.correct_score`'s two real expected-goals features,
 `football.fixture.expected_home_goals`/`expected_away_goals` (`FixtureExpectedGoalsCalculator`,
 each side's own average goals scored across its last 10 completed matches, from real
-`Fixture.home_score`/`away_score` history). This script backfills those two features for every
-existing football fixture the same way it backfills the odds/differential features above.
+`Fixture.home_score`/`away_score` history), get backfilled for every existing football fixture the
+same way this script backfills the odds/differential features above — a trained model for this
+market will need them the moment enough outcome history exists to train on.
+
+ML-architecture consolidation (2026-08-04): `NOT_YET_TRAINED_MARKET_KEYS` (`football.correct_score`
+plus the eleven Over/Under-style markets, formerly served by Poisson formula predictors now
+deleted as legacy statistical engines) deliberately get NO placeholder CHAMPION here — leaving
+them with no CHAMPION at all is what makes `PredictionContextBuilder.build()` raise
+`NoChampionModelError`, which the API surfaces as an honest "insufficient historical data"
+response instead of silently substituting a formula guess. Every OTHER market keeps the existing
+placeholder-CHAMPION-then-generic-formula-predictor behavior unchanged (v1 posture, unaffected by
+this consolidation). This script is idempotent: re-running it also retires any placeholder
+CHAMPION a prior run already created for a now-not-yet-trained market, so existing dev databases
+converge to the new state without a separate migration.
 
 Usage: TITANIQ_DB_URL=sqlite+aiosqlite:///./dev.db python scripts/seed_football_markets.py
 """
@@ -87,10 +97,14 @@ STALE_TEAM_KEYED_FEATURE = "football.team.form_shots_on_target_last5"
 
 # 2026-08-03 audit fix: these eleven markets used to require the generic fixture-form stat diffs
 # (same set as most other football markets) — now they require real expected-goals features
-# instead (poisson_goals_threshold_predictor.py). Re-seeding only ever *adds* new mappings, never
-# removes one that's no longer in a market's `required_features`, so the six old mappings are
-# deleted here first — otherwise they'd linger as dead (though harmless) weight in the resolved
-# feature snapshot, the same class of cleanup `STALE_TEAM_KEYED_FEATURE` above already does.
+# instead. Re-seeding only ever *adds* new mappings, never removes one that's no longer in a
+# market's `required_features`, so the six old mappings are deleted here first — otherwise they'd
+# linger as dead (though harmless) weight in the resolved feature snapshot, the same class of
+# cleanup `STALE_TEAM_KEYED_FEATURE` above already does.
+#
+# 2026-08-04 ML-architecture consolidation: these eleven plus `football.correct_score` are now
+# also `NOT_YET_TRAINED_MARKET_KEYS` — see module docstring — deliberately left with no CHAMPION
+# model until a real trained one exists.
 POISSON_THRESHOLD_MARKET_KEYS = (
     "football.total_goals_over_under",
     "football.total_goals_over_under_0_5",
@@ -104,6 +118,7 @@ POISSON_THRESHOLD_MARKET_KEYS = (
     "football.home_win_to_nil",
     "football.away_win_to_nil",
 )
+NOT_YET_TRAINED_MARKET_KEYS = POISSON_THRESHOLD_MARKET_KEYS + ("football.correct_score",)
 STALE_STAT_DIFF_FEATURES = (
     "football.fixture.form_shots_on_target_diff_last5",
     "football.fixture.form_possession_pct_diff_last5",
@@ -144,11 +159,24 @@ async def main() -> None:
         model_registry = build_model_registry_service(session)
 
         seeded_champions = 0
+        retired_placeholders = 0
         for spec in MARKETS:
             market = await markets_repo.get_by_key(spec["market_key"])
             if market is None or market.status is not MarketStatus.PRODUCTION:
                 continue
-            if await model_registry.models.get_champion(market.id) is not None:
+
+            existing_champion = await model_registry.models.get_champion(market.id)
+            if spec["market_key"] in NOT_YET_TRAINED_MARKET_KEYS:
+                # Leaving these with no CHAMPION at all is what makes generation raise
+                # NoChampionModelError -> the API's honest "insufficient historical data"
+                # response. Retire a stale placeholder a prior run of this script already
+                # created, so re-running converges an existing dev DB to the new state.
+                if existing_champion is not None and existing_champion.algorithm == PLACEHOLDER_ALGORITHM:
+                    await model_registry.retire(existing_champion.id, now)
+                    retired_placeholders += 1
+                continue
+
+            if existing_champion is not None:
                 continue
 
             model = await model_registry.register(
@@ -235,12 +263,13 @@ async def main() -> None:
         await session.commit()
         print(
             f"Seeded football's real production market catalog ({len(MARKETS)} markets), "
-            f"{seeded_champions} placeholder champions, removed {deleted.rowcount} stale feature "
-            f"mappings + {deleted_threshold_mappings.rowcount} stale stat-diff mappings from the "
-            f"eleven Poisson-threshold markets, backfilled the form differential for "
-            f"{backfilled}/{len(rows)} fixtures, backfilled odds-derived features for "
-            f"{odds_backfilled}/{len(odds_rows)} fixtures, and backfilled expected-goals features "
-            f"for {expected_goals_backfilled}/{len(rows)} fixtures."
+            f"{seeded_champions} placeholder champions, retired {retired_placeholders} stale "
+            f"placeholder champions from the {len(NOT_YET_TRAINED_MARKET_KEYS)} not-yet-trained "
+            f"markets, removed {deleted.rowcount} stale feature mappings + "
+            f"{deleted_threshold_mappings.rowcount} stale stat-diff mappings, backfilled the form "
+            f"differential for {backfilled}/{len(rows)} fixtures, backfilled odds-derived features "
+            f"for {odds_backfilled}/{len(odds_rows)} fixtures, and backfilled expected-goals "
+            f"features for {expected_goals_backfilled}/{len(rows)} fixtures."
         )
 
 

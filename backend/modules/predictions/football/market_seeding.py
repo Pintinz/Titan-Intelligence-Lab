@@ -23,8 +23,18 @@ absolute stat with no opponent context).
 
 Audit fix (2026-08-02), same run: `football.correct_score` required a `WeightedLinearPredictor`-
 shaped feature it can't meaningfully serve (a scoreline has no "over/under a threshold" reading —
-see weighted_scoring.py's docstring). Now requires `FixtureExpectedGoalsCalculator`'s two
-real historical scoring-rate features instead, served by the new `PoissonScorePredictor`.
+see weighted_scoring.py's docstring). Now requires `FixtureExpectedGoalsCalculator`'s two real
+historical scoring-rate features instead.
+
+ML-architecture consolidation (2026-08-04): `football.correct_score` and the eleven Over/Under-
+style markets below (see `_EXPECTED_GOALS_FEATURES`) no longer have any formula predictor at all —
+their old Poisson-based fallbacks were removed as legacy statistical engines, per the "one real
+trained model per market, never a fabricated placeholder" production rule. Their `required_features`
+stay exactly as-is (expected-goals/stat-differential features are genuine ML inputs a trained
+model will consume too) but these markets now serve an honest "insufficient historical data"
+response instead of a prediction until `AutomaticModelSelectionService` has trained and a human
+has promoted a real Champion for them — see `scripts/seed_football_markets.py`'s
+`NOT_YET_TRAINED_MARKET_KEYS`.
 """
 
 from __future__ import annotations
@@ -75,9 +85,9 @@ SINGLE_RECORD_FEATURES: dict[str, tuple[str, str, EntityType]] = {
 # consumed, plus cards (`cards_yellow`), which the sync itself only just started mapping at all.
 # Built the same way `form_shots_on_target_diff_last5` already was — see
 # `windowed_feature_engineering_service.football_fixture_stat_differential_calculators`.
-# `football.correct_score` deliberately excludes these: `PoissonScorePredictor` only ever reads
-# its own two expected-goals feature keys, so mapping extra features to that market would just be
-# dead weight, never something the predictor could act on.
+# `football.correct_score` deliberately excludes these: it's one of the not-yet-trained markets
+# (see module docstring) and only maps its own two expected-goals feature keys — extra features
+# here would just be dead weight until a real trained model is built to consume them.
 _NEW_STAT_DIFFERENTIAL_FEATURES: tuple[str, ...] = (
     "football.fixture.form_possession_pct_diff_last5",
     "football.fixture.form_shots_total_diff_last5",
@@ -89,12 +99,24 @@ _NEW_STAT_DIFFERENTIAL_FEATURES: tuple[str, ...] = (
 # Conservative default weights for the five features above — no real historical outcome data
 # exists yet to fit proper weights against (same "honest v1, no fitted model" posture as
 # `WeightedOrdinalPredictor`'s cutpoints), so these are deliberately small relative to the
-# unweighted (weight=1.0) implied-probability/shots-on-target features already driving these
-# markets — sized roughly in inverse proportion to each stat's typical differential magnitude, so
-# no single one dominates the weighted-sum predictors' raw_score. Meant to nudge the existing
-# calibrated signal, not swamp it; recalibrate once real outcome history exists to fit against
-# (e.g. via a future CalibrationFittingService-style feature-importance pass).
+# unweighted (weight=1.0) implied-probability features already driving these markets — sized
+# roughly in inverse proportion to each stat's typical differential magnitude, so no single one
+# dominates the weighted-sum predictors' raw_score. Meant to nudge the existing calibrated
+# signal, not swamp it; recalibrate once real outcome history exists to fit against (e.g. via a
+# future CalibrationFittingService-style feature-importance pass).
+#
+# Audit fix (2026-08-06): `form_shots_on_target_diff_last5` predates this dict and was never
+# added to it, so every market requiring it fell through `.get(feature_key, 1.0)` to the same
+# unweighted default correctly used for `implied_probability_home`/`away` — but unlike those two
+# (already 0..1-scaled probabilities), this is a raw shot-count differential of the exact same
+# family as `form_shots_total_diff_last5` below (a real fixture routinely shows a 5-8 shot swing
+# between two teams' recent form). Fed into a sigmoid at weight 1.0, that single feature alone
+# was enough to saturate `raw_score` past ±7 and push every affected market's probability to
+# ~99.9%+ regardless of any other signal — confirmed live (Match Winner and Both Teams To Score
+# both landed at 99.97% for the same fixture, traced back to this exact contribution). Weighted
+# the same as its sibling stat-diff features now, not the implied-probability features.
 NEW_STAT_FEATURE_WEIGHTS: dict[str, float] = {
+    "football.fixture.form_shots_on_target_diff_last5": 0.05,  # roughly -8..8, same family as shots_total below
     "football.fixture.form_possession_pct_diff_last5": 0.02,  # typical range roughly -30..30
     "football.fixture.form_shots_total_diff_last5": 0.05,  # roughly -15..15
     "football.fixture.form_corners_diff_last5": 0.05,  # roughly -8..8
@@ -107,9 +129,9 @@ NEW_STAT_FEATURE_WEIGHTS: dict[str, float] = {
 # all — none of those features encode *which line* (0.5 vs 4.5 goals) or *which side* (home vs
 # away) a market is actually asking about, so every one of them produced a byte-identical
 # probability regardless of what the market conceptually represented. Fixed by giving each of
-# them `PoissonGoalsThresholdPredictor` (composition.py) instead — real per-market answers
-# derived from the same independent-Poisson expected-goals model `football.correct_score`
-# already uses, via closed-form Poisson math (sum-of-Poissons, PMF/CDF), not a fabricated one.
+# them its own expected-goals features instead — a real per-market signal a trained model can
+# learn to read the line/side out of. These eleven are among the not-yet-trained markets (module
+# docstring) since their old Poisson-based formula fallback was removed as a legacy engine.
 _EXPECTED_GOALS_FEATURES: tuple[str, ...] = (
     "football.fixture.expected_home_goals",
     "football.fixture.expected_away_goals",

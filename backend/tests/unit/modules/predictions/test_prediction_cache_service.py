@@ -84,12 +84,17 @@ def engine(
     model_repo,
     mapping_service,
     feature_value_repo,
+    feature_definition_repo,
     prediction_outcome_repo,
     model_evaluation_repo,
     prediction_repo,
 ):
     context_builder = PredictionContextBuilder(
-        markets=market_repo, models=model_repo, mapping_service=mapping_service, feature_values=feature_value_repo
+        markets=market_repo,
+        models=model_repo,
+        mapping_service=mapping_service,
+        feature_values=feature_value_repo,
+        definitions=feature_definition_repo,
     )
     predictors = PredictorRegistry()
     predictors.register_many(WeightedLogisticPredictor.SUPPORTED_KINDS, WeightedLogisticPredictor())

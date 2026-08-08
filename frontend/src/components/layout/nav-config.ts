@@ -56,7 +56,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: 'AI Picks', href: '/app/picks', icon: Target },
       { label: 'Watchlist', href: '/app/watchlist', icon: Star },
       { label: 'Alerts', href: '/app/notifications', icon: Bell },
-      { label: 'TitanIQ Assistant', href: '/app/insights', icon: Sparkles },
+      { label: 'Intelligence Workspace', href: '/app/insights', icon: Sparkles },
     ],
   },
   {

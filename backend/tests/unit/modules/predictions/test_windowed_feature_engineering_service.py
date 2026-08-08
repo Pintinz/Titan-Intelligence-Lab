@@ -152,6 +152,31 @@ async def test_football_form_calculator_averages_shots_on_target(registration, s
 
 
 @pytest.mark.asyncio
+async def test_registered_features_use_a_day_long_ttl_not_the_one_hour_default(
+    registration, store, team_statistics_repo, fixtures_repo
+):
+    """These features only change once per fixture-reconciliation cycle, not continuously — the
+    registry's generic 3600s default (built for live/streaming data) would make
+    `PredictionContextBuilder`'s TTL-aware freshness scoring treat a normal few-hours-old value as
+    maximally stale. Covers all three calculator families: TEAM-scoped rolling average,
+    FIXTURE-scoped differential, and FIXTURE-scoped expected-goals."""
+    form = football_form_calculator(registration, store, team_statistics_repo)
+    await form.ensure_registered(T0)
+    form_definition = await registration.definitions.get(FeatureKey(form.feature_key))
+    assert form_definition.online_ttl_seconds == 24 * 3600
+
+    differential = football_fixture_form_differential_calculator(registration, store, team_statistics_repo)
+    await differential.ensure_registered(T0)
+    differential_definition = await registration.definitions.get(FeatureKey(differential.feature_key))
+    assert differential_definition.online_ttl_seconds == 24 * 3600
+
+    expected_goals = football_fixture_expected_goals_calculator(registration, store, fixtures_repo)
+    await expected_goals.ensure_registered(T0)
+    home_definition = await registration.definitions.get(FeatureKey(expected_goals.home_feature_key))
+    assert home_definition.online_ttl_seconds == 24 * 3600
+
+
+@pytest.mark.asyncio
 async def test_basketball_form_calculator_averages_points(registration, store, team_statistics_repo):
     calculator = basketball_form_calculator(registration, store, team_statistics_repo, window=2)
     team_id = TeamId(uuid4())

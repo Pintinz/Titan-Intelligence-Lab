@@ -1,0 +1,235 @@
+/*
+  TitanIQ Command Deck — Match Intelligence Phase 1 (Hero, AI Match Snapshot, Prediction
+  Laboratory, Generated Intelligence). A PARALLEL, PAGE-SCOPED token system, same additive-
+  coexistence discipline tokens.infinity.css established relative to tokens.css: every custom
+  property here is prefixed `--cd-*` and scoped under a `.command-deck` wrapper class, never
+  `:root` — nothing here changes any other page. Approved scope: this page's top four sections
+  only. Recent Form / Match Coverage / Match Context stay on Infinity below the fold in this
+  phase; propagating Command Deck platform-wide is deliberate future work, not silently done here.
+
+  ---
+
+  DIRECTION CONTRACT
+
+  THESIS: TitanIQ is an instrument an analyst operates, not a dashboard they browse — every
+  number is a live reading with a source, not a static stat. The category default this refuses
+  is "AI dashboard with a confidence bar and a glass card"; the opposite rut it also refuses is
+  literal hacker-terminal/monospace-everywhere/nixie-tube cosplay.
+
+  OWN-WORLD: Terminal-instrument precision translated through Vercel/Supabase/Apple/Sofascore's
+  actual grammar, not literal green-on-black. Graphite ground (cooler than pure black, warmer
+  than Infinity's broadcast-monitor black), one indigo signal color reserved for live/active
+  state, tabular-lining numerals reserved specifically for telemetry values (never a whole-page
+  typeface), card-bounded panels with structural elevation over ambient glass, live status as
+  dot+label, confidence as a real arc gauge, values that tick on change.
+
+  STORY: An analyst opens a match and reads it like operating an instrument panel — system
+  status first (is AI ready, what's available), then a market instrument, then a real reading:
+  verdict, confidence, evidence, distribution. Trust comes from every reading tracing to a real
+  number, never from polish alone.
+
+  FIRST VIEWPORT: The Hero as a live session-open moment — kickoff countdown as a ticking
+  readout, AI-ready as a system-status light, not a decorative badge.
+
+  FORM: User-steered direction (financial-terminal-instrument, modernized via explicit
+  Vercel/Supabase/Apple/Sofascore blend) — the assigned roll (seed key 75befbcb, candidate 6,
+  "financial-terminal market-depth ticker, form only") was steered by the user away from its
+  literal trading-terminal reading before build, a re-roll-with-steer per new-work.md's own
+  process, disclosed here rather than silently substituted.
+
+  FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the
+  verdict, and DESIGN.md.
+*/
+
+.command-deck {
+  /* ============================================================================
+     GROUND — graphite, cooler than warm-black, not Infinity's broadcast-monitor near-black.
+     Vercel/Supabase register: dark enough for data density, not theatrical.
+     ============================================================================ */
+  --cd-bg: #0a0a0d;
+  --cd-surface-1: #101013;
+  --cd-surface-2: #17171b;
+  --cd-surface-3: #1f1f25;
+
+  --cd-border-hairline: #232329;
+  --cd-border-default: #2c2c34;
+  --cd-border-strong: #3d3d47;
+
+  --cd-text-primary: #f5f5f7;
+  --cd-text-secondary: #9a9aa4;
+  --cd-text-muted: #6b6b76;
+  --cd-text-inverse: #0a0a0d;
+
+  /* ============================================================================
+     SIGNAL — one accent, used with intent (live/active/positive-weight state). Indigo:
+     distinct from Infinity's review-cyan and the legacy brand teal, reading as "premium AI"
+     rather than "broadcast tech" or generic SaaS.
+     ============================================================================ */
+  --cd-accent: #6366f1;
+  --cd-accent-hover: #818cf8;
+  --cd-accent-muted: rgba(99, 102, 241, 0.12);
+  --cd-accent-strong: rgba(99, 102, 241, 0.3);
+
+  /* Evidence polarity — never gambling-style saturated red/green. Emerald favors, amber
+     against, matching what InfinityEvidenceExplorer already renders for Confidence Drivers. */
+  --cd-positive: #34d399;
+  --cd-positive-muted: rgba(52, 211, 153, 0.12);
+  --cd-negative: #f0b429;
+  --cd-negative-muted: rgba(240, 180, 41, 0.12);
+
+  --cd-live: #fb5177;
+  --cd-live-muted: rgba(251, 81, 119, 0.14);
+
+  /* ============================================================================
+     TYPOGRAPHY — reuses the already self-hosted stack (Space Grotesk / Barlow Condensed /
+     Inter), zero new font weight. Tabular numerals are the ONE place a technical face
+     appears — never a whole-page monospace costume.
+     ============================================================================ */
+  --cd-font-display: var(--font-display);
+  --cd-font-telemetry: var(--font-telemetry);
+  --cd-font-body: var(--font-body);
+  --cd-font-tabular: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace;
+
+  /* ============================================================================
+     ELEVATION — structural, not glass-heavy. A panel reads as bounded and precise, not
+     translucent and ambient.
+     ============================================================================ */
+  --cd-elevation-1: 0 1px 0 var(--cd-border-hairline);
+  --cd-elevation-2: 0 12px 32px rgba(0, 0, 0, 0.45);
+  --cd-elevation-live: 0 0 0 1px rgba(251, 81, 119, 0.35), 0 0 28px rgba(251, 81, 119, 0.12);
+  --cd-elevation-accent: 0 0 0 1px var(--cd-accent-strong), 0 0 28px rgba(99, 102, 241, 0.14);
+
+  --cd-radius-sm: 6px;
+  --cd-radius-md: 10px;
+  --cd-radius-lg: 14px;
+  --cd-radius-xl: 18px;
+  --cd-radius-2xl: 22px;
+
+  --cd-motion-snap: 120ms cubic-bezier(0.2, 0, 0, 1);
+  --cd-motion-base: 220ms cubic-bezier(0.4, 0, 0.2, 1);
+  --cd-motion-deliberate: 420ms cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* ============================================================================
+     PREMIUM DEPTH — Mission Control visual-refinement pass (polish, not a new world:
+     additive to the structural-elevation system above, never a replacement of it). A
+     "floating intelligent module" card reads as one soft surface with real depth cues —
+     inset top highlight, layered ambient + contact shadow, a glass edge — rather than a flat
+     rectangle, while staying governed by the same graphite/indigo palette. Restrained: the
+     glass effect is a depth cue on a bounded card, never a full-bleed frosted overlay.
+     ============================================================================ */
+  --cd-card-surface: linear-gradient(180deg, color-mix(in srgb, var(--cd-surface-2) 92%, white 8%) 0%, var(--cd-surface-1) 100%);
+  --cd-card-border: color-mix(in srgb, var(--cd-border-default) 80%, white 6%);
+  --cd-card-blur: 18px;
+  --cd-card-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.05) inset, 0 20px 44px -18px rgba(0, 0, 0, 0.6), 0 2px 10px -2px rgba(0, 0, 0, 0.35);
+  --cd-card-shadow-hover: 0 1px 0 0 rgba(255, 255, 255, 0.07) inset, 0 28px 64px -16px rgba(0, 0, 0, 0.65), 0 0 0 1px var(--cd-accent-strong), 0 0 36px -4px rgba(99, 102, 241, 0.28);
+
+  --cd-glow-accent: 0 0 48px -8px rgba(99, 102, 241, 0.35);
+  --cd-glow-live: 0 0 48px -8px rgba(251, 81, 119, 0.32);
+  --cd-glow-positive: 0 0 40px -10px rgba(52, 211, 153, 0.28);
+
+  --cd-danger: #f2555e;
+  --cd-danger-muted: rgba(242, 85, 94, 0.12);
+
+  --cd-btn-primary-bg: linear-gradient(180deg, var(--cd-accent-hover) 0%, var(--cd-accent) 100%);
+  --cd-btn-primary-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.16) inset, 0 12px 24px -8px rgba(99, 102, 241, 0.45);
+  --cd-btn-primary-shadow-hover: 0 1px 0 0 rgba(255, 255, 255, 0.2) inset, 0 16px 32px -8px rgba(99, 102, 241, 0.55);
+
+  /* ============================================================================
+     DOMAIN WHEEL — Mission Control colorize pass. Thirteen category hues, reused hue-for-hue
+     from tokens.infinity.css's own calibrated wheel (same DomainKey union, imported from
+     components/infinity/primitives/badge.tsx — one meaning per hue across BOTH visual worlds,
+     not a second, independently-invented palette). Read through this world's own --cd-* names
+     rather than --infinity-* directly, so Command Deck stays a self-contained token system.
+     Muted/strong tints are derived at point of use via color-mix() (see primitives/domain.ts),
+     matching this file's own existing color-mix pattern, rather than pre-baking 39 more tokens.
+     Indigo (--cd-accent) stays reserved for interactive/primary state — no domain hue here
+     collides with it, so a domain tag is never mistaken for a button or a live action.
+     ============================================================================ */
+  --cd-domain-football: hsl(142 72% 46%);
+  --cd-domain-basketball: hsl(28 82% 56%);
+  --cd-domain-baseball: hsl(4 68% 56%);
+  --cd-domain-table-tennis: hsl(74 62% 50%);
+  --cd-domain-predictions: hsl(194 100% 46%);
+  --cd-domain-knowledge-graph: hsl(258 68% 66%);
+  --cd-domain-learning: hsl(166 62% 48%);
+  --cd-domain-news: hsl(38 78% 56%);
+  --cd-domain-community: hsl(322 62% 60%);
+  --cd-domain-operations: hsl(212 48% 56%);
+  --cd-domain-infrastructure: hsl(220 16% 56%);
+  --cd-domain-alerts: hsl(354 78% 58%);
+  --cd-domain-security: hsl(246 52% 62%);
+}
+
+.command-deck[data-theme="light"],
+[data-theme="light"] .command-deck {
+  --cd-bg: #f7f7f9;
+  --cd-surface-1: #ffffff;
+  --cd-surface-2: #ffffff;
+  --cd-surface-3: #f0f0f3;
+
+  --cd-border-hairline: #e6e6ea;
+  --cd-border-default: #d5d5dc;
+  --cd-border-strong: #b8b8c2;
+
+  --cd-text-primary: #0e0e12;
+  --cd-text-secondary: #52525c;
+  --cd-text-muted: #6b6b76;
+  --cd-text-inverse: #ffffff;
+
+  --cd-accent: #4f46e5;
+  --cd-accent-hover: #4338ca;
+  --cd-accent-muted: rgba(79, 70, 229, 0.08);
+  --cd-accent-strong: rgba(79, 70, 229, 0.2);
+
+  --cd-positive: #0d9367;
+  --cd-positive-muted: rgba(13, 147, 103, 0.1);
+  --cd-negative: #8a6210;
+  --cd-negative-muted: rgba(138, 98, 16, 0.1);
+
+  --cd-live: #d43466;
+  --cd-live-muted: rgba(212, 52, 102, 0.1);
+
+  --cd-elevation-2: 0 12px 32px rgba(16, 16, 20, 0.08);
+  --cd-elevation-live: 0 0 0 1px rgba(212, 52, 102, 0.3), 0 0 20px rgba(212, 52, 102, 0.08);
+  --cd-elevation-accent: 0 0 0 1px var(--cd-accent-strong), 0 0 20px rgba(79, 70, 229, 0.1);
+
+  --cd-card-surface: linear-gradient(180deg, #ffffff 0%, color-mix(in srgb, var(--cd-surface-3) 55%, white 45%) 100%);
+  --cd-card-border: color-mix(in srgb, var(--cd-border-default) 70%, white 30%);
+  --cd-card-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.6) inset, 0 16px 36px -18px rgba(16, 16, 20, 0.18), 0 2px 8px -2px rgba(16, 16, 20, 0.06);
+  --cd-card-shadow-hover: 0 1px 0 0 rgba(255, 255, 255, 0.7) inset, 0 24px 48px -16px rgba(16, 16, 20, 0.22), 0 0 0 1px var(--cd-accent-strong), 0 0 28px -6px rgba(79, 70, 229, 0.18);
+
+  --cd-glow-accent: 0 0 40px -10px rgba(79, 70, 229, 0.22);
+  --cd-glow-live: 0 0 40px -10px rgba(212, 52, 102, 0.2);
+  --cd-glow-positive: 0 0 32px -10px rgba(13, 147, 103, 0.18);
+
+  --cd-danger: #c4373f;
+  --cd-danger-muted: rgba(196, 55, 63, 0.08);
+
+  --cd-btn-primary-bg: linear-gradient(180deg, var(--cd-accent) 0%, var(--cd-accent-hover) 100%);
+  --cd-btn-primary-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.2) inset, 0 10px 20px -8px rgba(79, 70, 229, 0.35);
+  --cd-btn-primary-shadow-hover: 0 1px 0 0 rgba(255, 255, 255, 0.25) inset, 0 14px 28px -8px rgba(79, 70, 229, 0.42);
+
+  /* DOMAIN WHEEL — light theme. Same hues as dark, Infinity's own light-mode lightness/
+     saturation recalibration (darker + less saturated to hold contrast on a white ground). */
+  --cd-domain-football: hsl(142 62% 34%);
+  --cd-domain-basketball: hsl(28 74% 42%);
+  --cd-domain-baseball: hsl(4 60% 46%);
+  --cd-domain-table-tennis: hsl(74 52% 34%);
+  --cd-domain-predictions: hsl(194 100% 32%);
+  --cd-domain-knowledge-graph: hsl(258 56% 50%);
+  --cd-domain-learning: hsl(166 56% 34%);
+  --cd-domain-news: hsl(38 68% 38%);
+  --cd-domain-community: hsl(322 52% 44%);
+  --cd-domain-operations: hsl(212 44% 42%);
+  --cd-domain-infrastructure: hsl(220 14% 42%);
+  --cd-domain-alerts: hsl(354 68% 44%);
+  --cd-domain-security: hsl(246 46% 48%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .command-deck {
+    --cd-motion-snap: 0ms;
+    --cd-motion-base: 0ms;
+    --cd-motion-deliberate: 0ms;
+  }
+}

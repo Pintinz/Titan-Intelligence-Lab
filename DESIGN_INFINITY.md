@@ -7,6 +7,22 @@ Help — now renders inside the Infinity AppShell. No page's own content was red
 see [Phase 11.1](#phase-111--global-app-shell--navigation) below. Per the brief, this is
 where work stops and waits for approval before Phase 11.2 (Match Intelligence).
 
+> **This status line is now stale — migration continued well past Phase 11.1.** Kept verbatim
+> below as the accurate record of what Phase 11.0/11.1 themselves delivered (tokens, primitives,
+> app shell), but content page-migration work has since shipped real Infinity-native pages and
+> components beyond what "Honest scope" below lists as not-yet-built, including (non-exhaustive):
+> Match Intelligence Hero + Prediction Center, real cross-links (Related Matches, Knowledge Graph
+> context panel), Home Mission Control, Watchlist (follow/unfollow across match/team cards),
+> Live/Competitions/Teams cross-sport pages, the premium `InfinityMatchCard` visual variant, and —
+> most recently — a from-scratch Team Intelligence card system (`TeamCard` with `record`/`metric`/
+> `list`/`activity`/`graph` variants replacing the corner-tick shell for that page's evidence-dense
+> cards, plus a status-tinted top edge added to `InfinityMatchCard` itself). None of these are
+> catalogued individually here — this file documents the *foundation* (tokens/primitives/shell);
+> per-page build notes live in their own session history, not retrofitted into this document.
+> Treat the token/primitive/component reference sections below as current; treat the phase-gate
+> framing and "not built this pass" lists as a snapshot of Phase 11.1's specific delivery, not of
+> where the system is today.
+
 ---
 
 ## Direction contract
@@ -182,6 +198,33 @@ by a **usage discipline** on top of the already-integrated `lucide-react` librar
 domain color applied via `style={{ color: DOMAIN_COLOR_VAR[domain] }}` rather than a
 Tailwind class (so it stays theme-reactive). Hand-drawing a full custom SVG icon system
 was judged out of proportion to a foundation-only phase and not attempted.
+
+---
+
+## Hero surfaces and gradient/glow accents (added post-Phase-11.1, documented here retroactively)
+
+Two real, shipped patterns not covered by the original Phase 11.0/11.1 scope above, since they
+emerged from later per-page work (Match/Team Intelligence Hero) rather than the foundation pass:
+
+- **Immersive hero pattern**: a full-bleed, forced-dark backdrop (ignores the active site theme —
+  a hero reads as a photograph, not a themed panel) composited from: a procedural, code-drawn
+  atmosphere layer (no fetched hero image exists in this system, so one is never faked — see
+  `StadiumBackdrop`/`StadiumSvg` in `team-detail-page.tsx` for the reference implementation:
+  floodlight glow, stand-bowl silhouettes, pitch perspective lines, all pure SVG), a scroll-linked
+  parallax drift (±20px, disabled under `prefers-reduced-motion`), and glass-panel content cards
+  (`bg-white/[0.06-0.11]` + `backdrop-blur-xl`) laid over it — never `InfinityPanel`'s corner-tick
+  shell, which reads as an evidence panel, not an identity moment. Ambient tint is sampled from
+  the subject's own real artwork (crest-color extraction via an offscreen canvas) rather than a
+  hardcoded per-entity color table, so it scales honestly to entities with no curated brand color.
+- **Corner-glow / gradient accent**: a 2px linear-gradient top edge (`tone → transparent`) plus a
+  radial-gradient blur bloom anchored at one corner, opacity 0 at rest and animated to ~0.15–0.4 on
+  hover/emphasis — the accent language for cards that represent a single strongly-toned entity
+  (e.g. a Home/Away record card, tinted by the team's own crest-sampled color). Distinct from
+  `--infinity-elevation-signal`'s fixed-cyan glow (§ Token reference above), which signals
+  "interactive/selected" generically — this pattern's color is always the *subject's* real tone,
+  never the system accent. **Refuse**: a plain flat `border-left`/`border-right` above 1px as a
+  substitute for this — a thin gradient top edge or a genuine corner bloom reads as intentional
+  accent language; a thick flat side-border reads as a lazy default.
 
 ---
 

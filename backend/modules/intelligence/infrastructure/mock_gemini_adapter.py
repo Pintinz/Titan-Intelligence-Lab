@@ -80,11 +80,33 @@ class MockGeminiAdapter:
         # already shows (never a fabricated stat), not labeled as a stand-in: TitanIQ's product
         # constitution requires never exposing backend implementation details to end users, the
         # same reason Expected Lineups shows a plain waiting message rather than an internal gap.
+        #
+        # Two more real, already-computed signals differentiate this sentence per fixture beyond
+        # the top feature names alone: the market's actual projected probability, and a genuine
+        # contradicting factor when the ranked contributions include one — both read straight
+        # from `context`, never invented. Magnitude/strength language ("strongly", "moderately")
+        # is deliberately NOT used: this adapter has no way to know a given predictor's own
+        # contribution-value scale, and guessing would be exactly the kind of fabricated stat
+        # this fallback exists to avoid.
         top_features = context.get("feature_importance", [])
         if not top_features:
             return "This verdict is grounded in the match's available data — no single factor dominates it."
+
         names = ", ".join(_humanize_feature_key(str(f.get("feature_key", "?"))) for f in top_features[:3])
-        return f"This verdict is driven mainly by {names}, based on the match's real historical and statistical data."
+        sentence = f"This verdict is driven mainly by {names}, based on the match's real historical and statistical data."
+
+        probability = context.get("probability")
+        if isinstance(probability, (int, float)):
+            sentence += f" Projected probability: {probability * 100:.0f}%."
+
+        contradicting = next(
+            (f for f in top_features if isinstance(f.get("importance"), (int, float)) and f["importance"] < 0), None
+        )
+        if contradicting:
+            opposing_name = _humanize_feature_key(str(contradicting.get("feature_key", "?")))
+            sentence += f" {opposing_name} pulls the other way but isn't enough to change the call."
+
+        return sentence
 
     async def interpret_sentiment(self, text: str) -> str:
         lowered = text.lower()

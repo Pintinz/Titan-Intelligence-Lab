@@ -200,8 +200,9 @@ class PredictionEngine:
         "did the prediction match"), so the calibration math below must stay anchored to whichever
         raw distribution entry the calibrator actually calibrated — found by matching
         ``predictor_output.probability`` back to its distribution key, not by assuming it's
-        ``predictor_output.value``. `WeightedOrdinalPredictor`/`PoissonScorePredictor`'s
-        argmax-shaped output makes those two the same key anyway, so this is a no-op for them.
+        ``predictor_output.value``. `WeightedOrdinalPredictor`'s argmax-shaped output makes those
+        two the same key anyway, so this is a no-op for it (and for `TrainedModelPredictor`, whose
+        `predict_proba()`-derived output is argmax-shaped the same way).
 
         The returned ``probability`` — what gets published as `Prediction.probability` and shown
         as the AI Verdict's headline confidence — is deliberately read back OUT of the calibrated

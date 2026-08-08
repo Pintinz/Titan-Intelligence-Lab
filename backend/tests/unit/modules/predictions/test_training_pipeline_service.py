@@ -50,9 +50,57 @@ def _classification_dataset(market_id, n=60, status=DatasetStatus.APPROVED, qual
     )
 
 
+MULTICLASS_LABELS = ("LOW", "MID", "HIGH")
+
+
+def _multiclass_dataset(market_id, n=90, status=DatasetStatus.APPROVED):
+    samples = []
+    for i in range(n):
+        x1 = float(i % 10) - 5.0
+        x2 = float((i * 3) % 10) - 5.0
+        class_index = 0 if x1 < -1.5 else (2 if x1 > 1.5 else 1)
+        samples.append(TrainingSample(features={"x1": x1, "x2": x2}, label=float(class_index)))
+
+    return Dataset(
+        id=DatasetId(uuid4()),
+        market_id=market_id,
+        version=1,
+        content_hash="hash",
+        samples=samples,
+        statistics=DatasetStatistics(sample_count=n, feature_count=2, positive_rate=None),
+        lineage=DatasetLineage(
+            market_id=market_id, source_prediction_ids=(), feature_keys=("x1", "x2"), built_at=T0,
+            class_labels=MULTICLASS_LABELS,
+        ),
+        status=status,
+        created_at=T0,
+    )
+
+
 @pytest.fixture
 def service():
     return TrainingPipelineService()
+
+
+async def test_train_evaluates_multiclass_via_real_label_equality(service):
+    """(2026-08-06) `_evaluate_classification`'s tp/fp/tn/fn framing assumes a binary 0/1 label —
+    meaningless once the label is a class index. A multiclass model (class_labels set on the
+    adapter before fit()) is evaluated by decoded-label equality instead, via _evaluate_multiclass."""
+    market_id = MarketId(uuid4())
+    dataset = _multiclass_dataset(market_id)
+    model = SklearnAdapter(
+        algorithm=MLAlgorithm.RANDOM_FOREST, target_type=TargetType.CLASSIFICATION, class_labels=MULTICLASS_LABELS
+    )
+
+    result = await service.train(model, dataset, split_strategy=SplitStrategy.TRAIN_TEST, test_ratio=0.25)
+
+    assert result.model.is_fitted()
+    assert result.test_metrics.accuracy is not None
+    assert 0.0 <= result.test_metrics.accuracy <= 1.0
+    # Precision/recall/f1 are binary-only concepts — honestly None for multiclass, never a
+    # fabricated micro/macro-average.
+    assert result.test_metrics.precision is None
+    assert result.test_metrics.recall is None
 
 
 async def test_train_produces_fitted_model_and_metrics(service):

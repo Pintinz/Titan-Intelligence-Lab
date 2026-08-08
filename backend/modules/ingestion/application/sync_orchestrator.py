@@ -305,7 +305,60 @@ class SyncOrchestrator:
 
         return await self._run_sync(
             sport_code, EntityKind.FIXTURE, f"upcoming:{competition_id}:{season_label}", trigger, now,
-            fetch=fetch, process_one=process_one, force=force,
+            fetch=fetch, process_one=process_one, force=force, provider_key=preference.preferred_provider_key,
+        )
+
+    async def sync_completed_fixtures(
+        self, sport_code: str, competition_id: str, season_label: str, season_id, now: datetime, *,
+        trigger=SyncTrigger.MANUAL, low_priority: bool = False, force: bool = False,
+    ) -> SyncRun | None:
+        """`sync_upcoming_fixtures`'s companion for final scores: same
+        `CompetitionFixtureSourcePreference` gate and provider, routed to
+        `router.fetch_completed_fixtures` instead. A fixture `sync_upcoming_fixtures` created
+        while SCHEDULED/TIMED gets no further updates from that method once it kicks off — this
+        is what actually moves it to COMPLETED with a final score (via
+        `reconcile_fixture`'s existing score-merge: a fetched score always wins, never
+        overwritten back to null), which in turn is what lets `reconcile_fixture` trigger
+        prediction-outcome resolution and form-differential recomputation for these fixtures,
+        matching what already happens for api-football-sourced ones. Uses the same
+        `match_by_teams_and_date=True` reconciliation as `sync_upcoming_fixtures` so this updates
+        the fixture that sync already created rather than creating a duplicate. Also passes
+        `allow_skip_live=True`: this provider never reports IN_PLAY, so its fixtures jump straight
+        from SCHEDULED to FINISHED — without this, `Fixture`'s normal lifecycle rule (never
+        SCHEDULED->COMPLETED directly) would silently reject the status change forever, even
+        though the score itself would still save (see `_resolve_fixture_status`'s docstring)."""
+        if self.fixture_source_preferences is None:
+            raise NoFixtureSourcePreferenceError(
+                "SyncOrchestrator wasn't wired with a fixture_source_preferences repository"
+            )
+        preference = await self.fixture_source_preferences.get_by_competition(competition_id)
+        if preference is None:
+            raise NoFixtureSourcePreferenceError(
+                f"competition '{competition_id}' has no fixture-source preference configured — "
+                "set one via the admin API first"
+            )
+
+        async def fetch():
+            return await self.router.fetch_completed_fixtures(
+                sport_code, preference.preferred_provider_key, preference.provider_competition_ref,
+                season_label, now, low_priority=low_priority,
+            )
+
+        async def process_one(record):
+            result = self.validator.validate_fixture(record, now)
+            if not result.is_valid:
+                return RecordOutcome(rejected=True, issue_category="relationship")
+            try:
+                _, created = await self.reconciler.reconcile_fixture(
+                    record, season_id, now, sport_code=sport_code, match_by_teams_and_date=True, allow_skip_live=True,
+                )
+            except ReconciliationDependencyError:
+                return RecordOutcome(rejected=True, issue_category="relationship")
+            return RecordOutcome(created=created, updated=not created)
+
+        return await self._run_sync(
+            sport_code, EntityKind.FIXTURE, f"completed:{competition_id}:{season_label}", trigger, now,
+            fetch=fetch, process_one=process_one, force=force, provider_key=preference.preferred_provider_key,
         )
 
     async def sync_live_fixtures(self, sport_code: str, competition_ref: str, season_label: str, season_id, now: datetime) -> SyncRun | None:
@@ -394,5 +447,36 @@ class SyncOrchestrator:
 
         return await self._run_sync(
             sport_code, EntityKind.TEAM_STATISTICS, fixture_ref.external_id, trigger, now,
+            fetch=fetch, process_one=process_one, force=force,
+        )
+
+    async def sync_players(
+        self, sport_code: str, team_ref: ProviderRef, now: datetime, *,
+        trigger=SyncTrigger.SCHEDULED, low_priority: bool = True, force: bool = False,
+        season_label: str | None = None,
+    ) -> SyncRun | None:
+        """Per-team, same shape as sync_team_statistics_for_fixture — fetch_players/
+        validate_player/reconcile_player were already real and fully built but had no
+        orchestration calling them, so the players table stayed empty even after teams/fixtures
+        synced. `reconcile_player` resolves the roster's team itself from each record's own
+        `team_ref`, so unlike team_statistics there's no separate "team not reconciled" rejection
+        path to handle here — an unresolved team_ref just leaves the player's team_id null.
+        `season_label` mirrors `sync_teams`'s own optional override: api-football's `/players`
+        defaults to the current calendar year, which the free tier's credential rejects (only
+        2022-2024 accessible) — pass an explicit in-range season to seed real historical rosters."""
+        sport = await self._get_reconciled_sport(sport_code)
+
+        async def fetch():
+            return await self.router.fetch_players(sport_code, team_ref, now, low_priority=low_priority, season_label=season_label)
+
+        async def process_one(record):
+            result = self.validator.validate_player(record, now)
+            if not result.is_valid:
+                return RecordOutcome(rejected=True, issue_category="invalid")
+            _, created = await self.reconciler.reconcile_player(record, sport.id, now)
+            return RecordOutcome(created=created, updated=not created)
+
+        return await self._run_sync(
+            sport_code, EntityKind.PLAYER, team_ref.external_id, trigger, now,
             fetch=fetch, process_one=process_one, force=force,
         )

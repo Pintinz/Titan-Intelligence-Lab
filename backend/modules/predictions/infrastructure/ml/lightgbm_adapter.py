@@ -21,7 +21,7 @@ import lightgbm as lgb
 import numpy as np
 
 from modules.predictions.domain.value_objects import TargetType
-from modules.predictions.infrastructure.ml._math import feature_union, logit, sigmoid, vectorize
+from modules.predictions.infrastructure.ml._math import feature_union, logit, multiclass_prediction, sigmoid, vectorize
 from modules.predictions.ports.ml_model import (
     MIN_TRAINING_SAMPLES,
     InsufficientTrainingDataError,
@@ -38,6 +38,7 @@ class LightGBMAdapter:
     params: dict = field(default_factory=dict)
     early_stopping_rounds: int = 20
     feature_order: list[str] = field(default_factory=list)
+    class_labels: tuple[str, ...] = field(default_factory=tuple)
     _model: object | None = field(default=None, repr=False)
 
     async def fit(
@@ -80,6 +81,9 @@ class LightGBMAdapter:
             raise ModelNotFittedError("LightGBMAdapter.predict_one called before fit()/deserialize()")
         x = np.array([vectorize(features, self.feature_order)])
         if self.target_type is TargetType.CLASSIFICATION:
+            if self.class_labels:  # multiclass (2026-08-06) — see _math.multiclass_prediction
+                probabilities = self._model.predict_proba(x)[0]
+                return multiclass_prediction(probabilities, self._model.classes_, self.class_labels)
             probability = float(self._model.predict_proba(x)[0][1])
             return ModelPrediction(
                 raw_score=logit(probability),
@@ -114,6 +118,7 @@ class LightGBMAdapter:
                 "target_type": self.target_type,
                 "params": self.params,
                 "early_stopping_rounds": self.early_stopping_rounds,
+                "class_labels": self.class_labels,
             }
         )
 
@@ -124,3 +129,4 @@ class LightGBMAdapter:
         self.target_type = state["target_type"]
         self.params = state["params"]
         self.early_stopping_rounds = state.get("early_stopping_rounds", 20)
+        self.class_labels = state.get("class_labels", ())

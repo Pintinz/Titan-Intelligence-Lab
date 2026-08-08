@@ -43,7 +43,6 @@ from apps.api.composition import (
     build_feature_quality_engine,
     build_feature_registration_service,
     build_health_intelligence_engine,
-    build_kg_population_service,
     build_ingestion_quality_engine,
     build_intelligence_enrichment_orchestrator,
     build_monitoring_service,
@@ -98,8 +97,7 @@ from modules.ingestion.domain.value_objects import EntityKind as IngestionEntity
 from modules.intelligence.domain.entities import NewsSource
 from modules.intelligence.domain.value_objects import NewsSourceId, NewsSourceType
 from modules.intelligence.domain.value_objects import SyncTrigger as _NewsSyncTrigger
-from modules.knowledge_graph.domain.value_objects import NodeType
-from modules.sports.domain.value_objects import CompetitionId, FixtureId, SeasonId, SportCode
+from modules.sports.domain.value_objects import CompetitionId, FixtureId, SeasonId, SportCode, TeamId
 from modules.sports.infrastructure.persistence.repositories import (
     SqlAlchemyCompetitionRepository,
     SqlAlchemyFixtureRepository,
@@ -1371,6 +1369,21 @@ async def trigger_sync_team_statistics(
     return envelope(data=_serialize_sync_run(run))
 
 
+@app.post("/api/v1/admin/sync/{sport_code}/players/{team_id}")
+async def trigger_sync_players(
+    sport_code: str, team_id: str, body: TriggerSyncBody, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    """Per-team, same shape as trigger_sync_odds/trigger_sync_team_statistics above — fetches one
+    team's real roster, keyed by our own persisted team_id."""
+    team = await SqlAlchemyTeamRepository(session=session).get(TeamId(uuid.UUID(team_id)))
+    if team is None or not team.provider_refs:
+        raise HTTPException(status_code=404, detail=f"team '{team_id}' not found or has no provider reference") from None
+    orchestrator = build_sync_orchestrator(session)
+    run = await orchestrator.sync_players(sport_code, team.provider_refs[0], _now(), force=body.force, season_label=body.season_label)
+    return envelope(data=_serialize_sync_run(run))
+
+
 # -- football-data.org integration: per-competition fixture-source preference + team mapping ------
 
 
@@ -1508,6 +1521,26 @@ async def trigger_sync_upcoming_fixtures(
     season_id = SeasonId(uuid.UUID(body.season_id))
     try:
         run = await orchestrator.sync_upcoming_fixtures(
+            sport_code, competition_id, body.season_label, season_id, _now(), force=body.force,
+        )
+    except NoFixtureSourcePreferenceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except ProviderNotConfiguredError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    return envelope(data=_serialize_sync_run(run))
+
+
+@app.post("/api/v1/admin/sync/{sport_code}/competitions/{competition_id}/completed-fixtures")
+async def trigger_sync_completed_fixtures(
+    sport_code: str, competition_id: str, body: TriggerUpcomingFixturesSyncBody,
+    session: AsyncSession = Depends(get_session), _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    """`sync_upcoming_fixtures`'s companion — resolves final scores for fixtures already synced
+    while upcoming via this competition's `CompetitionFixtureSourcePreference`."""
+    orchestrator = build_sync_orchestrator(session)
+    season_id = SeasonId(uuid.UUID(body.season_id))
+    try:
+        run = await orchestrator.sync_completed_fixtures(
             sport_code, competition_id, body.season_label, season_id, _now(), force=body.force,
         )
     except NoFixtureSourcePreferenceError as exc:
@@ -1658,23 +1691,7 @@ async def get_redis_health(session: AsyncSession = Depends(get_session), _admin:
     return envelope(data={"healthy": report.healthy, "latency_ms": report.latency_ms, "error": report.error})
 
 
-@app.get("/api/v1/admin/graph/nodes/{node_type}/{entity_ref}")
-async def get_kg_node(node_type: str, entity_ref: str, session: AsyncSession = Depends(get_session), _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
-    kg = build_kg_population_service(session)
-    try:
-        kind = NodeType(node_type)
-    except ValueError:
-        raise HTTPException(status_code=422, detail=f"unrecognized node_type '{node_type}'") from None
-    node = await kg.nodes.get_by_entity_ref(kind, entity_ref)
-    if node is None:
-        raise HTTPException(status_code=404, detail="node not found")
-    edges_out = await kg.edges.list_from(node.id)
-    edges_in = await kg.edges.list_to(node.id)
-    return envelope(
-        data={
-            "id": str(node.id), "node_type": node.node_type.value, "entity_ref": node.entity_ref,
-            "attributes": node.attributes,
-            "edges_out": [{"edge_type": e.edge_type.value, "to_node_id": str(e.to_node_id), "attributes": e.attributes} for e in edges_out],
-            "edges_in": [{"edge_type": e.edge_type.value, "from_node_id": str(e.from_node_id), "attributes": e.attributes} for e in edges_in],
-        }
-    )
+# Knowledge-graph single-entity lookup lives at GET /api/v1/graph/entities/{node_type}/{entity_ref}
+# (apps/api/routers/graph_router.py) — that endpoint now also returns edges_out/edges_in, so this
+# admin-only duplicate (which resolved the exact same kg.nodes.get_by_entity_ref() call under a
+# different path/auth posture) was removed rather than kept as a second source for the same data.

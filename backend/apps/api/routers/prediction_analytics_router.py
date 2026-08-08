@@ -13,8 +13,14 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.auth_deps import get_current_user
-from apps.api.composition import build_market_registry_service, build_prediction_cache_service, get_session
+from apps.api.composition import (
+    build_market_registry_service,
+    build_outcome_resolution_service,
+    build_prediction_cache_service,
+    get_session,
+)
 from modules.identity.domain.entities import User
+from modules.predictions.application.prediction_admin_service import serialize_prediction_summary
 from modules.predictions.domain.entities import Prediction
 from modules.predictions.domain.value_objects import MarketId, PredictionId, PredictionStatus
 
@@ -79,18 +85,10 @@ def _serialize_explanation(prediction: Prediction) -> dict:
     }
 
 
-def _serialize_summary(prediction: Prediction) -> dict:
-    return {
-        "id": str(prediction.id),
-        "market_id": str(prediction.market_id),
-        "model_id": str(prediction.model_id),
-        "subject_ref": prediction.subject_ref,
-        "value": prediction.value,
-        "probability": prediction.probability,
-        "confidence_composite": prediction.confidence.composite,
-        "status": prediction.status.value,
-        "generated_at": prediction.generated_at.isoformat() if prediction.generated_at else None,
-    }
+# Prediction summary row shape (id/market_id/model_id/subject_ref/value/probability/
+# confidence_composite/status/generated_at) lives in serialize_prediction_summary()
+# (modules/predictions/application/prediction_admin_service.py) — shared with the CSV export
+# path so the two never drift on which fields a "prediction summary" carries.
 
 
 # -- AI Picks ------------------------------------------------------------------------------------
@@ -137,7 +135,7 @@ async def ai_picks(
     return envelope(
         data=[
             {
-                **_serialize_summary(prediction),
+                **serialize_prediction_summary(prediction),
                 "market_key": market.market_key,
                 "market_name": market.name,
                 "sport_code": market.sport_code,
@@ -148,6 +146,9 @@ async def ai_picks(
                     + len(prediction.explanation.news_contribution)
                     + len(prediction.explanation.community_contribution)
                 ),
+                # Real, already-generated explanation text — the AI Picks feed's "one-line
+                # insight" reads this directly rather than the frontend inventing copy.
+                "ai_explanation": prediction.explanation.ai_explanation,
             }
             for prediction, market in top
         ],
@@ -191,7 +192,55 @@ async def prediction_history(
 ):
     service = build_prediction_cache_service(session)
     results = await service.predictions.list_by_subject(subject_ref, market_id=_parse_market_id(market_id))
-    return envelope(data=[_serialize_summary(p) for p in results], meta={"count": len(results)})
+    return envelope(data=[serialize_prediction_summary(p) for p in results], meta={"count": len(results)})
+
+
+# -- Review (AI Match Reviews / Match Review page) --------------------------------------------------
+
+
+def _serialize_market_review(row) -> dict:
+    return {
+        "market_id": row.market_id,
+        "market_key": row.market_key,
+        "market_name": row.market_name,
+        "predicted_value": row.predicted_value,
+        "probability": row.probability,
+        "confidence": row.confidence,
+        "probability_distribution": row.probability_distribution,
+        "top_positive_features": [list(pair) for pair in row.top_positive_features],
+        "top_negative_features": [list(pair) for pair in row.top_negative_features],
+        "ai_explanation": row.ai_explanation,
+        "generated_at": row.generated_at.isoformat() if row.generated_at else None,
+        "actual_value": row.actual_value,
+        "is_correct": row.is_correct,
+        "evaluated_at": row.evaluated_at.isoformat() if row.evaluated_at else None,
+    }
+
+
+@router.get("/review/{fixture_id}")
+async def fixture_intelligence_review(
+    fixture_id: str,
+    session: AsyncSession = Depends(get_session),
+    _user: User = Depends(get_current_user),
+):
+    """Real predicted-vs-actual for every PUBLISHED prediction TitanIQ made on this fixture —
+    the AI Review surface. A market is `is_correct: null` when its outcome hasn't been resolved
+    yet (fixture not completed, or the market has no registered resolver) — never guessed at.
+    Accuracy/resolved counts in `meta` are computed only over the resolved subset."""
+    service = build_outcome_resolution_service(session)
+    rows = await service.review_for_fixture(fixture_id)
+    resolved = [r for r in rows if r.is_correct is not None]
+    correct = [r for r in resolved if r.is_correct]
+    return envelope(
+        data=[_serialize_market_review(r) for r in rows],
+        meta={
+            "market_count": len(rows),
+            "resolved_count": len(resolved),
+            "correct_count": len(correct),
+            "accuracy": (len(correct) / len(resolved)) if resolved else None,
+            "average_confidence": (sum(r.confidence for r in rows) / len(rows)) if rows else None,
+        },
+    )
 
 
 # -- Monitoring ---------------------------------------------------------------------------------------
@@ -283,4 +332,4 @@ async def compare_predictions(
 
     service = build_prediction_cache_service(session)
     predictions = [await _require_prediction(service, pid) for pid in body.prediction_ids]
-    return envelope(data=[_serialize_summary(p) for p in predictions])
+    return envelope(data=[serialize_prediction_summary(p) for p in predictions])

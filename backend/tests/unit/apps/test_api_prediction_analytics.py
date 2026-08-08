@@ -216,6 +216,69 @@ def test_history_route_is_not_shadowed_by_prediction_id_route(client):
     assert response.json()["data"] == []
 
 
+async def _resolve_outcome(db_session_factory, fixture_id, home_score, away_score):
+    from apps.api.composition import build_outcome_resolution_service
+
+    async with db_session_factory() as session:
+        service = build_outcome_resolution_service(session)
+        recorded = await service.resolve_for_fixture(fixture_id, home_score=home_score, away_score=away_score, now=T0)
+        await session.commit()
+        return recorded
+
+
+def test_fixture_review_reports_predicted_vs_actual(client, db_session_factory):
+    headers = _auth_headers(client)
+    asyncio.run(
+        _seed_production_market(db_session_factory, "football.both_teams_to_score", "football.analytics_feature_review")
+    )
+    _generate(client, headers, "football.both_teams_to_score", subject_ref="fixture-review")
+    asyncio.run(_resolve_outcome(db_session_factory, "fixture-review", home_score=2, away_score=1))
+
+    response = client.get("/api/v1/predictions/review/fixture-review", headers=headers)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert len(data) == 1
+    assert data[0]["market_key"] == "football.both_teams_to_score"
+    assert data[0]["actual_value"] == "YES"
+    assert data[0]["is_correct"] in (True, False)
+    meta = response.json()["meta"]
+    assert meta["market_count"] == 1
+    assert meta["resolved_count"] == 1
+    assert meta["accuracy"] in (0.0, 1.0)
+
+
+def test_fixture_review_reports_unresolved_market_as_none(client, db_session_factory):
+    headers = _auth_headers(client)
+    # first_half_goals has no registered outcome resolver — must stay unresolved, never guessed.
+    asyncio.run(
+        _seed_production_market(db_session_factory, "football.first_half_goals", "football.analytics_feature_unresolved")
+    )
+    _generate(client, headers, "football.first_half_goals", subject_ref="fixture-unresolved")
+
+    response = client.get("/api/v1/predictions/review/fixture-unresolved", headers=headers)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert len(data) == 1
+    assert data[0]["actual_value"] is None
+    assert data[0]["is_correct"] is None
+    meta = response.json()["meta"]
+    assert meta["resolved_count"] == 0
+    assert meta["accuracy"] is None
+
+
+def test_review_route_is_not_shadowed_by_prediction_id_route(client):
+    headers = _auth_headers(client)
+
+    response = client.get("/api/v1/predictions/review/unknown-fixture", headers=headers)
+
+    # A 422 (invalid prediction_id UUID) would mean the generic /{prediction_id} route
+    # swallowed this request instead of the literal /review/{fixture_id} route.
+    assert response.status_code == 200
+    assert response.json()["data"] == []
+
+
 def test_monitoring_summary_counts_by_status(client, db_session_factory):
     headers = _auth_headers(client)
     asyncio.run(
@@ -368,6 +431,7 @@ def test_ai_picks_includes_published_prediction_with_market_context(client, db_s
     assert pick["sport_code"] == "football"
     assert pick["status"] == "published"
     assert isinstance(pick["evidence_count"], int) and pick["evidence_count"] >= 0
+    assert pick["ai_explanation"] == prediction["explanation"]["ai_explanation"]
 
 
 def test_ai_picks_excludes_below_threshold_draft_predictions(client, db_session_factory):

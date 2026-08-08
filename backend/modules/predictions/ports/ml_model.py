@@ -45,8 +45,12 @@ class UnsupportedAlgorithmForTargetTypeError(ValueError):
 
 @dataclass(frozen=True)
 class TrainingSample:
-    """One (feature snapshot, realized label) pair drawn from `PredictionOutcome` history —
-    label is 1.0/0.0 for a CLASSIFICATION target, the continuous realized value for REGRESSION."""
+    """One (feature snapshot, realized label) pair drawn from `PredictionOutcome` history — label
+    is 1.0/0.0 for a binary CLASSIFICATION target, the continuous realized value for REGRESSION, or
+    (multiclass classification support, 2026-08-06) the float index of the real class label within
+    the market's own `class_labels` ordering (see `PredictionModelPort.class_labels` below) for a
+    market with more than two outcomes (e.g. `football.correct_score`'s 37-cell scoreline grid,
+    `football.match_winner`'s HOME_WIN/DRAW/AWAY_WIN)."""
 
     features: dict[str, float]
     label: float
@@ -55,11 +59,15 @@ class TrainingSample:
 @dataclass(frozen=True)
 class ModelPrediction:
     """A `PredictionModelPort.predict_one()` result — mirrors `PredictorOutput`'s
-    raw_score/probability/value triad so `TrainedModelPredictor` can pass them through directly."""
+    raw_score/probability/value/distribution shape so `TrainedModelPredictor` can pass them
+    through directly. ``distribution`` (multiclass classification support, 2026-08-06) is only
+    populated for a multiclass classification model (keyed by the market's own real labels, e.g.
+    "2-1"/"OTHER") — empty for every binary-classification or regression model, exactly as before."""
 
     raw_score: float
     probability: float
     value: str
+    distribution: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -73,6 +81,14 @@ class TrainingMetrics:
 class PredictionModelPort(Protocol):
     target_type: TargetType
     feature_order: list[str]
+    class_labels: tuple[str, ...]
+    """(Multiclass classification support, 2026-08-06) The market's real label space in a fixed
+    order, e.g. ``("HOME_WIN", "DRAW", "AWAY_WIN")`` or the 37-cell correct-score grid — set by the
+    caller (`AutomaticModelSelectionService`, from `Dataset.lineage.class_labels`) before `fit()`
+    for any classification market with more than two outcomes. Empty (the default) for every
+    binary-classification or regression model, which keep encoding/decoding 0.0/1.0 and a raw
+    continuous value exactly as before this support was added — this field only changes behavior
+    when a caller populates it."""
 
     async def fit(
         self, samples: list[TrainingSample], validation_samples: list[TrainingSample] | None = None

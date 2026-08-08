@@ -78,6 +78,23 @@ def _evaluate_classification(model: PredictionModelPort, test_samples: list[Trai
     return EvaluationMetrics(accuracy=accuracy, precision=precision, recall=recall, f1=f1)
 
 
+def _evaluate_multiclass(model: PredictionModelPort, test_samples: list[TrainingSample]) -> EvaluationMetrics:
+    """Multiclass classification support (2026-08-06): `_evaluate_classification`'s tp/fp/tn/fn
+    framing assumes exactly two classes (`label >= 0.5` as "positive") — meaningless once
+    ``label`` is a class *index* (e.g. 0.0..36.0 for football.correct_score). Accuracy is instead
+    real-label equality: decode both the model's predicted label and the sample's own true index
+    through the same `model.class_labels` ordering both were encoded with, and compare directly.
+    Precision/recall/f1 stay `None` here rather than fabricating a micro/macro-average nobody
+    asked for — `AutomaticModelSelectionService` only ever ranks candidates by accuracy anyway."""
+    n = len(test_samples)
+    correct = sum(
+        1
+        for sample in test_samples
+        if model.predict_one(sample.features).value == model.class_labels[int(sample.label)]
+    )
+    return EvaluationMetrics(accuracy=correct / n if n else 0.0)
+
+
 def _evaluate_regression(model: PredictionModelPort, test_samples: list[TrainingSample]) -> EvaluationMetrics:
     errors = [model.predict_one(sample.features).raw_score - sample.label for sample in test_samples]
     if not errors:
@@ -139,11 +156,12 @@ class TrainingPipelineService:
             on_checkpoint(model, train_metrics)
 
         if test_samples:
-            test_metrics = (
-                _evaluate_classification(model, test_samples)
-                if model.target_type is TargetType.CLASSIFICATION
-                else _evaluate_regression(model, test_samples)
-            )
+            if model.target_type is not TargetType.CLASSIFICATION:
+                test_metrics = _evaluate_regression(model, test_samples)
+            elif model.class_labels:
+                test_metrics = _evaluate_multiclass(model, test_samples)
+            else:
+                test_metrics = _evaluate_classification(model, test_samples)
         else:
             test_metrics = EvaluationMetrics()
 

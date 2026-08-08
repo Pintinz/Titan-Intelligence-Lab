@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { Menu, Search, Sun, Moon, Bell, LogOut, Settings, HelpCircle, ChevronDown } from 'lucide-react'
 import { useAuthStore } from '@/stores/auth-store'
 import { useThemeStore } from '@/stores/theme-store'
+import { useCommandPaletteStore } from '@/stores/command-palette-store'
 import { useUnreadAlertCount } from '@/lib/hooks/use-alerts'
 import { InfinityAppBreadcrumbs } from './infinity-breadcrumbs'
 import { InfinityCommandPalette } from './infinity-command-palette'
@@ -16,7 +17,9 @@ import { InfinityCommandPalette } from './infinity-command-palette'
  * role, settings, help, sign out) sourced from `useAuthStore`.
  */
 export function InfinityTopbar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
-  const [paletteOpen, setPaletteOpen] = useState(false)
+  const paletteOpen = useCommandPaletteStore((s) => s.open)
+  const setPaletteOpen = useCommandPaletteStore((s) => s.setOpen)
+  const togglePalette = useCommandPaletteStore((s) => s.toggle)
   const profile = useAuthStore((s) => s.profile)
   const signOut = useAuthStore((s) => s.signOut)
   const theme = useThemeStore((s) => s.theme)
@@ -29,12 +32,12 @@ export function InfinityTopbar({ onOpenMobileNav }: { onOpenMobileNav: () => voi
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === 'k' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault()
-        setPaletteOpen((v) => !v)
+        togglePalette()
       }
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [])
+  }, [togglePalette])
 
   return (
     <>

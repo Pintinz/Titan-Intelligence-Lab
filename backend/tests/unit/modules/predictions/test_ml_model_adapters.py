@@ -42,6 +42,22 @@ def _regression_samples(n: int = 60) -> list[TrainingSample]:
     return samples
 
 
+MULTICLASS_LABELS = ("LOW", "MID", "HIGH")
+
+
+def _multiclass_samples(n: int = 90) -> list[TrainingSample]:
+    """3-class synthetic problem (2026-08-06 multiclass support) — x1 alone linearly separates the
+    three classes, so any of the CLASSIFICATION_ALGORITHMS-capable estimators should fit it near-
+    perfectly, making `value`/`distribution` assertions meaningful rather than tolerant of noise."""
+    samples = []
+    for i in range(n):
+        x1 = float(i % 10) - 5.0  # -5..4
+        x2 = float((i * 3) % 10) - 5.0
+        class_index = 0 if x1 < -1.5 else (2 if x1 > 1.5 else 1)
+        samples.append(TrainingSample(features={"x1": x1, "x2": x2}, label=float(class_index)))
+    return samples
+
+
 BOOSTING_ADAPTERS = [LightGBMAdapter, XGBoostAdapter, CatBoostAdapter]
 
 
@@ -122,6 +138,62 @@ class TestBoostingAdapters:
 
         assert adapter.is_fitted()
         assert 0.0 <= metrics.metric_value <= 1.0
+
+    async def test_multiclass_fit_predict(self, adapter_cls):
+        """Multiclass classification support (2026-08-06): with `class_labels` populated, a fitted
+        classifier decodes its predicted class index back to the real label and reports a full
+        distribution over every declared label — the shape football.correct_score/match_winner
+        now train through."""
+        adapter = adapter_cls(target_type=TargetType.CLASSIFICATION, class_labels=MULTICLASS_LABELS)
+        await adapter.fit(_multiclass_samples())
+        assert adapter.is_fitted()
+
+        result = adapter.predict_one({"x1": -4.0, "x2": 0.0})
+        assert result.value == "LOW"
+        assert set(result.distribution.keys()) == set(MULTICLASS_LABELS)
+        assert result.distribution["LOW"] == pytest.approx(result.probability)
+        assert sum(result.distribution.values()) == pytest.approx(1.0, abs=1e-6)
+
+        result_high = adapter.predict_one({"x1": 4.0, "x2": 0.0})
+        assert result_high.value == "HIGH"
+
+    async def test_multiclass_serialize_roundtrip(self, adapter_cls):
+        adapter = adapter_cls(target_type=TargetType.CLASSIFICATION, class_labels=MULTICLASS_LABELS)
+        await adapter.fit(_multiclass_samples())
+        original = adapter.predict_one({"x1": -4.0, "x2": 0.0})
+
+        restored = adapter_cls()
+        restored.deserialize(adapter.serialize())
+        assert restored.class_labels == MULTICLASS_LABELS
+        again = restored.predict_one({"x1": -4.0, "x2": 0.0})
+        assert again.value == original.value
+        assert again.distribution == pytest.approx(original.distribution)
+
+    async def test_multiclass_fit_predict_with_gapped_label_space(self, adapter_cls):
+        """Regression test for a real bug found live-verifying football.correct_score's bootstrap
+        training: its class-index encoding indexes into the market's full 37-cell canonical label
+        ordering, which legitimately skips indices whenever a rare scoreline doesn't land in a
+        given training split (e.g. observed indices [0,1,2,4,5,...,36] with several gaps).
+        XGBoost's sklearn wrapper specifically requires `y` to be exactly range(0, num_class) and
+        raised on this live — confirming every adapter tolerates a gapped label space is the fix."""
+        five_labels = ("A", "B", "C", "D", "E")
+        samples = []
+        for i in range(60):
+            x1 = float(i % 10) - 5.0
+            # Only classes 0, 2, and 4 ("A", "C", "E") ever appear — indices 1 and 3 ("B", "D")
+            # are real members of class_labels but never occur in this training data, the same
+            # shape a rare correct-score scoreline missing from a split produces.
+            class_index = 0 if x1 < -1.5 else (4 if x1 > 1.5 else 2)
+            samples.append(TrainingSample(features={"x1": x1, "x2": 0.0}, label=float(class_index)))
+
+        adapter = adapter_cls(target_type=TargetType.CLASSIFICATION, class_labels=five_labels)
+        await adapter.fit(samples)
+        assert adapter.is_fitted()
+
+        result = adapter.predict_one({"x1": -4.0, "x2": 0.0})
+        assert result.value == "A"
+        assert set(result.distribution.keys()) == set(five_labels)
+        assert sum(result.distribution.values()) == pytest.approx(1.0, abs=1e-6)
 
 
 CLASSIFICATION_ALGORITHMS = [
@@ -209,3 +281,43 @@ class TestSklearnAdapter:
         assert restored.algorithm is MLAlgorithm.RANDOM_FOREST
         again = restored.predict_one({"x1": 3.0, "x2": 3.0})
         assert again.value == original.value
+
+    async def test_multiclass_fit_predict_tree_ensemble(self):
+        """Multiclass support (2026-08-06) — unscaled tree ensemble path (no Pipeline wrap)."""
+        adapter = SklearnAdapter(
+            algorithm=MLAlgorithm.RANDOM_FOREST, target_type=TargetType.CLASSIFICATION, class_labels=MULTICLASS_LABELS
+        )
+        await adapter.fit(_multiclass_samples())
+        result = adapter.predict_one({"x1": -4.0, "x2": 0.0})
+        assert result.value == "LOW"
+        assert set(result.distribution.keys()) == set(MULTICLASS_LABELS)
+        assert sum(result.distribution.values()) == pytest.approx(1.0, abs=1e-6)
+
+    async def test_multiclass_fit_predict_ridge_without_predict_proba(self):
+        """Regression test for a real bug found live-verifying football.correct_score's bootstrap
+        training: RidgeClassifier has neither predict_proba nor a single-score decision_function
+        for multiclass (it returns one raw score per class) — the softmax-over-decision_function
+        fallback must produce a valid distribution rather than crashing on a missing attribute."""
+        adapter = SklearnAdapter(
+            algorithm=MLAlgorithm.RIDGE, target_type=TargetType.CLASSIFICATION, class_labels=MULTICLASS_LABELS
+        )
+        await adapter.fit(_multiclass_samples())
+        assert not hasattr(adapter._model, "predict_proba")
+
+        result = adapter.predict_one({"x1": -4.0, "x2": 0.0})
+        assert result.value == "LOW"
+        assert set(result.distribution.keys()) == set(MULTICLASS_LABELS)
+        assert sum(result.distribution.values()) == pytest.approx(1.0, abs=1e-6)
+
+    async def test_multiclass_fit_predict_scale_sensitive_pipeline(self):
+        """Multiclass support (2026-08-06) — a scale-sensitive algorithm is wrapped in a
+        `Pipeline`, so `predict_one` must unwrap it (`_final_estimator`) to read `.classes_`."""
+        adapter = SklearnAdapter(
+            algorithm=MLAlgorithm.LOGISTIC_REGRESSION,
+            target_type=TargetType.CLASSIFICATION,
+            class_labels=MULTICLASS_LABELS,
+        )
+        await adapter.fit(_multiclass_samples())
+        result = adapter.predict_one({"x1": -4.0, "x2": 0.0})
+        assert result.value == "LOW"
+        assert sum(result.distribution.values()) == pytest.approx(1.0, abs=1e-6)

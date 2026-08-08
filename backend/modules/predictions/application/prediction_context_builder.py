@@ -18,13 +18,13 @@ keeping this class scoped to "market + feature store retrieval" only.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from datetime import datetime
 
+from modules.features.application.feature_quality_engine import FRESHNESS_STALE_MULTIPLIER
 from modules.features.domain.entities import FeatureValue
 from modules.features.domain.value_objects import EntityType, FeatureKey, QualityFlag
-from modules.features.ports.repositories import FeatureValueRepositoryPort
+from modules.features.ports.repositories import FeatureDefinitionRepositoryPort, FeatureValueRepositoryPort
 from modules.predictions.application.confidence_engine import FeatureConfidenceInput
 from modules.predictions.application.feature_market_mapping_service import FeatureMarketMappingService
 from modules.predictions.domain.entities import MarketDefinition, ModelDefinition
@@ -73,7 +73,7 @@ class PredictionContextBuilder:
     models: ModelRepositoryPort
     mapping_service: FeatureMarketMappingService
     feature_values: FeatureValueRepositoryPort
-    freshness_half_life_seconds: float = 3600.0
+    definitions: FeatureDefinitionRepositoryPort
 
     async def build(
         self, market_key: str, entity_type: EntityType, entity_id: str, now: datetime
@@ -88,27 +88,33 @@ class PredictionContextBuilder:
 
         model = await self.models.get_champion(market.id)
         if model is None:
-            raise NoChampionModelError(f"market '{market_key}' has no CHAMPION model")
+            raise NoChampionModelError(
+                f"Insufficient historical data to generate a production-quality prediction for "
+                f"'{market_key}' yet — check back once enough verified completed matches have "
+                f"been ingested to train a model."
+            )
 
         mappings = await self.mapping_service.list_for_market(market_key)
 
         available_features: dict[str, float] = {}
         confidence_inputs: list[FeatureConfidenceInput] = []
         for mapping in mappings:
-            feature_value = await self.feature_values.get_latest(
-                FeatureKey(mapping.feature_key), entity_type, entity_id
-            )
+            feature_key = FeatureKey(mapping.feature_key)
+            feature_value = await self.feature_values.get_latest(feature_key, entity_type, entity_id)
             is_present = feature_value is not None and isinstance(feature_value.value, (int, float)) and not isinstance(
                 feature_value.value, bool
             )
             if is_present:
                 available_features[mapping.feature_key] = float(feature_value.value)
 
+            definition = await self.definitions.get(feature_key)
+            ttl_seconds = definition.online_ttl_seconds if definition is not None else 3600
+
             confidence_inputs.append(
                 FeatureConfidenceInput(
                     feature_key=mapping.feature_key,
                     quality_score=self._quality_score(feature_value),
-                    freshness_score=self._freshness_score(feature_value, now),
+                    freshness_score=self._freshness_score(feature_value, now, ttl_seconds),
                     is_present=is_present,
                 )
             )
@@ -129,11 +135,22 @@ class PredictionContextBuilder:
             return 0.0
         return min((_QUALITY_SCORES[flag] for flag in feature_value.quality_flags), default=0.2)
 
-    def _freshness_score(self, feature_value: FeatureValue | None, now: datetime) -> float:
-        """Exponential decay against ``freshness_half_life_seconds`` — 1.0 for a value computed
-        right now, decaying toward 0 the older ``as_of`` gets."""
+    def _freshness_score(self, feature_value: FeatureValue | None, now: datetime, ttl_seconds: int) -> float:
+        """1.0 while the value is within its own registered ``online_ttl_seconds`` (Feature
+        Registry — the same TTL the Feature Store uses to expire its online cache), decaying
+        linearly to 0.0 by ``ttl_seconds * FRESHNESS_STALE_MULTIPLIER``. Mirrors
+        `FeatureQualityEngine._freshness_score` exactly — this used to be an independent
+        ``exp(-age / 3600)`` decay hardcoded to a 1-hour half-life for every feature regardless of
+        its real update cadence, which punished legitimately slow-moving, batch-computed features
+        (team-form differentials, historical rates) as if they were live/streaming data going
+        stale within the hour."""
         if feature_value is None:
             return 0.0
         as_of = _ensure_aware(feature_value.as_of, now)
-        age_seconds = max((now - as_of).total_seconds(), 0.0)
-        return math.exp(-age_seconds / self.freshness_half_life_seconds)
+        age = max((now - as_of).total_seconds(), 0.0)
+        if age <= ttl_seconds:
+            return 1.0
+        stale_at = ttl_seconds * FRESHNESS_STALE_MULTIPLIER
+        if stale_at <= ttl_seconds:
+            return 0.0
+        return max(0.0, 1 - (age - ttl_seconds) / (stale_at - ttl_seconds))

@@ -98,9 +98,13 @@ def mapping_service(feature_mapping_repo, market_repo, feature_definition_repo):
 
 
 @pytest.fixture
-def context_builder(market_repo, model_repo, mapping_service, feature_value_repo):
+def context_builder(market_repo, model_repo, mapping_service, feature_value_repo, feature_definition_repo):
     return PredictionContextBuilder(
-        markets=market_repo, models=model_repo, mapping_service=mapping_service, feature_values=feature_value_repo
+        markets=market_repo,
+        models=model_repo,
+        mapping_service=mapping_service,
+        feature_values=feature_value_repo,
+        definitions=feature_definition_repo,
     )
 
 

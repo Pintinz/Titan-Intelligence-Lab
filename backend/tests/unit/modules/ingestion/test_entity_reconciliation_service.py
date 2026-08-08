@@ -640,6 +640,68 @@ async def test_reconcile_fixture_ignores_illegal_status_regression(service, sess
 
 
 @pytest.mark.asyncio
+async def test_reconcile_fixture_rejects_scheduled_to_completed_by_default(service, session):
+    """A provider that reports IN_PLAY (the normal case) must still be forced through LIVE
+    before COMPLETED — allow_skip_live defaults to False, so a SCHEDULED->FINISHED jump with no
+    intervening live report is treated as illegal, same as any other skipped transition."""
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    competition, _ = await service.reconcile_competition("39", "mock_football", sport.id, T0)
+    season, _ = await service.reconcile_season("39", "2026", "mock_football", competition.id, T0)
+    await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+    await service.reconcile_team(_team_record("t2", "Chelsea"), sport.id, T0)
+    await session.commit()
+
+    def record(status):
+        return ProviderFixtureRecord(
+            external_ref=ProviderRef(provider="mock_football", external_id="fx-skip"),
+            home_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+            away_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
+            scheduled_at=T0, competition_ref="39", season_label="2026", status=status,
+        )
+
+    await service.reconcile_fixture(record("NS"), season.id, T0)
+    await session.commit()
+    unchanged, _ = await service.reconcile_fixture(record("FT"), season.id, T0)
+    await session.commit()
+
+    assert unchanged.status is FixtureStatus.SCHEDULED
+
+
+@pytest.mark.asyncio
+async def test_reconcile_fixture_allow_skip_live_permits_scheduled_to_completed(service, session):
+    """football-data.org's free-tier adapter never reports IN_PLAY — its fixtures go straight
+    from SCHEDULED to FINISHED. allow_skip_live=True is the one narrow, explicit exception to the
+    "never SCHEDULED->COMPLETED directly" rule that makes that legitimate report land, rather than
+    a real finished match sitting stuck at SCHEDULED forever."""
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    competition, _ = await service.reconcile_competition("39", "mock_football", sport.id, T0)
+    season, _ = await service.reconcile_season("39", "2026", "mock_football", competition.id, T0)
+    await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+    await service.reconcile_team(_team_record("t2", "Chelsea"), sport.id, T0)
+    await session.commit()
+
+    def record(status):
+        return ProviderFixtureRecord(
+            external_ref=ProviderRef(provider="mock_football", external_id="fx-skip-allowed"),
+            home_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+            away_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
+            scheduled_at=T0, competition_ref="39", season_label="2026", status=status,
+            home_score=2, away_score=1,
+        )
+
+    await service.reconcile_fixture(record("NS"), season.id, T0)
+    await session.commit()
+    completed, _ = await service.reconcile_fixture(record("FT"), season.id, T0, allow_skip_live=True)
+    await session.commit()
+
+    assert completed.status is FixtureStatus.COMPLETED
+    assert completed.home_score == 2
+    assert completed.away_score == 1
+
+
+@pytest.mark.asyncio
 async def test_reconcile_fixture_notifies_watchers_on_kickoff_and_final_result(service_with_alerts, session):
     """End-to-end proof that a real Watchlist follow + a real fixture status transition produces
     a real, persisted AlertEvent — not just that the pieces work in isolation."""

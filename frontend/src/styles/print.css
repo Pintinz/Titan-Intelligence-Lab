@@ -1,0 +1,24 @@
+/* Investigation Notebook → Export Report. Scoped print rules: everything else in the app is
+   hidden, the notebook renders full-width in plain light-on-white ink, and only paints when
+   `#investigation-notebook-print` actually exists (never affects printing any other page). */
+@media print {
+  body:has(#investigation-notebook-print) > * {
+    visibility: hidden;
+  }
+  #investigation-notebook-print,
+  #investigation-notebook-print * {
+    visibility: visible;
+  }
+  #investigation-notebook-print {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    background: #ffffff;
+    color: #0e0e12;
+    padding: 24px;
+  }
+  #investigation-notebook-print a {
+    color: #0e0e12;
+    text-decoration: none;
+  }
+}

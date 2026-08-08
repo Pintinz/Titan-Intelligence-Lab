@@ -70,14 +70,18 @@ def test_generation_and_evaluation_label_tables_agree_on_every_binary_market():
     name the same six binary (positive/negative-polarity) markets — drift here would mean
     generation and evaluation silently disagree on what a market's real labels are.
 
-    Excludes three-way markets (Milestone 9.2 Phase 3, e.g. football.match_winner): those have a
-    resolver_key too, but resolve via THREE_WAY_MARKET_RESOLVERS' direct label equality, not this
-    module's positive/negative pair — they never belong in MARKET_OUTCOME_LABELS."""
-    from modules.predictions.application.outcome_resolution_service import THREE_WAY_MARKET_RESOLVERS
+    Excludes three-way markets (Milestone 9.2 Phase 3, e.g. football.match_winner) and grid markets
+    (2026-08-06, football.correct_score): both have a resolver_key too, but resolve via
+    THREE_WAY_MARKET_RESOLVERS/GRID_MARKET_RESOLVERS' direct label equality, not this module's
+    positive/negative pair — neither ever belongs in MARKET_OUTCOME_LABELS."""
+    from modules.predictions.application.outcome_resolution_service import (
+        GRID_MARKET_RESOLVERS,
+        THREE_WAY_MARKET_RESOLVERS,
+    )
     from modules.predictions.domain.market_outcome_registry import MARKET_OUTCOME_CATALOG
 
     catalog_resolver_keys = {spec.resolver_key for spec in MARKET_OUTCOME_CATALOG.values() if spec.resolver_key}
-    binary_resolver_keys = catalog_resolver_keys - set(THREE_WAY_MARKET_RESOLVERS.keys())
+    binary_resolver_keys = catalog_resolver_keys - set(THREE_WAY_MARKET_RESOLVERS.keys()) - set(GRID_MARKET_RESOLVERS.keys())
     assert binary_resolver_keys == set(MARKET_OUTCOME_LABELS.keys())
 
 

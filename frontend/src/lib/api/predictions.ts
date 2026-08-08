@@ -2,6 +2,8 @@ import { api } from '@/lib/api/client'
 import type {
   ConfidenceBreakdownDto,
   ExplanationBundleDto,
+  FixtureReviewMetaDto,
+  MarketReviewDto,
   PredictionDto,
   PredictionPickDto,
   PredictionSummaryDto,
@@ -31,4 +33,8 @@ export const predictionsApi = {
     api.post<PredictionSummaryDto[]>('/api/v1/predictions/compare', { prediction_ids: predictionIds }),
   picks: (opts: { sport_code?: string; limit?: number } = {}) =>
     api.get<PredictionPickDto[]>('/api/v1/predictions/picks', opts),
+  review: async (fixtureId: string) => {
+    const envelope = await api.getWithMeta<MarketReviewDto[]>(`/api/v1/predictions/review/${fixtureId}`)
+    return { markets: envelope.data, meta: envelope.meta as unknown as FixtureReviewMetaDto }
+  },
 }

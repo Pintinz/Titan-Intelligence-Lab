@@ -105,6 +105,47 @@ async def test_fetch_fixtures_skips_records_missing_a_team():
 
 
 @pytest.mark.asyncio
+async def test_fetch_completed_fixtures_requests_finished_status_and_maps_scores():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["status"] == "FINISHED"
+        return _json_response({
+            "matches": [
+                {
+                    "id": 500, "utcDate": "2026-08-10T14:00:00Z", "status": "FINISHED", "venue": "Stamford Bridge",
+                    "homeTeam": {"id": 61, "name": "Chelsea FC"}, "awayTeam": {"id": 65, "name": "Manchester City FC"},
+                    "competition": {"id": 2021}, "score": {"fullTime": {"home": 2, "away": 1}},
+                },
+            ]
+        })
+
+    adapter = FootballDataOrgAdapter(get_api_key=_get_key, client=_client_for(handler))
+    fixtures = await adapter.fetch_completed_fixtures("PL", "2026", NOW)
+
+    assert len(fixtures) == 1
+    assert fixtures[0].status == "FINISHED"
+    assert fixtures[0].home_score == 2
+    assert fixtures[0].away_score == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_completed_fixtures_skips_records_missing_a_team():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response({"matches": [{"id": 1, "homeTeam": {"id": None}, "awayTeam": {"id": 2}}]})
+
+    adapter = FootballDataOrgAdapter(get_api_key=_get_key, client=_client_for(handler))
+
+    assert await adapter.fetch_completed_fixtures("PL", "2026", NOW) == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_fixtures_leaves_score_unset_for_unplayed_matches(adapter):
+    fixtures = await adapter.fetch_fixtures("PL", "2026", NOW)
+
+    assert fixtures[0].home_score is None
+    assert fixtures[0].away_score is None
+
+
+@pytest.mark.asyncio
 async def test_unsupported_methods_return_honest_empty_results(adapter):
     assert await adapter.fetch_countries() == []
     assert await adapter.fetch_players(ProviderRef("football_data_org", "61")) == []

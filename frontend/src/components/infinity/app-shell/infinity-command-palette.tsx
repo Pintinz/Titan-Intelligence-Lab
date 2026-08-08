@@ -4,6 +4,7 @@ import { Command } from 'cmdk'
 import { Search, Sun, Moon, LogOut, CornerDownLeft } from 'lucide-react'
 import { useAuthStore } from '@/stores/auth-store'
 import { useThemeStore } from '@/stores/theme-store'
+import { useWorkspaceCommandStore } from '@/stores/workspace-command-store'
 import { isAtLeast } from '@/lib/api/types'
 import { NAV_GROUPS } from '@/components/layout/nav-config'
 import { cn } from '@/lib/cn'
@@ -23,6 +24,7 @@ export function InfinityCommandPalette({ open, onOpenChange }: { open: boolean; 
   const signOut = useAuthStore((s) => s.signOut)
   const theme = useThemeStore((s) => s.theme)
   const toggleTheme = useThemeStore((s) => s.toggleTheme)
+  const workspaceCommands = useWorkspaceCommandStore((s) => s.commands)
 
   const visibleGroups = NAV_GROUPS.map((group) => ({
     ...group,
@@ -89,6 +91,33 @@ export function InfinityCommandPalette({ open, onOpenChange }: { open: boolean; 
                   ))}
                 </Command.Group>
               ))}
+
+              {workspaceCommands.length > 0 && (
+                <Command.Group
+                  heading="Intelligence Workspace"
+                  className="mb-1 [&_[cmdk-group-heading]]:px-2.5 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:font-infinity-body [&_[cmdk-group-heading]]:text-[11px] [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-[0.08em] [&_[cmdk-group-heading]]:text-infinity-text-muted"
+                >
+                  {workspaceCommands.map((cmd) => (
+                    <Command.Item
+                      key={cmd.id}
+                      value={`workspace-${cmd.id}`}
+                      keywords={[cmd.label]}
+                      onSelect={() => {
+                        cmd.run()
+                        onOpenChange(false)
+                      }}
+                      className={cn(
+                        'group flex cursor-pointer items-center gap-2.5 rounded-infinity-sm px-2.5 py-2 font-infinity-body text-sm text-infinity-text-secondary',
+                        'data-[selected=true]:bg-infinity-signal-muted data-[selected=true]:text-infinity-text-primary',
+                      )}
+                    >
+                      <cmd.icon className="size-4 shrink-0" aria-hidden="true" />
+                      <span className="flex-1">{cmd.label}</span>
+                      <CornerDownLeft className="size-3 shrink-0 opacity-0 group-data-[selected=true]:opacity-100" aria-hidden="true" />
+                    </Command.Item>
+                  ))}
+                </Command.Group>
+              )}
 
               <Command.Group
                 heading="Account"

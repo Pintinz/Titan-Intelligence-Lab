@@ -1,5 +1,12 @@
 # TitanIQ — UI Design System
 
+> **Archived — superseded by [`design_system.md`](design_system.md).** This was the Milestone 8
+> planning draft (token *names* only, values TBD). Every concrete thing it proposed — token
+> values, dark/light mode implementation, component scope — has since shipped and is documented
+> with real values in `design_system.md` (tokens/motion/accessibility) and
+> [`ui_components.md`](ui_components.md) (component inventory). Kept here for historical
+> reference only; do not treat anything below as current.
+
 Status: Framework and principles defined; token values and component library land in
 Milestone 8. Design must be original — informed by the usability bar of Apple, Linear, Stripe,
 TradingView, Figma, Notion, Arc, and Vercel, but never a visual clone of any of them.

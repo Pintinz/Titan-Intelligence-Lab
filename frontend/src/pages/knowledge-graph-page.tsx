@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Search, Network } from 'lucide-react'
-import { adminPlatformApi } from '@/lib/api/admin-platform'
+import { graphApi } from '@/lib/api/graph'
 import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -11,8 +11,8 @@ import { EmptyState } from '@/components/ui/empty-state'
 /**
  * Knowledge Graph Explorer — interactive discovery of entities, relationships,
  * and context. A real KG visualization would use D3 or Cytoscape; for now,
- * this is a text-based explorer backed by kgNode() lookups. The real graph UI
- * is a follow-up feature (requires data-heavy visualization library).
+ * this is a text-based explorer backed by graphApi.getEntity() lookups. The
+ * real graph UI is a follow-up feature (requires data-heavy visualization library).
  */
 export default function KnowledgeGraphPage() {
   const [query, setQuery] = useState('')
@@ -24,7 +24,7 @@ export default function KnowledgeGraphPage() {
       if (!query.trim()) return null
       const [type, ref] = query.includes(':') ? query.split(':') : ['team', query]
       try {
-        return await adminPlatformApi.kgNode(type.trim(), ref.trim())
+        return await graphApi.getEntity(type.trim(), ref.trim())
       } catch {
         return null
       }
@@ -91,11 +91,11 @@ export default function KnowledgeGraphPage() {
           <div className="space-y-3">
             <div>
               <p className="text-xs text-text-muted">Entity type</p>
-              <p className="font-display text-sm font-semibold text-text-primary">{String((kgQuery.data as Record<string, unknown>).node_type ?? '')}</p>
+              <p className="font-display text-sm font-semibold text-text-primary">{kgQuery.data.node_type}</p>
             </div>
             <div>
               <p className="text-xs text-text-muted">Entity reference</p>
-              <p className="font-mono text-sm text-text-secondary">{String((kgQuery.data as Record<string, unknown>).entity_ref ?? '')}</p>
+              <p className="font-mono text-sm text-text-secondary">{kgQuery.data.entity_ref}</p>
             </div>
             {Object.keys(kgQuery.data.attributes || {}).length > 0 && (
               <div>

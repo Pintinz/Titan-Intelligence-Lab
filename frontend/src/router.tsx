@@ -58,6 +58,7 @@ function lazyPage(loader: () => Promise<{ default: ComponentType }>) {
   )
 }
 
+const matchReviewPage = lazyPage(() => import('@/pages/sports/match-review-page'))
 const aboutPage = lazyPage(() => import('@/pages/about-page'))
 const contactPage = lazyPage(() => import('@/pages/contact-page'))
 const pricingPage = lazyPage(() => import('@/pages/pricing-page'))
@@ -244,6 +245,7 @@ export const router = createBrowserRouter([
           { path: 'matches/week', element: <MatchListViewAllPage scope="week" /> },
           { path: 'matches/completed', element: <MatchListViewAllPage scope="completed" /> },
           { path: 'matches/:matchId', element: <MatchDetailPage /> },
+          { path: 'matches/:matchId/review', element: matchReviewPage },
           { path: 'teams', element: <TeamListPage /> },
           { path: 'teams/:teamId', element: <TeamDetailPage /> },
           { path: 'players', element: <PlayerListPage /> },

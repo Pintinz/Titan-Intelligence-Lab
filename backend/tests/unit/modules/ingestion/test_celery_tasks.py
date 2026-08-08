@@ -46,6 +46,14 @@ class FakeOrchestrator:
         self.calls.append(("sync_standings", sport_code, competition_ref, season_label, season_id))
         return self._respond()
 
+    async def sync_upcoming_fixtures(self, sport_code, competition_id, season_label, season_id, now):
+        self.calls.append(("sync_upcoming_fixtures", sport_code, competition_id, season_label, season_id))
+        return self._respond()
+
+    async def sync_completed_fixtures(self, sport_code, competition_id, season_label, season_id, now):
+        self.calls.append(("sync_completed_fixtures", sport_code, competition_id, season_label, season_id))
+        return self._respond()
+
     async def sync_odds_for_fixture(self, sport_code, fixture_ref, fixture_id, now):
         self.calls.append(("sync_odds_for_fixture", sport_code, fixture_ref, fixture_id))
         return self._respond()
@@ -125,6 +133,26 @@ def test_sync_standings_task_calls_orchestrator(fake_orchestrator):
 
     assert result.get()["status"] == "succeeded"
     assert fake_orchestrator.calls[0][:3] == ("sync_standings", "football", "39")
+
+
+def test_sync_upcoming_fixtures_task_calls_orchestrator(fake_orchestrator):
+    season_id = SeasonId(uuid4())
+
+    result = tasks_module.sync_upcoming_fixtures_task.delay("football", "comp-1", "2026", str(season_id.value), T0.isoformat())
+
+    assert result.get()["status"] == "succeeded"
+    assert fake_orchestrator.calls[0][:3] == ("sync_upcoming_fixtures", "football", "comp-1")
+    assert fake_orchestrator.calls[0][4] == season_id
+
+
+def test_sync_completed_fixtures_task_calls_orchestrator(fake_orchestrator):
+    season_id = SeasonId(uuid4())
+
+    result = tasks_module.sync_completed_fixtures_task.delay("football", "comp-1", "2026", str(season_id.value), T0.isoformat())
+
+    assert result.get()["status"] == "succeeded"
+    assert fake_orchestrator.calls[0][:3] == ("sync_completed_fixtures", "football", "comp-1")
+    assert fake_orchestrator.calls[0][4] == season_id
 
 
 def test_sync_odds_task_calls_orchestrator_with_reconstructed_provider_ref(fake_orchestrator):

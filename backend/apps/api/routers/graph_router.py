@@ -135,7 +135,9 @@ async def get_entity(
     node = await kg.nodes.get_by_entity_ref(_parse_node_type(node_type), entity_ref)
     if node is None:
         raise HTTPException(status_code=404, detail="entity not found")
-    return envelope(_serialize_node(node))
+    edges_out = await kg.edges.list_from(node.id)
+    edges_in = await kg.edges.list_to(node.id)
+    return envelope({**_serialize_node(node), "edges_out": [_serialize_edge(e) for e in edges_out], "edges_in": [_serialize_edge(e) for e in edges_in]})
 
 
 # -- Relationship Search --------------------------------------------------------------------------

@@ -149,6 +149,10 @@ export interface KgNodeDto {
   status: string
   confidence: number
   version: number
+  /** Only populated by `GET /api/v1/graph/entities/{node_type}/{entity_ref}` (single-entity
+   * lookup) — absent on nodes returned from list/search/subgraph endpoints. */
+  edges_out?: KgEdgeDto[]
+  edges_in?: KgEdgeDto[]
 }
 
 export interface KgEdgeDto {
@@ -386,6 +390,35 @@ export interface PredictionPickDto extends PredictionSummaryDto {
   market_name: string
   sport_code: string
   evidence_count: number
+  ai_explanation: string | null
+}
+
+/** Matches `_serialize_market_review` (prediction_analytics_router.py) — one market's real
+ * predicted-vs-actual reading. `actual_value`/`is_correct`/`evaluated_at` are `null` when the
+ * fixture hasn't completed yet or the market has no registered outcome resolver — never guessed. */
+export interface MarketReviewDto {
+  market_id: string
+  market_key: string
+  market_name: string
+  predicted_value: string
+  probability: number
+  confidence: number
+  probability_distribution: Record<string, number>
+  top_positive_features: Array<[feature_key: string, contribution: number]>
+  top_negative_features: Array<[feature_key: string, contribution: number]>
+  ai_explanation: string | null
+  generated_at: string | null
+  actual_value: string | null
+  is_correct: boolean | null
+  evaluated_at: string | null
+}
+
+export interface FixtureReviewMetaDto {
+  market_count: number
+  resolved_count: number
+  correct_count: number
+  accuracy: number | null
+  average_confidence: number | null
 }
 
 // -- sports (backed by the new sports_router.py, Task #196 — modules/sports/domain/entities.py) -
@@ -442,6 +475,39 @@ export interface StandingRowDto {
   rank: number
   points: number
   record: Record<string, unknown>
+}
+
+/** Matches `_serialize_team_statistics_summary`-equivalent shape from `get_team_statistics` —
+ * every field is a real average over recently recorded matches, or `null` if that stat was never
+ * recorded in the sample. `sample_size` is how many matches actually had any stats logged. */
+export interface TeamStatisticsSummaryDto {
+  sample_size: number
+  possession_pct: number | null
+  shots_total: number | null
+  shots_on_target: number | null
+  corners: number | null
+  fouls: number | null
+  cards_yellow: number | null
+  cards_red: number | null
+}
+
+/** Real per-fixture stat row from `GET /sports/fixtures/{id}/statistics` — one entry per team
+ * that actually had a `TeamStatistics` row synced for that specific match. Genuinely different
+ * from `TeamStatisticsSummaryDto` above (a rolling-window average): this is the exact recorded
+ * numbers for one match, and `stats` carries only the keys that were actually recorded — never
+ * padded with nulls for keys nobody synced. Coverage is honestly sparse — most completed
+ * fixtures have zero rows here until the stats sync job runs for them. */
+export interface FixtureTeamStatisticsDto {
+  team_id: string
+  stats: Partial<{
+    possession_pct: number
+    shots_total: number
+    shots_on_target: number
+    corners: number
+    fouls: number
+    cards_yellow: number
+    cards_red: number
+  }>
 }
 
 // -- Watchlist ----------------------------------------------------------------------------------

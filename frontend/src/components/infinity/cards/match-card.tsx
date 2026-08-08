@@ -57,6 +57,10 @@ export function InfinityMatchCard({
 }: MatchCardProps) {
   const isLive = status === 'live'
   const tone = DOMAIN_COLOR_VAR[sport]
+  // Top edge echoes the status pill in a glance-able accent, the same "tone = at-a-glance
+  // state" language the team page's Record cards use — live is always the live-red regardless
+  // of sport, upcoming carries the sport's own color, completed stays neutral/settled.
+  const edgeTone = isLive ? 'var(--infinity-live)' : status === 'upcoming' ? tone : 'var(--infinity-text-muted)'
 
   return (
     <div
@@ -67,6 +71,11 @@ export function InfinityMatchCard({
       )}
       style={isLive ? { boxShadow: 'var(--infinity-elevation-live)' } : undefined}
     >
+      <span
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-x-0 top-0 z-10 h-[2px]"
+        style={{ background: `linear-gradient(90deg, ${edgeTone}, transparent)` }}
+      />
       {href && (
         <Link to={href} aria-label={`${homeTeam} vs ${awayTeam}`} className="absolute inset-0 z-0 rounded-infinity-2xl" />
       )}

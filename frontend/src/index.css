@@ -1,7 +1,9 @@
 @import "tailwindcss";
 @import "./styles/tokens.css";
 @import "./styles/tokens.infinity.css";
+@import "./styles/tokens.command-deck.css";
 @import "./styles/fonts.css";
+@import "./styles/print.css";
 
 /*
   Tailwind v4 theme mapping — every color/radius/font utility below resolves through a CSS
@@ -275,6 +277,14 @@
   50% { transform: scale(1.02); }
 }
 
+/* Team Hero stadium backdrop — a slow ambient breathe on the club-color glow layer, distinct
+   from confidence-pulse's snappier 2s cadence since this sits behind readable content and needs
+   to stay in the background, not draw the eye. */
+@keyframes hero-ambient-glow {
+  0%, 100% { opacity: 0.55; transform: scale(1); }
+  50% { opacity: 0.9; transform: scale(1.08); }
+}
+
 @layer components {
   .animate-card-entrance {
     animation: card-entrance var(--motion-duration-base) var(--motion-easing-decelerate);
@@ -309,6 +319,10 @@
 
   .animate-bounce-subtle {
     animation: bounce-subtle 2s ease-in-out infinite;
+  }
+
+  .animate-hero-glow {
+    animation: hero-ambient-glow 8s ease-in-out infinite;
   }
 
   /* Form morphing utilities */

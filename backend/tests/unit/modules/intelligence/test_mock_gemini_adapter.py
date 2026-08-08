@@ -101,6 +101,47 @@ async def test_explain_default_text_with_no_feature_importance():
 
 
 @pytest.mark.asyncio
+async def test_explain_includes_real_projected_probability():
+    adapter = MockGeminiAdapter()
+
+    explanation = await adapter.explain(
+        {
+            "feature_importance": [{"feature_key": "football.fixture.expected_home_goals", "importance": 0.6}],
+            "probability": 0.72,
+        }
+    )
+
+    assert "Projected probability: 72%." in explanation
+
+
+@pytest.mark.asyncio
+async def test_explain_mentions_a_genuine_contradicting_factor():
+    adapter = MockGeminiAdapter()
+
+    explanation = await adapter.explain(
+        {
+            "feature_importance": [
+                {"feature_key": "football.fixture.expected_home_goals", "importance": 0.6},
+                {"feature_key": "football.team.form_index_last5", "importance": -0.3},
+            ],
+        }
+    )
+
+    assert "Form Index (Last 5) pulls the other way but isn't enough to change the call." in explanation
+
+
+@pytest.mark.asyncio
+async def test_explain_omits_contradicting_clause_when_every_ranked_feature_is_positive():
+    adapter = MockGeminiAdapter()
+
+    explanation = await adapter.explain(
+        {"feature_importance": [{"feature_key": "football.fixture.expected_home_goals", "importance": 0.6}]},
+    )
+
+    assert "pulls the other way" not in explanation
+
+
+@pytest.mark.asyncio
 async def test_interpret_sentiment_classifies_text():
     adapter = MockGeminiAdapter()
 

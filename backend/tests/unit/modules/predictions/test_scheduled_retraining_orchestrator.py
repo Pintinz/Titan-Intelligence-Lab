@@ -112,6 +112,18 @@ def _fresh_dataset(market_id: MarketId, now: datetime) -> Dataset:
     )
 
 
+async def _seed_champion(model_repo, market: MarketDefinition) -> ModelDefinition:
+    """An already-live CHAMPION — the "this market has an established life" scenario every
+    pre-existing test in this file assumes (staleness/drift retraining, human-gated promotion).
+    Distinct from the bootstrap ("never trained") scenario the ML-architecture consolidation
+    (2026-08-04) added, where a market genuinely has no CHAMPION row at all."""
+    champion = ModelDefinition(
+        id=ModelId(uuid4()), market_id=market.id, model_key=f"{market.market_key}.heuristic",
+        version=1, algorithm="heuristic_logistic_v1", status=ModelStatus.CHAMPION,
+    )
+    return await model_repo.upsert(champion)
+
+
 async def _seed_outcomes(market, prediction_repo, prediction_outcome_repo, n=60):
     """Real, resolvable BTTS outcomes — half positive, half negative, with enough distinct
     feature values to avoid ZERO_VARIANCE_FEATURE/SEVERE_CLASS_IMBALANCE quality flags."""
@@ -155,6 +167,7 @@ class TestScheduledRetrainingOrchestrator:
         self, orchestrator, market_repo, model_repo, dataset_repo, prediction_repo, prediction_outcome_repo
     ):
         market = await market_repo.upsert(_market())
+        await _seed_champion(model_repo, market)
         await dataset_repo.upsert(_stale_dataset(market.id, T0))
         await _seed_outcomes(market, prediction_repo, prediction_outcome_repo, n=60)
 
@@ -168,6 +181,7 @@ class TestScheduledRetrainingOrchestrator:
         assert result.skipped_reason is None
         assert result.challenger is not None
         assert result.challenger.status is ModelStatus.CHALLENGER
+        assert result.bootstrapped is False  # a live CHAMPION already existed — never auto-promoted
 
         persisted = await model_repo.get(result.challenger.id)
         assert persisted.status is ModelStatus.CHALLENGER
@@ -180,9 +194,10 @@ class TestScheduledRetrainingOrchestrator:
         assert latest_dataset.approved_by == SYSTEM_APPROVER
 
     async def test_fresh_market_with_no_drift_is_left_alone(
-        self, orchestrator, market_repo, dataset_repo, prediction_repo, prediction_outcome_repo
+        self, orchestrator, market_repo, model_repo, dataset_repo, prediction_repo, prediction_outcome_repo
     ):
         market = await market_repo.upsert(_market())
+        await _seed_champion(model_repo, market)
         await dataset_repo.upsert(_fresh_dataset(market.id, T0))
         await _seed_outcomes(market, prediction_repo, prediction_outcome_repo, n=60)
 
@@ -196,9 +211,10 @@ class TestScheduledRetrainingOrchestrator:
         assert latest_dataset.version == 1
 
     async def test_stale_market_with_too_few_real_outcomes_is_skipped_not_fabricated(
-        self, orchestrator, market_repo, dataset_repo, prediction_repo, prediction_outcome_repo
+        self, orchestrator, market_repo, model_repo, dataset_repo, prediction_repo, prediction_outcome_repo
     ):
         market = await market_repo.upsert(_market())
+        await _seed_champion(model_repo, market)
         await dataset_repo.upsert(_stale_dataset(market.id, T0))
         await _seed_outcomes(market, prediction_repo, prediction_outcome_repo, n=10)  # below MIN_TRAINING_SAMPLES
 
@@ -212,10 +228,12 @@ class TestScheduledRetrainingOrchestrator:
         assert "too_few_samples" in result.skipped_reason.lower() or "few" in result.skipped_reason.lower()
 
     async def test_one_markets_failure_does_not_block_the_rest_of_the_sweep(
-        self, orchestrator, market_repo, dataset_repo, prediction_repo, prediction_outcome_repo
+        self, orchestrator, market_repo, model_repo, dataset_repo, prediction_repo, prediction_outcome_repo
     ):
         broken_market = await market_repo.upsert(_market(market_key="football.unmapped_market"))
         healthy_market = await market_repo.upsert(_market(market_key="football.both_teams_to_score"))
+        await _seed_champion(model_repo, broken_market)
+        await _seed_champion(model_repo, healthy_market)
         await dataset_repo.upsert(_stale_dataset(broken_market.id, T0))
         await dataset_repo.upsert(_stale_dataset(healthy_market.id, T0))
         # No outcome_label_mapper entry for "football.unmapped_market" -> every outcome is
@@ -230,3 +248,65 @@ class TestScheduledRetrainingOrchestrator:
         assert by_key["football.unmapped_market"].challenger is None
         assert by_key["football.unmapped_market"].skipped_reason is not None
         assert by_key["football.both_teams_to_score"].challenger is not None
+
+    # -- Bootstrap: a market with no CHAMPION at all (ML-architecture consolidation, 2026-08-04) --
+
+    async def test_market_with_no_champion_bootstraps_straight_to_champion(
+        self, orchestrator, market_repo, model_repo, prediction_repo, prediction_outcome_repo
+    ):
+        """The "insufficient historical data" state (see `scripts/seed_football_markets.py`'s
+        `NOT_YET_TRAINED_MARKET_KEYS`) — no CHAMPION, no dataset built yet. Real accumulated
+        outcomes are enough to train on -> the first Challenger is auto-promoted to CHAMPION,
+        the one exception to this orchestrator's human promotion gate."""
+        market = await market_repo.upsert(_market())
+        assert await model_repo.get_champion(market.id) is None
+        await _seed_outcomes(market, prediction_repo, prediction_outcome_repo, n=60)
+
+        outcomes = await orchestrator.run(T0, candidates=FAST_CANDIDATES)
+
+        assert len(outcomes) == 1
+        result = outcomes[0]
+        assert result.should_retrain is True
+        assert result.reason == "never trained"
+        assert result.skipped_reason is None
+        assert result.challenger is not None
+        assert result.bootstrapped is True
+
+        persisted = await model_repo.get(result.challenger.id)
+        assert persisted.status is ModelStatus.CHAMPION
+        assert await model_repo.get_champion(market.id) == persisted
+
+    async def test_market_with_no_champion_and_too_few_outcomes_is_skipped_not_promoted(
+        self, orchestrator, market_repo, model_repo, prediction_repo, prediction_outcome_repo
+    ):
+        market = await market_repo.upsert(_market())
+        await _seed_outcomes(market, prediction_repo, prediction_outcome_repo, n=10)  # below MIN_TRAINING_SAMPLES
+
+        outcomes = await orchestrator.run(T0, candidates=FAST_CANDIDATES)
+
+        assert len(outcomes) == 1
+        result = outcomes[0]
+        assert result.reason == "never trained"
+        assert result.challenger is None
+        assert result.bootstrapped is False
+        assert result.skipped_reason is not None
+        assert await model_repo.get_champion(market.id) is None  # still genuinely untrained, nothing fabricated
+
+    async def test_market_with_no_champion_ignores_the_staleness_gate(
+        self, orchestrator, market_repo, model_repo, dataset_repo, prediction_repo, prediction_outcome_repo
+    ):
+        """A never-trained market always gets a bootstrap attempt, even with a "fresh" dataset
+        already on file (from, say, a prior failed bootstrap run) — should_retrain()'s
+        staleness/drift check has no live CHAMPION to compare against and would otherwise report
+        "nothing to do" forever."""
+        market = await market_repo.upsert(_market())
+        await dataset_repo.upsert(_fresh_dataset(market.id, T0))
+        await _seed_outcomes(market, prediction_repo, prediction_outcome_repo, n=60)
+
+        outcomes = await orchestrator.run(T0, candidates=FAST_CANDIDATES)
+
+        assert len(outcomes) == 1
+        result = outcomes[0]
+        assert result.should_retrain is True
+        assert result.bootstrapped is True
+        assert await model_repo.get_champion(market.id) is not None

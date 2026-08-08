@@ -18,7 +18,7 @@ const CONFIDENCE_AXES: Array<[key: string, label: string]> = [
   ['prediction_stability', 'Stability'],
 ]
 
-function humanizeFactorKey(key: string): string {
+export function humanizeFactorKey(key: string): string {
   const lastSegment = key.split('.').pop() ?? key
   return lastSegment
     .replace(/_last(\d+)/i, ' (last $1)')
@@ -37,14 +37,14 @@ function riskLevel(composite: number): { label: RiskLevel; tone: string } {
   return { label: 'High risk', tone: 'var(--infinity-danger)' }
 }
 
-type TeamRef = { name: string; logoUrl?: string | null }
+export type TeamRef = { name: string; logoUrl?: string | null }
 
 /** `WeightedOrdinalPredictor` emits the real, final value for every `HOME_DRAW_AWAY` market as
  * one of these three literals directly (`modules/predictions/infrastructure/predictors/
  * weighted_scoring.py`) — correct as backend output, but a generic code rather than something a
  * user should read. The caller already knows which team is home/away for this fixture, so this
  * resolves the verdict to the actual team (crest included) instead of showing the raw label. */
-function resolveVerdict(
+export function resolveVerdict(
   value: unknown,
   homeTeam?: TeamRef,
   awayTeam?: TeamRef
@@ -58,7 +58,7 @@ function resolveVerdict(
 /** Same team/draw resolution `resolveVerdict` applies to the winning `value`, applied to every
  * key in `probability_distribution` so "Alternative Outcomes" reads like the verdict does rather
  * than showing raw backend codes for the outcomes that didn't win. */
-function resolveOutcomeLabel(key: string, homeTeam?: TeamRef, awayTeam?: TeamRef): string {
+export function resolveOutcomeLabel(key: string, homeTeam?: TeamRef, awayTeam?: TeamRef): string {
   if (key === 'HOME_WIN' && homeTeam) return homeTeam.name
   if (key === 'AWAY_WIN' && awayTeam) return awayTeam.name
   if (key === 'DRAW') return 'Draw'
@@ -289,19 +289,23 @@ export function InfinityEvidenceExplorer({
           <div>
             <InfinityLabel>Confidence drivers</InfinityLabel>
             <ul className="mt-2 grid gap-2 sm:grid-cols-2">
-              {explanation.top_positive_features.map(([featureKey]) => (
+              {explanation.top_positive_features.map(([featureKey, contribution]) => (
                 <li key={featureKey} className="flex items-start gap-2">
                   <CircleCheck className="mt-0.5 size-3.5 shrink-0 text-infinity-success" aria-hidden="true" />
                   <span className="font-infinity-body text-[12px] text-infinity-text-secondary">
-                    {humanizeFactorKey(featureKey)} favors this verdict
+                    {humanizeFactorKey(featureKey)}{' '}
+                    <span className="font-infinity-mono text-infinity-success">+{contribution.toFixed(2)}</span>{' '}
+                    favors this verdict
                   </span>
                 </li>
               ))}
-              {explanation.top_negative_features.map(([featureKey]) => (
+              {explanation.top_negative_features.map(([featureKey, contribution]) => (
                 <li key={featureKey} className="flex items-start gap-2">
                   <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-infinity-warning" aria-hidden="true" />
                   <span className="font-infinity-body text-[12px] text-infinity-text-secondary">
-                    {humanizeFactorKey(featureKey)} works against this verdict
+                    {humanizeFactorKey(featureKey)}{' '}
+                    <span className="font-infinity-mono text-infinity-warning">{contribution.toFixed(2)}</span>{' '}
+                    works against this verdict
                   </span>
                 </li>
               ))}

@@ -38,15 +38,21 @@ class TrainedModelPredictor:
         prediction = self.model.predict_one(features)
         importance = self.model.feature_importance()
         contributions = {key: value * importance.get(key, 0.0) for key, value in features.items()}
-        # Every trained-model adapter today is binary-only (`ModelPrediction.value` is
-        # "positive"/"negative" for a CLASSIFICATION target, a raw formatted number for
-        # REGRESSION — see the four framework adapters' `predict_one()`), so the two-sided split
-        # is the whole distribution a trained model can honestly report; a raw-number value means
-        # this is a REGRESSION prediction, which has no discrete distribution to report at all.
+        # Multiclass classification support (2026-08-06): a multiclass-fitted adapter (its
+        # `class_labels` populated, e.g. football.correct_score's 37-cell grid) already returns
+        # its full real-label distribution on `ModelPrediction.distribution` — pass it straight
+        # through. Every binary-classification/regression adapter still returns an empty
+        # `distribution` (unchanged), so the two-sided "positive"/"negative" split remains the
+        # honest fallback for those, and a raw-number `value` (REGRESSION) still reports no
+        # discrete distribution at all.
         distribution = (
-            {"positive": prediction.probability, "negative": 1.0 - prediction.probability}
-            if prediction.value in ("positive", "negative")
-            else {}
+            prediction.distribution
+            if prediction.distribution
+            else (
+                {"positive": prediction.probability, "negative": 1.0 - prediction.probability}
+                if prediction.value in ("positive", "negative")
+                else {}
+            )
         )
         return PredictorOutput(
             raw_score=prediction.raw_score,

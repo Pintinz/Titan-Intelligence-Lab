@@ -30,7 +30,7 @@ def is_valid_fixture_transition(current: FixtureStatus, target: FixtureStatus) -
 # also survives sport-specific codes this wasn't tested against (e.g. baseball's inning codes)
 # without silently dropping a live match back to "scheduled".
 _FINISHED_CODES = {"FT", "AET", "PEN", "FT_PEN", "AOT", "FINISHED", "FINAL", "GAME OVER", "AWD", "WO"}
-_SCHEDULED_CODES = {"NS", "TBD", "SCHEDULED"}
+_SCHEDULED_CODES = {"NS", "TBD", "SCHEDULED", "TIMED"}
 _POSTPONED_CODES = {"PST", "SUSP", "INT"}
 _CANCELLED_CODES = {"CANC", "CANCELLED", "ABD"}
 

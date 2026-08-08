@@ -1,4 +1,5 @@
-import { InfinityPanel, InfinityLabel } from '../primitives/panel'
+import { InfinityLabel } from '../primitives/panel'
+import { cn } from '@/lib/cn'
 
 export interface PlayerCardProps {
   name: string
@@ -13,14 +14,22 @@ export interface PlayerCardProps {
   available?: boolean
 }
 
+/** Identity-first shell — a flat hairline card with a domain-tinted initials medallion, not the
+ * corner-tick evidence-panel treatment: a roster is scanned for who's who, not read for proof. */
 export function InfinityPlayerCard({ name, domain, team, position, statLabel, statValue, available }: PlayerCardProps) {
   const subtitle = [team, position].filter(Boolean).join(' · ')
+  const tone = `var(--infinity-domain-${domain})`
   return (
-    <InfinityPanel tone={`var(--infinity-domain-${domain})`}>
+    <div
+      className={cn(
+        'group relative overflow-hidden rounded-infinity-lg border border-infinity-border-hairline bg-infinity-ground-1 p-4',
+        'transition-all duration-200 ease-out hover:-translate-y-0.5 hover:border-infinity-border-default',
+      )}
+    >
       <div className="flex items-center gap-3">
         <div
           className="flex size-11 shrink-0 items-center justify-center rounded-infinity-sm border font-infinity-display text-[13px] font-semibold"
-          style={{ borderColor: `var(--infinity-domain-${domain})40`, color: `var(--infinity-domain-${domain})` }}
+          style={{ borderColor: `${tone}40`, color: tone }}
           aria-hidden="true"
         >
           {name.split(' ').map((p) => p[0]).slice(0, 2).join('')}
@@ -31,10 +40,15 @@ export function InfinityPlayerCard({ name, domain, team, position, statLabel, st
         </div>
         {available !== undefined && (
           <span
-            className="size-1.5 shrink-0 rounded-full"
-            style={{ backgroundColor: available ? 'var(--infinity-success)' : 'var(--infinity-danger)' }}
-            aria-label={available ? 'Available' : 'Unavailable'}
-          />
+            className="shrink-0 rounded-infinity-full border px-1.5 py-0.5 font-infinity-mono text-[9px] font-semibold uppercase tracking-[0.04em]"
+            style={
+              available
+                ? { color: 'var(--infinity-success)', borderColor: 'var(--infinity-success)40', backgroundColor: 'var(--infinity-success)14' }
+                : { color: 'var(--infinity-danger)', borderColor: 'var(--infinity-danger)40', backgroundColor: 'var(--infinity-danger)14' }
+            }
+          >
+            {available ? 'Available' : 'Out'}
+          </span>
         )}
       </div>
       {statLabel && statValue && (
@@ -43,6 +57,6 @@ export function InfinityPlayerCard({ name, domain, team, position, statLabel, st
           <span className="font-infinity-telemetry text-[15px] font-semibold tabular-nums text-infinity-text-primary">{statValue}</span>
         </div>
       )}
-    </InfinityPanel>
+    </div>
   )
 }

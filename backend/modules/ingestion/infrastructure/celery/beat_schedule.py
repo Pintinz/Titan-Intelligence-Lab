@@ -65,6 +65,17 @@ BEAT_SCHEDULE = {
     "sync-live-fixtures-football-epl": {
         "task": "ingestion.sync_live_fixtures", "schedule": timedelta(seconds=LIVE_FIXTURES_INTERVAL_SECONDS),
     },
+    # football-data.org fixture-schedule path (opt-in per competition via
+    # CompetitionFixtureSourcePreference) — same "args are illustrative" caveat as every other
+    # competition/season-scoped entry above: a real deployment's Admin Center drives the actual
+    # competition/season list. PROVIDER_POLL_INTERVAL_SECONDS respects the free tier's 10 req/min
+    # cap comfortably for both a schedule check and a results check.
+    "sync-upcoming-fixtures-football-data-org": {
+        "task": "ingestion.sync_upcoming_fixtures", "schedule": timedelta(seconds=PROVIDER_POLL_INTERVAL_SECONDS),
+    },
+    "sync-completed-fixtures-football-data-org": {
+        "task": "ingestion.sync_completed_fixtures", "schedule": timedelta(seconds=PROVIDER_POLL_INTERVAL_SECONDS),
+    },
     # Milestone 11B — Provider Registry health monitoring (docs/admin_center.md §2a), the follow-
     # up ADR-011 flagged as needing Celery beat rather than a new scheduler.
     "check-all-provider-health": {

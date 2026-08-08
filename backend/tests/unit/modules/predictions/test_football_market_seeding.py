@@ -199,11 +199,14 @@ async def test_seed_maps_every_declared_required_feature(seeder, feature_mapping
 async def test_seed_applies_conservative_weights_to_new_stat_differential_features(
     seeder, feature_mapping_repo, market_repo
 ):
-    """The new possession/shots_total/corners/fouls/cards features (2026-08-03) must not get the
-    weight=1.0 default every other required feature gets — at their natural raw-stat scale that
-    would swamp the existing calibrated implied-probability/shots-on-target signal in the
-    weighted-sum predictors. football.both_teams_to_score is a representative market: it carries
-    both an original feature (shots_on_target, unweighted) and all five new ones."""
+    """The new possession/shots_total/corners/fouls/cards features (2026-08-03), plus the
+    original `form_shots_on_target_diff_last5` (audit fix, 2026-08-06 — see NEW_STAT_FEATURE_WEIGHTS'
+    own comment), must not get the weight=1.0 default the still-genuinely-0..1-scaled
+    implied-probability features correctly get — at their natural raw-stat scale that would swamp
+    the weighted-sum predictors' `raw_score` and saturate the sigmoid (confirmed live: a real
+    fixture landed at 99.97% before this fix, 82.9% after). football.both_teams_to_score is a
+    representative market: only `football.market.overround` is left relying on the unweighted
+    default here, correctly, since it's already a small bookmaker-margin fraction."""
     from modules.predictions.football.market_seeding import NEW_STAT_FEATURE_WEIGHTS
 
     await seeder.seed(T0)
@@ -211,10 +214,10 @@ async def test_seed_applies_conservative_weights_to_new_stat_differential_featur
     market = await market_repo.get_by_key("football.both_teams_to_score")
     mappings = {m.feature_key: m.weight for m in await feature_mapping_repo.list_by_market(market.id)}
 
-    assert mappings["football.fixture.form_shots_on_target_diff_last5"] == 1.0
     for feature_key, expected_weight in NEW_STAT_FEATURE_WEIGHTS.items():
         assert mappings[feature_key] == pytest.approx(expected_weight)
         assert expected_weight < 1.0
+    assert mappings["football.market.overround"] == 1.0
 
 
 @pytest.mark.asyncio

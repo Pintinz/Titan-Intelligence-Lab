@@ -41,7 +41,7 @@ from sklearn.svm import SVC, SVR
 
 from modules.predictions.domain.ml_value_objects import MLAlgorithm
 from modules.predictions.domain.value_objects import TargetType
-from modules.predictions.infrastructure.ml._math import feature_union, logit, sigmoid, vectorize
+from modules.predictions.infrastructure.ml._math import feature_union, logit, multiclass_prediction, sigmoid, vectorize
 from modules.predictions.ports.ml_model import (
     MIN_TRAINING_SAMPLES,
     InsufficientTrainingDataError,
@@ -128,6 +128,7 @@ class SklearnAdapter:
     target_type: TargetType = TargetType.CLASSIFICATION
     params: dict = field(default_factory=dict)
     feature_order: list[str] = field(default_factory=list)
+    class_labels: tuple[str, ...] = field(default_factory=tuple)
     _model: object | None = field(default=None, repr=False)
 
     async def fit(
@@ -163,6 +164,21 @@ class SklearnAdapter:
             raise ModelNotFittedError(f"SklearnAdapter({self.algorithm.value}).predict_one called before fit()/deserialize()")
         x = np.array([vectorize(features, self.feature_order)])
         if self.target_type is TargetType.CLASSIFICATION:
+            if self.class_labels:
+                # Multiclass (2026-08-06). Confirmed live against football.correct_score's real
+                # training data: RidgeClassifier has neither predict_proba nor a single-score
+                # decision_function for multiclass — it returns one raw score per class instead.
+                # Softmax-normalizing those scores is the direct multiclass generalization of the
+                # binary path's own sigmoid(decision_function) proxy below — same honest-estimate
+                # posture, just N-way instead of two-way.
+                classes_seen = _final_estimator(self._model).classes_
+                if hasattr(self._model, "predict_proba"):
+                    probabilities = self._model.predict_proba(x)[0]
+                else:
+                    scores = np.asarray(self._model.decision_function(x)[0], dtype=float)
+                    exp_scores = np.exp(scores - scores.max())
+                    probabilities = exp_scores / exp_scores.sum()
+                return multiclass_prediction(probabilities, classes_seen, self.class_labels)
             if hasattr(self._model, "predict_proba"):
                 probability = float(self._model.predict_proba(x)[0][1])
             else:
@@ -202,6 +218,7 @@ class SklearnAdapter:
                 "target_type": self.target_type,
                 "algorithm": self.algorithm,
                 "params": self.params,
+                "class_labels": self.class_labels,
             }
         )
 
@@ -212,3 +229,4 @@ class SklearnAdapter:
         self.target_type = state["target_type"]
         self.algorithm = state["algorithm"]
         self.params = state["params"]
+        self.class_labels = state.get("class_labels", ())

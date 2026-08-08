@@ -44,6 +44,34 @@ def _classification_dataset(n: int = 60, status: DatasetStatus = DatasetStatus.A
     )
 
 
+MULTICLASS_LABELS = ("LOW", "MID", "HIGH")
+
+
+def _multiclass_dataset(n: int = 90, status: DatasetStatus = DatasetStatus.APPROVED) -> Dataset:
+    """(2026-08-06) x1 alone linearly separates 3 classes — class index is the label, decoded back
+    through `MULTICLASS_LABELS` the same way football.match_winner/football.correct_score do."""
+    samples = []
+    for i in range(n):
+        x1 = float(i % 10) - 5.0
+        x2 = float((i * 3) % 10) - 5.0
+        class_index = 0 if x1 < -1.5 else (2 if x1 > 1.5 else 1)
+        samples.append(TrainingSample(features={"x1": x1, "x2": x2}, label=float(class_index)))
+    return Dataset(
+        id=DatasetId(uuid4()),
+        market_id=MarketId(uuid4()),
+        version=1,
+        content_hash="hash",
+        samples=samples,
+        statistics=DatasetStatistics(sample_count=n, feature_count=2, positive_rate=None),
+        lineage=DatasetLineage(
+            market_id=MarketId(uuid4()), source_prediction_ids=(), feature_keys=("x1", "x2"), built_at=T0,
+            class_labels=MULTICLASS_LABELS,
+        ),
+        status=status,
+        created_at=T0,
+    )
+
+
 @dataclass
 class _InMemoryArtifactStore:
     store: dict = field(default_factory=dict)
@@ -184,6 +212,20 @@ class TestSelect:
         dataset = _classification_dataset(n=45)
         result = await service.select(dataset, TargetType.CLASSIFICATION, candidates=FAST_CLASSIFICATION_CANDIDATES)
         assert len(result.all_candidates) == len(FAST_CLASSIFICATION_CANDIDATES)
+
+    async def test_multiclass_dataset_produces_a_real_multiclass_winner(self, service):
+        """(2026-08-06) `dataset.lineage.class_labels` (non-empty) is threaded onto every candidate
+        adapter before fit() — the winning model decodes a real label (not "positive"/"negative")
+        and reports a full distribution, the shape football.match_winner/football.correct_score
+        now train through."""
+        dataset = _multiclass_dataset()
+
+        result = await service.select(dataset, TargetType.CLASSIFICATION, candidates=FAST_CLASSIFICATION_CANDIDATES)
+
+        assert result.winning_model.class_labels == MULTICLASS_LABELS
+        prediction = result.winning_model.predict_one({"x1": -4.0, "x2": 0.0})
+        assert prediction.value in MULTICLASS_LABELS
+        assert set(prediction.distribution.keys()) == set(MULTICLASS_LABELS)
 
 
 class TestSelectAndRegisterChallenger:

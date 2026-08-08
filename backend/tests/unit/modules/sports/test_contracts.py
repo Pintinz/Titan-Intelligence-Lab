@@ -63,7 +63,7 @@ def test_normalize_provider_fixture_status_defaults_to_scheduled_for_missing_sta
     assert normalize_provider_fixture_status(raw) is FixtureStatus.SCHEDULED
 
 
-@pytest.mark.parametrize("raw", ["NS", "TBD", "ns"])
+@pytest.mark.parametrize("raw", ["NS", "TBD", "ns", "TIMED", "timed"])
 def test_normalize_provider_fixture_status_recognizes_not_started_codes(raw):
     assert normalize_provider_fixture_status(raw) is FixtureStatus.SCHEDULED
 

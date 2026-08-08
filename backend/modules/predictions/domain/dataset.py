@@ -13,10 +13,18 @@ assumed (ADR-052's original convention, obsoleted once `outcome_label_mapper.py`
 bare output). The Dataset Builder recovers the real positive/negative training label from
 `outcome.error` (whether the recorded prediction matched the real outcome) combined with
 `real_label_is_positive(market.market_key, prediction.value)` (what the prediction itself claimed) —
-see `dataset_builder_service._label_from_outcome`. For a market this can't resolve (no binary
-polarity — e.g. a 3-way market like `football.match_winner`), the sample is skipped, never
-mislabeled. For `TargetType.REGRESSION`, `actual_value` is the stringified continuous realized
-value, parsed with `float()` directly.
+see `dataset_builder_service._label_from_outcome`. For `TargetType.REGRESSION`, `actual_value` is
+the stringified continuous realized value, parsed with `float()` directly.
+
+**Multiclass classification (2026-08-06)**: a market whose `MARKET_OUTCOME_CATALOG` entry declares
+more than two `allowed_values` (e.g. `football.match_winner`'s HOME_WIN/DRAW/AWAY_WIN,
+`football.correct_score`'s 37-cell scoreline grid) has no binary polarity to recover at all — for
+these, `_label_from_outcome` instead recovers the sample's label as the float index of
+`outcome.actual_value` within that canonical `allowed_values` ordering (already the market's own
+real label, produced directly by a `THREE_WAY_MARKET_RESOLVERS`/`GRID_MARKET_RESOLVERS` resolver in
+`outcome_resolution_service.py` — no polarity mapping needed). `DatasetLineage.class_labels` carries
+that same ordering forward so `AutomaticModelSelectionService` can set it on each trained-model
+adapter before `fit()`, letting `predict_one()` decode a predicted index back to the real label.
 """
 
 from __future__ import annotations
@@ -88,6 +96,11 @@ class DatasetLineage:
     source_prediction_ids: tuple[str, ...]
     feature_keys: tuple[str, ...]
     built_at: datetime
+    class_labels: tuple[str, ...] = field(default_factory=tuple)
+    """(Multiclass classification support, 2026-08-06) The market's real label space in canonical
+    order, from `MARKET_OUTCOME_CATALOG[market_key].allowed_values` — populated only when the
+    market is a classification market with more than two outcomes; empty (the default) for every
+    binary-classification or regression dataset, unchanged from before this support existed."""
 
 
 @dataclass

@@ -1,9 +1,20 @@
 # TitanIQ — Design System
 
-Status: Live as of Milestone 10. Implements the token *names* fixed in Milestone 8
-(docs/ui_design_system.md §2) with real values. Original visual language — informed by, never a
-clone of, Linear/Stripe/TradingView/Notion/Vercel — reading as analytical, confident, and calm
-rather than a betting-odds board (docs/titaniq.md §4).
+Status: Live as of Milestone 10, but describes the **legacy** `tokens.css` / `components/ui/*`
+system — the one the marketing/auth/settings surfaces and early `/app` shell were built on. Since
+Milestone 11, a second, parallel system — **[`DESIGN_INFINITY.md`](../DESIGN_INFINITY.md)**
+(repo root; `tokens.infinity.css`, `components/infinity/*`) — is progressively replacing it as
+the live design language for `/app/*` intelligence surfaces (Mission Control, Match/Team/
+Competition Intelligence, Watchlist, Live, Operations Center, and more — migration has continued
+well past that document's own "Phase 11.1" status line, which is itself now stale on exactly this
+point). The two systems are additive/coexisting by design, not accidentally duplicated — see that
+document's "Coexistence with the legacy system" section for the real mechanics (distinct
+`--infinity-*` token namespace, distinct component folder, migrated one flagship page at a time).
+**If you're building a new `/app` intelligence page today, start from `DESIGN_INFINITY.md`, not
+this document.** This document remains accurate for whatever hasn't migrated yet. Implements the
+token *names* fixed in Milestone 8 (docs/ui_design_system.md §2) with real values. Original visual
+language — informed by, never a clone of, Linear/Stripe/TradingView/Notion/Vercel — reading as
+analytical, confident, and calm rather than a betting-odds board (docs/titaniq.md §4).
 
 ## 1. Brand identity
 

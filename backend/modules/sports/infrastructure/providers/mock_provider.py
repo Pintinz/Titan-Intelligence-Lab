@@ -154,7 +154,7 @@ class MockSportsDataProvider:
     async def fetch_countries(self) -> list[ProviderCountryRecord]:
         return [ProviderCountryRecord(code=code, name=name) for code, name in _COUNTRIES]
 
-    async def fetch_players(self, team_ref: ProviderRef) -> list[ProviderPlayerRecord]:
+    async def fetch_players(self, team_ref: ProviderRef, season_label: str | None = None) -> list[ProviderPlayerRecord]:
         rng = self._rng(f"players:{team_ref.external_id}")
         positions = _POSITIONS_BY_SPORT.get(self.sport_code, ("player",))
         roster_size = 15

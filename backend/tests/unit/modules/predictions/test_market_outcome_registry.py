@@ -26,11 +26,13 @@ EXPECTED_MARKETS_BY_SPORT: dict[str, set[str]] = {
 }
 
 # Every catalog entry pointing (directly, or via a brief-named alias like "baseball.winner") at a
-# real resolver — outcome_resolution_service.MARKET_OUTCOME_RESOLVERS (binary-polarity) plus
-# football.match_winner in THREE_WAY_MARKET_RESOLVERS (direct 3-way label equality, Phase 3).
+# real resolver — outcome_resolution_service.MARKET_OUTCOME_RESOLVERS (binary-polarity),
+# football.match_winner in THREE_WAY_MARKET_RESOLVERS (direct 3-way label equality, Phase 3), and
+# football.correct_score in GRID_MARKET_RESOLVERS (direct N-way label equality, 2026-08-06 audit
+# fix — same mechanics as THREE_WAY, just a 37-cell label space instead of 3).
 MARKETS_WITH_REAL_RESOLVER = {
     "football.both_teams_to_score", "football.total_goals_over_under", "football.home_team_total_goals",
-    "football.match_winner",
+    "football.match_winner", "football.correct_score",
     # 2026-08-02 football market catalog expansion — nine more real resolvers, all computable
     # from the final score alone.
     "football.total_goals_over_under_0_5", "football.total_goals_over_under_1_5",

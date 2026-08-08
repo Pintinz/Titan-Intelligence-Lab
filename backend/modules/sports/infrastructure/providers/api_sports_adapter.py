@@ -146,8 +146,8 @@ class ApiFootballAdapter(_ApiSportsHttpAdapterBase):
             )
         return records
 
-    async def fetch_players(self, team_ref: ProviderRef) -> list[ProviderPlayerRecord]:
-        payload = await self._get("/players", {"team": team_ref.external_id, "season": datetime.now().year})
+    async def fetch_players(self, team_ref: ProviderRef, season_label: str | None = None) -> list[ProviderPlayerRecord]:
+        payload = await self._get("/players", {"team": team_ref.external_id, "season": season_label or datetime.now().year})
         records = []
         for entry in payload.get("response", []):
             player = entry.get("player", {})
@@ -312,8 +312,8 @@ class ApiBasketballAdapter(_ApiSportsHttpAdapterBase):
             )
         return records
 
-    async def fetch_players(self, team_ref: ProviderRef) -> list[ProviderPlayerRecord]:
-        payload = await self._get("/players", {"team": team_ref.external_id, "season": datetime.now().year})
+    async def fetch_players(self, team_ref: ProviderRef, season_label: str | None = None) -> list[ProviderPlayerRecord]:
+        payload = await self._get("/players", {"team": team_ref.external_id, "season": season_label or datetime.now().year})
         records = []
         for entry in payload.get("response", []):
             player = entry if "id" in entry else entry.get("player", {})
@@ -423,8 +423,8 @@ class ApiBaseballAdapter(_ApiSportsHttpAdapterBase):
             )
         return records
 
-    async def fetch_players(self, team_ref: ProviderRef) -> list[ProviderPlayerRecord]:
-        payload = await self._get("/players", {"team": team_ref.external_id, "season": datetime.now().year})
+    async def fetch_players(self, team_ref: ProviderRef, season_label: str | None = None) -> list[ProviderPlayerRecord]:
+        payload = await self._get("/players", {"team": team_ref.external_id, "season": season_label or datetime.now().year})
         records = []
         for entry in payload.get("response", []):
             player = entry if "id" in entry else entry.get("player", {})

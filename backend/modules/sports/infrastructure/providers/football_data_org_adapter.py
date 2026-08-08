@@ -1,8 +1,10 @@
 """Real HTTP adapter for football-data.org (v4) — implements docs/architecture.md §5's Provider
-Adapter Pattern as a second, narrowly-scoped football provider used only for upcoming fixture
-schedules (see modules/sports/infrastructure/providers/provider_router.py's
-`fixture_schedule_adapters`), while api-football continues to serve results, statistics,
-lineups, and odds for every fixture regardless of which provider scheduled it. Field mapping
+Adapter Pattern as a second, narrowly-scoped football provider used only for fixture scheduling
+(see modules/sports/infrastructure/providers/provider_router.py's `fixture_schedule_adapters`):
+`fetch_fixtures` for not-yet-played matches and `fetch_completed_fixtures` for their eventual
+final scores, both confined to the current season (see `fetch_fixtures`'s docstring). api-football
+continues to serve statistics, lineups, and odds for every fixture regardless of which provider
+scheduled it. Field mapping
 follows the documented API v4 response envelope (docs.football-data.org/general/v4/); the
 request/auth/error-handling shape mirrors `_ApiSportsHttpAdapterBase`'s pattern in
 `api_sports_adapter.py` without subclassing it — football-data.org's auth header
@@ -32,18 +34,21 @@ from modules.sports.ports.provider_gateway import (
 
 # football-data.org's not-yet-played match statuses (docs.football-data.org/general/v4/match.html)
 # — SCHEDULED/TIMED both mean "not yet played," which is the entire reason this adapter exists.
-# Everything else (IN_PLAY/PAUSED/FINISHED/SUSPENDED/POSTPONED/CANCELLED/AWARDED) stays
-# api-football's job to report, so fetch_fixtures below only ever requests/returns these two.
+# Everything else (IN_PLAY/PAUSED/SUSPENDED/POSTPONED/CANCELLED/AWARDED) stays api-football's job
+# to report, so fetch_fixtures below only ever requests/returns these two. FINISHED is the one
+# exception: fetch_completed_fixtures requests it separately so a fixture this adapter created as
+# SCHEDULED/TIMED can later be updated with its final score (see that method's docstring).
 _UPCOMING_STATUSES = ("SCHEDULED", "TIMED")
+_COMPLETED_STATUSES = ("FINISHED",)
 
 
 class FootballDataOrgAdapter:
-    """Upcoming-fixtures-only football-data.org adapter. Implements the full
+    """Upcoming/completed-fixtures-only football-data.org adapter. Implements the full
     ``SportsDataProviderPort`` Protocol structurally so it plugs into ``SportsProviderRouter``
-    like any other adapter, but only ``fetch_fixtures``/``fetch_teams`` do real work — the rest
-    return an honest "not covered by this provider" empty result, following the exact precedent
-    ``ApiBasketballAdapter.fetch_lineups``/``fetch_team_statistics`` already set in
-    ``api_sports_adapter.py`` for "this provider genuinely doesn't have this data."
+    like any other adapter, but only ``fetch_fixtures``/``fetch_completed_fixtures``/``fetch_teams``
+    do real work — the rest return an honest "not covered by this provider" empty result,
+    following the exact precedent ``ApiBasketballAdapter.fetch_lineups``/``fetch_team_statistics``
+    already set in ``api_sports_adapter.py`` for "this provider genuinely doesn't have this data."
     """
 
     provider_key = "football_data_org"
@@ -90,6 +95,28 @@ class FootballDataOrgAdapter:
             )
         return records
 
+    def _to_fixture_record(
+        self, match: dict, competition_ref: str, season_label: str, now: datetime
+    ) -> ProviderFixtureRecord | None:
+        home, away = match.get("homeTeam") or {}, match.get("awayTeam") or {}
+        if home.get("id") is None or away.get("id") is None:
+            return None  # a small number of fixtures (e.g. playoff slots TBD) have no team assigned yet
+        competition = match.get("competition") or {}
+        utc_date = match.get("utcDate")
+        full_time = ((match.get("score") or {}).get("fullTime")) or {}
+        return ProviderFixtureRecord(
+            external_ref=ProviderRef(provider=self.provider_key, external_id=str(match.get("id"))),
+            home_team_ref=ProviderRef(provider=self.provider_key, external_id=str(home.get("id"))),
+            away_team_ref=ProviderRef(provider=self.provider_key, external_id=str(away.get("id"))),
+            scheduled_at=datetime.fromisoformat(utc_date.replace("Z", "+00:00")) if utc_date else now,
+            competition_ref=str(competition.get("id", competition_ref)),
+            season_label=season_label,
+            venue_name=match.get("venue"),
+            status=match.get("status"),
+            home_score=full_time.get("home"),
+            away_score=full_time.get("away"),
+        )
+
     async def fetch_fixtures(
         self, competition_ref: str, season_label: str, now: datetime
     ) -> list[ProviderFixtureRecord]:
@@ -103,26 +130,26 @@ class FootballDataOrgAdapter:
             f"/competitions/{competition_ref}/matches",
             {"status": ",".join(_UPCOMING_STATUSES)},
         )
-        records = []
-        for match in payload.get("matches", []):
-            home, away = match.get("homeTeam") or {}, match.get("awayTeam") or {}
-            if home.get("id") is None or away.get("id") is None:
-                continue  # a small number of fixtures (e.g. playoff slots TBD) have no team assigned yet
-            competition = match.get("competition") or {}
-            utc_date = match.get("utcDate")
-            records.append(
-                ProviderFixtureRecord(
-                    external_ref=ProviderRef(provider=self.provider_key, external_id=str(match.get("id"))),
-                    home_team_ref=ProviderRef(provider=self.provider_key, external_id=str(home.get("id"))),
-                    away_team_ref=ProviderRef(provider=self.provider_key, external_id=str(away.get("id"))),
-                    scheduled_at=datetime.fromisoformat(utc_date.replace("Z", "+00:00")) if utc_date else now,
-                    competition_ref=str(competition.get("id", competition_ref)),
-                    season_label=season_label,
-                    venue_name=match.get("venue"),
-                    status=match.get("status"),
-                )
-            )
-        return records
+        records = [self._to_fixture_record(match, competition_ref, season_label, now) for match in payload.get("matches", [])]
+        return [r for r in records if r is not None]
+
+    async def fetch_completed_fixtures(
+        self, competition_ref: str, season_label: str, now: datetime
+    ) -> list[ProviderFixtureRecord]:
+        """Companion to ``fetch_fixtures``, scoped to ``FINISHED`` matches instead of
+        SCHEDULED/TIMED. Exists so a fixture this adapter created while upcoming (for a
+        competition that opted into football-data.org as its fixture-schedule source via
+        ``CompetitionFixtureSourcePreference``) eventually gets its final score and COMPLETED
+        status — without this, such a fixture would sit at SCHEDULED forever, since api-football
+        never even sees it (it wasn't the provider that scheduled it). Still subject to the same
+        free-tier current-season-only scoping as ``fetch_fixtures`` — this is not a historical
+        backfill path."""
+        payload = await self._get(
+            f"/competitions/{competition_ref}/matches",
+            {"status": ",".join(_COMPLETED_STATUSES)},
+        )
+        records = [self._to_fixture_record(match, competition_ref, season_label, now) for match in payload.get("matches", [])]
+        return [r for r in records if r is not None]
 
     async def fetch_countries(self) -> list[ProviderCountryRecord]:
         """No dedicated countries/areas listing is used by this adapter — ``fetch_teams`` already
@@ -131,7 +158,7 @@ class FootballDataOrgAdapter:
         empty rather than adding a second, redundant countries source."""
         return []
 
-    async def fetch_players(self, team_ref: ProviderRef) -> list[ProviderPlayerRecord]:
+    async def fetch_players(self, team_ref: ProviderRef, season_label: str | None = None) -> list[ProviderPlayerRecord]:
         """Player rosters stay api-football's job — this adapter only serves fixture schedules."""
         return []
 
@@ -140,8 +167,8 @@ class FootballDataOrgAdapter:
         return []
 
     async def fetch_team_statistics(self, fixture_ref: ProviderRef) -> list[ProviderTeamStatisticsRecord]:
-        """Statistics stay api-football's job by design (see module docstring) — this adapter
-        never syncs a fixture far enough into the past to have statistics anyway."""
+        """Statistics stay api-football's job by design (see module docstring) — this adapter's
+        `fetch_completed_fixtures` only ever supplies the final score, never box-score stats."""
         return []
 
     async def fetch_lineups(self, fixture_ref: ProviderRef) -> list[ProviderLineupRecord]:

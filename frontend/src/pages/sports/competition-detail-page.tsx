@@ -1,19 +1,48 @@
+import { useMemo, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, ListOrdered, ListTree } from 'lucide-react'
+import { ArrowLeft, LayoutGrid, CalendarDays, History, ListOrdered, Users } from 'lucide-react'
 import { sportsApi } from '@/lib/api/sports'
+import { marketsApi } from '@/lib/api/markets'
 import { useSportParam } from '@/lib/hooks/use-sport'
+import { useWatchlist } from '@/lib/hooks/use-watchlist'
 import { fixtureCardStatus, fixtureScores } from '@/lib/sports-status'
 import { ErrorState } from '@/components/ui/error-state'
-import { InfinityPanel, InfinityLabel } from '@/components/infinity/primitives/panel'
-import { InfinitySkeleton } from '@/components/infinity/primitives/skeleton'
-import { InfinityEmptyState } from '@/components/infinity/primitives/empty-state'
-import { InfinityMatchCard } from '@/components/infinity/cards/match-card'
-import type { DomainKey } from '@/components/infinity/primitives/badge'
+import { CDPanel } from '@/components/command-deck/primitives/panel'
+import { CD_DOMAIN_COLOR_VAR, domainTint, type DomainKey } from '@/components/command-deck/primitives/domain'
+import { CompetitionDetailHero, type CompetitionStatus } from '@/components/command-deck/competition-detail-hero'
+import { CompetitionSnapshot } from '@/components/command-deck/competition-snapshot'
+import { CompetitionFixtureTimeline } from '@/components/command-deck/competition-fixture-timeline'
+import { CompetitionStandingsTable } from '@/components/command-deck/competition-standings-table'
+import { DiscoveryMatchCard } from '@/components/command-deck/discovery/discovery-match-card'
+import { MissionSection, MissionSkeletonGrid, MissionEmptyState } from '@/components/command-deck/mission-control/mission-section'
+import type { FixtureSummaryDto } from '@/lib/api/types'
 
+type TabKey = 'overview' | 'fixtures' | 'results' | 'standings' | 'teams'
+
+const TABS: Array<{ key: TabKey; label: string; icon: typeof LayoutGrid }> = [
+  { key: 'overview', label: 'Overview', icon: LayoutGrid },
+  { key: 'fixtures', label: 'Fixtures', icon: CalendarDays },
+  { key: 'results', label: 'Results', icon: History },
+  { key: 'standings', label: 'Standings', icon: ListOrdered },
+  { key: 'teams', label: 'Teams', icon: Users },
+]
+
+const OVERVIEW_LIMIT = 6
+const KICKOFF_TIME = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' })
+
+/**
+ * CompetitionDetailPage — Competition Intelligence, redesigned per the shaped brief (see chat).
+ * Every value traces to `getCompetition`/`competitionStandings`/`competitionFixtures` (one fetch
+ * each, already the page's own queries) plus one new sport-wide "AI ready" query — status,
+ * snapshot counts, teams, and chronological grouping are all deterministic transforms of that same
+ * already-fetched data, never a second fixture-fetching mechanism.
+ */
 export default function CompetitionDetailPage() {
   const sport = useSportParam()
   const { competitionId } = useParams<{ competitionId: string }>()
+  const watchlist = useWatchlist()
+  const [tab, setTab] = useState<TabKey>('overview')
 
   const competitionQuery = useQuery({
     queryKey: ['sports', 'competition', competitionId],
@@ -30,126 +59,277 @@ export default function CompetitionDetailPage() {
     queryFn: () => sportsApi.competitionFixtures(competitionId!),
     enabled: !!competitionId,
   })
+  const marketsQuery = useQuery({
+    queryKey: ['markets', sport?.code, 'production', 'competition-detail'],
+    queryFn: () => marketsApi.list({ sport_code: sport!.code, status: 'production' }),
+    enabled: !!sport,
+  })
+
+  const fixtures = fixturesQuery.data ?? []
+  const standings = standingsQuery.data ?? []
+  const aiReady = (marketsQuery.data?.length ?? 0) > 0
+
+  const live = useMemo(() => fixtures.filter((f) => fixtureCardStatus(f.status) === 'live'), [fixtures])
+  const upcoming = useMemo(
+    () => fixtures.filter((f) => fixtureCardStatus(f.status) === 'upcoming').sort((a, b) => new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime()),
+    [fixtures],
+  )
+  const completed = useMemo(
+    () => fixtures.filter((f) => fixtureCardStatus(f.status) === 'completed').sort((a, b) => new Date(b.scheduled_at).getTime() - new Date(a.scheduled_at).getTime()),
+    [fixtures],
+  )
+  const scheduleFixtures = useMemo(() => [...live, ...upcoming], [live, upcoming])
+  const overviewFixtures = useMemo(() => scheduleFixtures.slice(0, OVERVIEW_LIMIT), [scheduleFixtures])
+
+  const teams = useMemo(() => {
+    const rankByTeam = new Map(standings.map((row) => [row.team_id, row.rank]))
+    const byId = new Map<string, { id: string; name: string; logoUrl: string | null; rank: number | null }>()
+    for (const fixture of fixtures) {
+      for (const team of [fixture.home_team, fixture.away_team]) {
+        if (!byId.has(team.id)) byId.set(team.id, { id: team.id, name: team.name, logoUrl: team.logo_url, rank: rankByTeam.get(team.id) ?? null })
+      }
+    }
+    return [...byId.values()].sort((a, b) => (a.rank ?? Infinity) - (b.rank ?? Infinity) || a.name.localeCompare(b.name))
+  }, [fixtures, standings])
+
+  const status: CompetitionStatus = live.length > 0 ? 'active' : upcoming.length > 0 ? 'upcoming' : completed.length > 0 ? 'completed' : 'data-limited'
+
+  const nextMatch = overviewFixtures[0] ? `${overviewFixtures[0].home_team.name} vs ${overviewFixtures[0].away_team.name}` : null
+
+  const availableTabs = TABS.filter((t) => {
+    if (t.key === 'fixtures') return scheduleFixtures.length > 0
+    if (t.key === 'results') return completed.length > 0
+    if (t.key === 'teams') return teams.length > 0
+    return true
+  })
+  const activeTab = availableTabs.some((t) => t.key === tab) ? tab : 'overview'
 
   if (!sport) return null
   if (competitionQuery.isPending) {
     return (
-      <div className="space-y-4">
-        <InfinitySkeleton className="h-8 w-64" />
-        <InfinitySkeleton className="h-32" />
+      <div className="command-deck space-y-6 rounded-[var(--cd-radius-xl)]" style={{ backgroundColor: 'var(--cd-bg)', padding: '1.5rem' }}>
+        <div className="h-32 animate-pulse rounded-[var(--cd-radius-xl)]" style={{ background: 'var(--cd-card-surface)' }} />
+        <MissionSkeletonGrid count={3} />
       </div>
     )
   }
-  if (competitionQuery.isError) {
-    return <ErrorState error={competitionQuery.error} onRetry={() => void competitionQuery.refetch()} />
+  if (competitionQuery.isError || !competitionQuery.data) {
+    return (
+      <div className="command-deck rounded-[var(--cd-radius-xl)]" style={{ backgroundColor: 'var(--cd-bg)', padding: '1.5rem' }}>
+        <ErrorState error={competitionQuery.error} onRetry={() => void competitionQuery.refetch()} />
+      </div>
+    )
   }
 
   const competition = competitionQuery.data
   const domain = sport.slug as Extract<DomainKey, 'football' | 'basketball' | 'baseball' | 'table-tennis'>
+  const domainColor = CD_DOMAIN_COLOR_VAR[domain]
+
+  function cardFor(fixture: FixtureSummaryDto) {
+    const { homeScore, awayScore } = fixtureScores(fixture.final_state)
+    const sportSlug = fixture.sport_code ?? sport!.slug
+    return (
+      <DiscoveryMatchCard
+        key={fixture.id}
+        competition={competition.name}
+        competitionLogoUrl={competition.logo_url}
+        status={fixtureCardStatus(fixture.status)}
+        kickoffLabel={fixtureCardStatus(fixture.status) === 'completed' ? undefined : KICKOFF_TIME.format(new Date(fixture.scheduled_at))}
+        venue={fixture.venue_name}
+        homeTeam={fixture.home_team.name}
+        awayTeam={fixture.away_team.name}
+        homeScore={homeScore}
+        awayScore={awayScore}
+        homeLogoUrl={fixture.home_team.logo_url}
+        awayLogoUrl={fixture.away_team.logo_url}
+        aiAvailable={aiReady}
+        href={`/app/${sportSlug}/matches/${fixture.id}`}
+      />
+    )
+  }
 
   return (
-    <div className="max-w-4xl space-y-8">
+    <div className="command-deck space-y-6 rounded-[var(--cd-radius-xl)]" style={{ backgroundColor: 'var(--cd-bg)', padding: '1.5rem' }}>
       <Link
         to={`/app/${sport.slug}/competitions`}
-        className="inline-flex items-center gap-1 font-infinity-body text-[13px] text-infinity-text-secondary hover:text-infinity-text-primary"
+        className="inline-flex items-center gap-1 font-[var(--cd-font-body)] text-[13px] transition-colors"
+        style={{ color: 'var(--cd-text-secondary)' }}
       >
-        <ArrowLeft className="size-3.5" /> Back to competitions
+        <ArrowLeft className="size-3.5" aria-hidden="true" /> Back to competitions
       </Link>
 
-      <InfinityPanel tone={`var(--infinity-domain-${domain})`}>
-        <InfinityLabel tone={`var(--infinity-domain-${domain})`}>Competition Intelligence</InfinityLabel>
-        <div className="mt-2 flex items-center gap-3">
-          {competition.logo_url ? (
-            <img src={competition.logo_url} alt="" className="size-10 shrink-0 object-contain" loading="lazy" />
-          ) : (
-            <span
-              aria-hidden="true"
-              className="flex size-10 shrink-0 items-center justify-center rounded-sm bg-infinity-ground-2 font-infinity-mono text-sm font-semibold text-infinity-text-muted"
+      <CompetitionDetailHero
+        competition={competition}
+        sportLabel={sport.label}
+        sportDomain={domain}
+        status={status}
+        following={watchlist.isFollowing('competition', competition.id)}
+        onToggleFollow={() => watchlist.toggle('competition', competition.id)}
+        onViewFixtures={() => setTab(scheduleFixtures.length > 0 ? 'fixtures' : 'overview')}
+        onViewTeams={() => setTab('teams')}
+      />
+
+      <CompetitionSnapshot fixtures={fixtures.length} upcoming={live.length + upcoming.length} completed={completed.length} teams={teams.length} nextMatch={nextMatch} />
+
+      <div role="tablist" aria-label="Competition sections" className="-mx-1 flex w-fit max-w-full gap-1 overflow-x-auto rounded-[var(--cd-radius-md)] border p-1 backdrop-blur-md" style={{ borderColor: 'var(--cd-border-default)', backgroundColor: 'color-mix(in srgb, var(--cd-surface-2) 70%, transparent)' }}>
+        {availableTabs.map(({ key, label, icon: Icon }) => {
+          const active = key === activeTab
+          return (
+            <button
+              key={key}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              onClick={() => setTab(key)}
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-[var(--cd-radius-sm)] px-3.5 py-1.5 font-[var(--cd-font-body)] text-[12.5px] font-semibold transition-all duration-[var(--cd-motion-base)]"
+              style={{
+                backgroundColor: active ? domainTint(domain, 16) : 'transparent',
+                boxShadow: active ? `0 0 0 1px ${domainTint(domain, 40)} inset` : 'none',
+                color: active ? domainColor : 'var(--cd-text-secondary)',
+              }}
             >
-              {competition.name.charAt(0).toUpperCase()}
-            </span>
-          )}
-          <h1 className="font-infinity-display text-2xl font-semibold text-infinity-text-primary sm:text-3xl">{competition.name}</h1>
-        </div>
-        {(competition.type || competition.country) && (
-          <p className="mt-2 font-infinity-mono text-[12px] text-infinity-text-secondary">
-            {[competition.type, competition.country].filter(Boolean).join(' · ')}
-          </p>
-        )}
-      </InfinityPanel>
-
-      <div>
-        <div className="mb-4 flex items-center gap-2">
-          <ListOrdered className="size-4 text-infinity-text-muted" aria-hidden="true" />
-          <p className="font-infinity-display text-[15px] font-semibold text-infinity-text-primary">Standings</p>
-        </div>
-        {standingsQuery.isPending && <InfinitySkeleton className="h-40" />}
-        {standingsQuery.data && standingsQuery.data.length === 0 && (
-          <InfinityEmptyState icon={ListOrdered} title="No standings available" description="This competition has no standings on file yet." />
-        )}
-        {standingsQuery.data && standingsQuery.data.length > 0 && (
-          <InfinityPanel className="!p-0 overflow-hidden">
-            <table className="w-full font-infinity-body text-[13px]">
-              <thead>
-                <tr className="border-b border-infinity-border-hairline bg-infinity-ground-2 text-left">
-                  <th className="px-4 py-2.5 text-[11px] font-medium uppercase tracking-[0.06em] text-infinity-text-muted">Rank</th>
-                  <th className="px-4 py-2.5 text-[11px] font-medium uppercase tracking-[0.06em] text-infinity-text-muted">Team</th>
-                  <th className="px-4 py-2.5 text-right text-[11px] font-medium uppercase tracking-[0.06em] text-infinity-text-muted">Points</th>
-                </tr>
-              </thead>
-              <tbody>
-                {standingsQuery.data.map((row) => (
-                  <tr key={row.team_id} className="border-t border-infinity-border-hairline first:border-t-0">
-                    <td className="px-4 py-2.5 font-infinity-mono tabular-nums text-infinity-text-secondary">{row.rank}</td>
-                    <td className="px-4 py-2.5 text-infinity-text-primary">
-                      <Link to={`/app/${sport.slug}/teams/${row.team_id}`} className="hover:text-infinity-signal">
-                        {row.team_name}
-                      </Link>
-                    </td>
-                    <td className="px-4 py-2.5 text-right font-infinity-telemetry tabular-nums text-infinity-text-primary">{row.points}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </InfinityPanel>
-        )}
+              <Icon className="size-3.5" aria-hidden="true" />
+              {label}
+            </button>
+          )
+        })}
       </div>
 
-      <div>
-        <div className="mb-4 flex items-center gap-2">
-          <ListTree className="size-4 text-infinity-text-muted" aria-hidden="true" />
-          <p className="font-infinity-display text-[15px] font-semibold text-infinity-text-primary">Fixtures</p>
-        </div>
-        {fixturesQuery.isPending && <InfinitySkeleton className="h-24" />}
-        {fixturesQuery.data && fixturesQuery.data.length === 0 && (
-          <InfinityEmptyState icon={ListTree} title="No fixtures scheduled" description="Nothing under coverage for this competition right now." />
-        )}
-        {fixturesQuery.data && fixturesQuery.data.length > 0 && (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {fixturesQuery.data.map((fixture) => {
-              const { homeScore, awayScore } = fixtureScores(fixture.final_state)
-              return (
-                <InfinityMatchCard
-                  key={fixture.id}
-                  sport={domain}
-                  competition={competition.name}
-                  competitionLogoUrl={competition.logo_url}
-                  status={fixtureCardStatus(fixture.status)}
-                  kickoff={new Date(fixture.scheduled_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
-                  venue={fixture.venue_name}
-                  homeTeam={fixture.home_team.name}
-                  awayTeam={fixture.away_team.name}
-                  homeScore={homeScore}
-                  awayScore={awayScore}
-                  homeLogoUrl={fixture.home_team.logo_url}
-                  awayLogoUrl={fixture.away_team.logo_url}
-                  href={`/app/${sport.slug}/matches/${fixture.id}`}
-                />
-              )
-            })}
+      {activeTab === 'overview' && (
+        <div className="grid gap-6 lg:grid-cols-12">
+          <div className="lg:col-span-8">
+            <MissionSection
+              title="Upcoming"
+              subtitle={scheduleFixtures.length > OVERVIEW_LIMIT ? `Next ${OVERVIEW_LIMIT} of ${scheduleFixtures.length} fixtures` : undefined}
+              icon={<CalendarDays className="size-4" aria-hidden="true" />}
+              domain={domain}
+            >
+              {overviewFixtures.length === 0 ? (
+                <MissionEmptyState icon={CalendarDays} title="No upcoming fixtures" description="There are currently no scheduled fixtures in this competition." />
+              ) : (
+                <div className="grid gap-3 sm:grid-cols-2">{overviewFixtures.map((f) => cardFor(f))}</div>
+              )}
+              {scheduleFixtures.length > OVERVIEW_LIMIT && (
+                <button
+                  type="button"
+                  onClick={() => setTab('fixtures')}
+                  className="mt-4 font-[var(--cd-font-body)] text-[12.5px] font-semibold transition-colors"
+                  style={{ color: 'var(--cd-accent)' }}
+                >
+                  View all fixtures →
+                </button>
+              )}
+            </MissionSection>
           </div>
-        )}
-      </div>
+
+          <div className="space-y-6 lg:col-span-4">
+            {completed.length > 0 && (
+              <MissionSection title="Latest Result" icon={<History className="size-4" aria-hidden="true" />}>
+                {cardFor(completed[0])}
+              </MissionSection>
+            )}
+            <MissionSection title="Table" icon={<ListOrdered className="size-4" aria-hidden="true" />}>
+              {standings.length === 0 ? (
+                <MissionEmptyState icon={ListOrdered} title="Standings unavailable" description="TitanIQ has not received standings data for this competition yet." />
+              ) : (
+                <CDPanel padding="none" className="overflow-hidden">
+                  <div className="divide-y" style={{ borderColor: 'var(--cd-border-hairline)' }}>
+                    {standings.slice(0, 5).map((row) => (
+                      <div key={row.team_id} className="flex items-center justify-between gap-3 px-4 py-2.5" style={{ borderColor: 'var(--cd-border-hairline)' }}>
+                        <span className="flex min-w-0 items-center gap-2.5">
+                          <span className="font-[var(--cd-font-tabular)] text-[12px] tabular-nums" style={{ color: 'var(--cd-text-muted)' }}>
+                            {row.rank}
+                          </span>
+                          <Link to={`/app/${sport.slug}/teams/${row.team_id}`} className="truncate font-[var(--cd-font-body)] text-[13px] font-medium" style={{ color: 'var(--cd-text-primary)' }}>
+                            {row.team_name}
+                          </Link>
+                        </span>
+                        <span className="shrink-0 font-[var(--cd-font-tabular)] text-[13px] font-bold tabular-nums" style={{ color: 'var(--cd-text-primary)' }}>
+                          {row.points}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </CDPanel>
+              )}
+              {standings.length > 5 && (
+                <button
+                  type="button"
+                  onClick={() => setTab('standings')}
+                  className="mt-3 font-[var(--cd-font-body)] text-[12.5px] font-semibold transition-colors"
+                  style={{ color: 'var(--cd-accent)' }}
+                >
+                  Full table →
+                </button>
+              )}
+            </MissionSection>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'fixtures' && (
+        <MissionSection title="Fixtures" subtitle={`${scheduleFixtures.length} scheduled`} icon={<CalendarDays className="size-4" aria-hidden="true" />}>
+          {scheduleFixtures.length === 0 ? (
+            <MissionEmptyState icon={CalendarDays} title="No upcoming fixtures" description="There are currently no scheduled fixtures in this competition." />
+          ) : (
+            <CompetitionFixtureTimeline fixtures={scheduleFixtures} fallbackSportSlug={sport.slug} aiReady={aiReady} />
+          )}
+        </MissionSection>
+      )}
+
+      {activeTab === 'results' && (
+        <MissionSection title="Recent Results" subtitle={`${completed.length} completed`} icon={<History className="size-4" aria-hidden="true" />}>
+          {completed.length === 0 ? (
+            <MissionEmptyState icon={History} title="No recent results" description="Completed fixtures will appear here once available." />
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{completed.map((f) => cardFor(f))}</div>
+          )}
+        </MissionSection>
+      )}
+
+      {activeTab === 'standings' && (
+        <MissionSection title="Standings" icon={<ListOrdered className="size-4" aria-hidden="true" />}>
+          <CompetitionStandingsTable standings={standings} sportSlug={sport.slug} />
+        </MissionSection>
+      )}
+
+      {activeTab === 'teams' && (
+        <MissionSection title="Teams" subtitle={`${teams.length} in this competition`} icon={<Users className="size-4" aria-hidden="true" />}>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {teams.map((team) => (
+              <Link
+                key={team.id}
+                to={`/app/${sport.slug}/teams/${team.id}`}
+                className="group flex items-center gap-3 rounded-[var(--cd-radius-md)] border p-3 transition-colors duration-[var(--cd-motion-base)]"
+                style={{ borderColor: 'var(--cd-border-default)', backgroundColor: 'var(--cd-surface-1)' }}
+              >
+                <span
+                  className="flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-[var(--cd-radius-sm)] border"
+                  style={{ borderColor: 'var(--cd-border-default)', backgroundColor: 'var(--cd-surface-3)' }}
+                >
+                  {team.logoUrl ? (
+                    <img src={team.logoUrl} alt="" className="size-6 object-contain" loading="lazy" />
+                  ) : (
+                    <span aria-hidden="true" className="font-[var(--cd-font-display)] text-[13px] font-semibold" style={{ color: domainColor }}>
+                      {team.name.charAt(0).toUpperCase()}
+                    </span>
+                  )}
+                </span>
+                <span className="min-w-0">
+                  <span className="block truncate font-[var(--cd-font-body)] text-[13.5px] font-medium" style={{ color: 'var(--cd-text-primary)' }}>
+                    {team.name}
+                  </span>
+                  {team.rank !== null && (
+                    <span className="font-[var(--cd-font-telemetry)] text-[10.5px] uppercase tracking-[0.05em]" style={{ color: 'var(--cd-text-muted)' }}>
+                      Rank {team.rank}
+                    </span>
+                  )}
+                </span>
+              </Link>
+            ))}
+          </div>
+        </MissionSection>
+      )}
     </div>
   )
 }

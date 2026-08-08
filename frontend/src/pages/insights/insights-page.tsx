@@ -1,375 +1,422 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
-import { Sparkles, ArrowUp, GitCompare, MessageCircle, Waypoints, X, Users, CircleDot } from 'lucide-react'
-import { sportsApi, SPORT_OPTIONS, type SportCode } from '@/lib/api/sports'
-import { InfinityPanel, InfinityLabel } from '@/components/infinity/primitives/panel'
-import { InfinityButton } from '@/components/infinity/primitives/button'
-import { InfinityInput, InfinitySearchInput } from '@/components/infinity/primitives/input'
-import { InfinitySkeleton } from '@/components/infinity/primitives/skeleton'
-import { InfinityEmptyState } from '@/components/infinity/primitives/empty-state'
-import { HistoryTurn, CompareTurn, PulseTurn, RelationshipsTurn, NoteTurn, EvidencePanel } from './insights-turns'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { Sparkles, GitCompare, Waypoints, Download, Save } from 'lucide-react'
+import { sportsApi } from '@/lib/api/sports'
+import { marketsApi } from '@/lib/api/markets'
+import { predictionsApi } from '@/lib/api/predictions'
+import { intelligenceApi } from '@/lib/api/intelligence'
+import { graphApi } from '@/lib/api/graph'
+import { SPORT_SLUGS, type SportMeta } from '@/lib/hooks/use-sport'
+import { useInvestigationWorkspace, kgNodeTypeFor, type EntityKind, type WorkspaceEntity } from '@/lib/hooks/use-investigation-workspace'
+import { useWorkspaceCommandStore } from '@/stores/workspace-command-store'
+import { WorkspaceHero, WORKSPACE_QUICK_ACTION_ICONS, type QuickActionSpec } from '@/components/command-deck/workspace/workspace-hero'
+import { InvestigationHeader } from '@/components/command-deck/workspace/investigation-header'
+import { InvestigationContextRail } from '@/components/command-deck/workspace/investigation-context-rail'
+import { WorkspaceComposer } from '@/components/command-deck/workspace/workspace-composer'
+import { WorkspaceTabBar, MissionBriefTab, PredictionIntelligenceTab, ComparisonTab, PredictionTimelineTab, RelatedFixturesTab, DecisionIntelligenceTab, type CanvasTab } from '@/components/command-deck/workspace/workspace-tabs'
+import { EvidenceInspector } from '@/components/command-deck/workspace/evidence-inspector'
+import { KnowledgeGraphPanel } from '@/components/command-deck/workspace/knowledge-graph-panel'
+import { IntelligenceCompleteness, type CompletenessItem } from '@/components/command-deck/workspace/intelligence-completeness'
+import { InvestigationNotebook } from '@/components/command-deck/workspace/investigation-notebook'
+import { WorkspaceActionBar } from '@/components/command-deck/workspace/workspace-action-bar'
+import { WorkspaceEmptyState } from '@/components/command-deck/workspace/workspace-empty-state'
 
-export type PinnedKind = 'team' | 'fixture'
-
-export interface PinnedEntity {
-  kind: PinnedKind
-  id: string
-  label: string
+function entityKey(e: WorkspaceEntity | null) {
+  return e ? `${e.kind}:${e.id}` : null
 }
-
-interface Selection {
-  id: string
-  label: string
-}
-
-type Turn =
-  | { id: number; kind: 'history'; entity: PinnedEntity }
-  | { id: number; kind: 'compare'; predictionIds: string[]; labels: Record<string, string> }
-  | { id: number; kind: 'pulse' }
-  | { id: number; kind: 'relationships'; a: PinnedEntity; b: PinnedEntity }
-  | { id: number; kind: 'note'; message: string }
-
-/** Distributes over the `Turn` union (plain `Omit<Turn, 'id'>` would collapse to the shared
- * fields only, since `keyof` a union is an intersection) — this preserves each variant's own
- * fields so `appendTurn` can be called with any turn kind's actual shape, sans `id`. */
-type TurnInput = Turn extends infer T ? (T extends { id: number } ? Omit<T, 'id'> : never) : never
 
 export default function InsightsPage() {
+  const workspace = useInvestigationWorkspace()
+  const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
-  const nextId = useRef(0)
 
-  const [sportCode, setSportCode] = useState<SportCode | ''>('')
-  const [entityKind, setEntityKind] = useState<PinnedKind>('team')
+  const [sport, setSport] = useState<SportMeta>(SPORT_SLUGS[0])
+  const [entityKind, setEntityKind] = useState<EntityKind>('fixture')
   const [query, setQuery] = useState('')
-  const [pinned, setPinned] = useState<PinnedEntity[]>([])
-  const [turns, setTurns] = useState<Turn[]>([])
-  const [selected, setSelected] = useState<Selection[]>([])
-  const [focusedPredictionId, setFocusedPredictionId] = useState<string | null>(null)
-  const [freeText, setFreeText] = useState('')
+  const [activeTab, setActiveTab] = useState<CanvasTab>('mission-brief')
+  const [selectedMarketKey, setSelectedMarketKey] = useState<string | null>(null)
+  const [compareSelected, setCompareSelected] = useState<{ id: string; label: string }[]>([])
+  const [kgCollapsed, setKgCollapsed] = useState(false)
+  const [kgDrawerOpen, setKgDrawerOpen] = useState(false)
+  const [notebookOpen, setNotebookOpen] = useState(false)
 
-  function appendTurn(turn: TurnInput) {
-    nextId.current += 1
-    setTurns((prev) => [...prev, { ...turn, id: nextId.current } as Turn])
-  }
+  const focused = workspace.focused
 
-  function pin(entity: PinnedEntity) {
-    setPinned((prev) => (prev.some((p) => p.kind === entity.kind && p.id === entity.id) ? prev : [...prev, entity]))
-    // Guards against double-pinning (e.g. React StrictMode's double effect invocation on the
-    // cross-link auto-pin below) re-appending a duplicate history turn for the same entity.
-    setTurns((prev) => {
-      const alreadyHasHistory = prev.some(
-        (t) => t.kind === 'history' && t.entity.kind === entity.kind && t.entity.id === entity.id,
-      )
-      if (alreadyHasHistory) return prev
-      nextId.current += 1
-      return [...prev, { id: nextId.current, kind: 'history', entity }]
-    })
+  // -- Cross-link entry points (?pin_type=&pin_id=[&pin_id_2=]) — same scheme already used across
+  // the app, extended to competition/player alongside the original fixture/team. --------------
+  const pinType = searchParams.get('pin_type') as EntityKind | null
+  const pinId = searchParams.get('pin_id')
+  const pinId2 = searchParams.get('pin_id_2')
+
+  const crossLinkFixture = useQuery({ queryKey: ['sports', 'fixture', pinId], queryFn: () => sportsApi.getFixture(pinId!), enabled: pinType === 'fixture' && !!pinId })
+  const crossLinkTeam = useQuery({ queryKey: ['sports', 'team', pinId], queryFn: () => sportsApi.getTeam(pinId!), enabled: pinType === 'team' && !!pinId })
+  const crossLinkTeam2 = useQuery({ queryKey: ['sports', 'team', pinId2], queryFn: () => sportsApi.getTeam(pinId2!), enabled: pinType === 'team' && !!pinId2 })
+  const crossLinkCompetition = useQuery({ queryKey: ['sports', 'competition', pinId], queryFn: () => sportsApi.getCompetition(pinId!), enabled: pinType === 'competition' && !!pinId })
+  const crossLinkPlayer = useQuery({ queryKey: ['sports', 'player', pinId], queryFn: () => sportsApi.getPlayer(pinId!), enabled: pinType === 'player' && !!pinId })
+
+  useEffect(() => {
+    if (crossLinkFixture.data) {
+      const f = crossLinkFixture.data
+      workspace.pin({ kind: 'fixture', id: f.id, label: `${f.home_team.short_name} vs ${f.away_team.short_name}`, meta: f.competition_name })
+      setSearchParams((prev) => { const n = new URLSearchParams(prev); n.delete('pin_type'); n.delete('pin_id'); return n })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [crossLinkFixture.data])
+
+  useEffect(() => {
+    if (crossLinkCompetition.data) {
+      const c = crossLinkCompetition.data
+      workspace.pin({ kind: 'competition', id: c.id, label: c.name, meta: c.country ?? undefined, logoUrl: c.logo_url })
+      setSearchParams((prev) => { const n = new URLSearchParams(prev); n.delete('pin_type'); n.delete('pin_id'); return n })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [crossLinkCompetition.data])
+
+  useEffect(() => {
+    if (crossLinkPlayer.data) {
+      const p = crossLinkPlayer.data
+      workspace.pin({ kind: 'player', id: p.id, label: p.name, meta: p.team_name ?? undefined })
+      setSearchParams((prev) => { const n = new URLSearchParams(prev); n.delete('pin_type'); n.delete('pin_id'); return n })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [crossLinkPlayer.data])
+
+  useEffect(() => {
+    if (crossLinkTeam.data && crossLinkTeam2.data) {
+      workspace.pin({ kind: 'team', id: crossLinkTeam.data.id, label: crossLinkTeam.data.name, logoUrl: crossLinkTeam.data.logo_url })
+      workspace.pin({ kind: 'team', id: crossLinkTeam2.data.id, label: crossLinkTeam2.data.name, logoUrl: crossLinkTeam2.data.logo_url })
+      setSearchParams((prev) => { const n = new URLSearchParams(prev); n.delete('pin_type'); n.delete('pin_id'); n.delete('pin_id_2'); return n })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [crossLinkTeam.data, crossLinkTeam2.data])
+
+  // -- Search (current sport + entity kind) ------------------------------------------------------
+  const teamsQuery = useQuery({ queryKey: ['sports', 'teams', sport.code], queryFn: () => sportsApi.listTeams(sport.code), enabled: entityKind === 'team' })
+  const fixturesQuery = useQuery({ queryKey: ['sports', 'fixtures', sport.code], queryFn: () => sportsApi.listFixtures(sport.code, { limit: 50 }), enabled: entityKind === 'fixture' })
+  const competitionsQuery = useQuery({ queryKey: ['sports', 'competitions', sport.code], queryFn: () => sportsApi.listCompetitions(sport.code), enabled: entityKind === 'competition' })
+  const playersQuery = useQuery({ queryKey: ['sports', 'players', sport.code], queryFn: () => sportsApi.listPlayers(sport.code, 100), enabled: entityKind === 'player' })
+
+  const searching = query.trim().length > 0
+  const q = query.trim().toLowerCase()
+  const teamResults = searching && entityKind === 'team' ? (teamsQuery.data ?? []).filter((t) => t.name.toLowerCase().includes(q)).slice(0, 8) : []
+  const fixtureResults = searching && entityKind === 'fixture' ? (fixturesQuery.data ?? []).filter((f) => `${f.home_team.name} ${f.away_team.name}`.toLowerCase().includes(q)).slice(0, 8) : []
+  const competitionResults = searching && entityKind === 'competition' ? (competitionsQuery.data ?? []).filter((c) => c.name.toLowerCase().includes(q)).slice(0, 8) : []
+  const playerResults = searching && entityKind === 'player' ? (playersQuery.data ?? []).filter((p) => p.name.toLowerCase().includes(q)).slice(0, 8) : []
+
+  function focusFixture(f: NonNullable<typeof fixtureResults>[number]) {
+    workspace.pin({ kind: 'fixture', id: f.id, label: `${f.home_team.short_name} vs ${f.away_team.short_name}`, meta: f.competition_name })
     setQuery('')
   }
 
-  function unpin(entity: PinnedEntity) {
-    setPinned((prev) => prev.filter((p) => !(p.kind === entity.kind && p.id === entity.id)))
+  // -- Focused-entity data --------------------------------------------------------------------
+  const fixtureDetailQuery = useQuery({
+    queryKey: ['sports', 'fixture', focused?.kind === 'fixture' ? focused.id : null],
+    queryFn: () => sportsApi.getFixture(focused!.id),
+    enabled: focused?.kind === 'fixture',
+  })
+
+  const marketsQuery = useQuery({ queryKey: ['markets', sport.code, 'production'], queryFn: () => marketsApi.list({ sport_code: sport.code, status: 'production' }) })
+  const markets = marketsQuery.data ?? []
+
+  const historyQuery = useQuery({
+    queryKey: ['predictions', 'history', focused?.id],
+    queryFn: () => predictionsApi.history(focused!.id),
+    enabled: !!focused,
+  })
+  const history = historyQuery.data ?? []
+
+  const newsQuery = useQuery({
+    queryKey: ['intelligence', 'news-for-entity', focused?.id],
+    queryFn: () => intelligenceApi.newsForEntity(focused!.id, 20),
+    enabled: !!focused,
+  })
+
+  const kgNodeType = focused ? kgNodeTypeFor(focused.kind) : null
+  const kgEntityQuery = useQuery({
+    queryKey: ['graph', 'entity', kgNodeType, focused?.id],
+    queryFn: () => graphApi.getEntity(kgNodeType!, focused!.id),
+    enabled: !!focused,
+    retry: false,
+  })
+
+  const focusedPredictionQuery = useQuery({
+    queryKey: ['predictions', workspace.focusedPredictionId],
+    queryFn: () => predictionsApi.get(workspace.focusedPredictionId!),
+    enabled: !!workspace.focusedPredictionId,
+  })
+
+  const generateMutation = useMutation({
+    mutationFn: (marketKey: string) =>
+      predictionsApi.generate({ market_key: marketKey, entity_type: 'fixture', entity_id: focused!.id, subject_ref: focused!.id }),
+    onSuccess: (prediction) => {
+      void queryClient.invalidateQueries({ queryKey: ['predictions', 'history', focused?.id] })
+      workspace.setFocusedPredictionId(prediction.id)
+      setSelectedMarketKey(null)
+    },
+  })
+
+  const homeTeam = fixtureDetailQuery.data ? { name: fixtureDetailQuery.data.home_team.name, logoUrl: fixtureDetailQuery.data.home_team.logo_url } : undefined
+  const awayTeam = fixtureDetailQuery.data ? { name: fixtureDetailQuery.data.away_team.name, logoUrl: fixtureDetailQuery.data.away_team.logo_url } : undefined
+
+  const generatedCount = new Set(history.map((p) => p.market_id)).size
+  const canGenerate = focused?.kind === 'fixture' && markets.length > 0
+
+  const completenessItems: CompletenessItem[] = focused
+    ? [
+        { key: 'prediction', label: 'Prediction', state: generatedCount > 0 ? 'complete' : 'pending' },
+        { key: 'statistics', label: 'Statistics', state: focused.kind === 'fixture' ? 'pending' : 'unavailable' },
+        { key: 'graph', label: 'Knowledge Graph', state: kgEntityQuery.data ? 'complete' : kgEntityQuery.isError ? 'pending' : 'pending' },
+        { key: 'news', label: 'News', state: (newsQuery.data?.length ?? 0) > 0 ? 'complete' : 'pending' },
+        { key: 'lineups', label: 'Lineups', state: 'unavailable' },
+        { key: 'officials', label: 'Officials', state: 'unavailable' },
+      ]
+    : []
+
+  function handleToggleCompare(predictionId: string, label: string) {
+    setCompareSelected((prev) => (prev.some((c) => c.id === predictionId) ? prev.filter((c) => c.id !== predictionId) : [...prev, { id: predictionId, label }]))
   }
 
-  // Cross-link entry point: Match Intelligence pages link here with ?pin_type=fixture&pin_id=...
-  const pinFixtureId = searchParams.get('pin_id')
-  const pinType = searchParams.get('pin_type')
-  const crossLinkFixtureQuery = useQuery({
-    queryKey: ['sports', 'fixture', pinFixtureId],
-    queryFn: () => sportsApi.getFixture(pinFixtureId!),
-    enabled: pinType === 'fixture' && !!pinFixtureId,
-  })
+  function handleFocusEntity(entity: WorkspaceEntity) {
+    workspace.focus(entity)
+    setActiveTab('mission-brief')
+    setSelectedMarketKey(null)
+  }
+
+  const quickActions: QuickActionSpec[] = [
+    { key: 'generate', label: 'Generate Intelligence', icon: WORKSPACE_QUICK_ACTION_ICONS.generate, onClick: () => setActiveTab('predictions'), disabled: !canGenerate },
+    { key: 'compare', label: 'Compare Teams', icon: WORKSPACE_QUICK_ACTION_ICONS.compare, onClick: () => setActiveTab('comparison') },
+    { key: 'graph', label: 'Knowledge Graph', icon: WORKSPACE_QUICK_ACTION_ICONS.graph, onClick: () => setKgDrawerOpen(true), disabled: !focused },
+  ]
+
+  function openGraph() {
+    setKgDrawerOpen(true)
+    document.getElementById('workspace-kg-panel')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }
+
+  // -- Publish real, currently-available actions into the one global Command Palette (⌘K) ------
+  const setWorkspaceCommands = useWorkspaceCommandStore((s) => s.setCommands)
+  const clearWorkspaceCommands = useWorkspaceCommandStore((s) => s.clearCommands)
   useEffect(() => {
-    if (!crossLinkFixtureQuery.data) return
-    const f = crossLinkFixtureQuery.data
-    pin({ kind: 'fixture', id: f.id, label: `${f.home_team.short_name} vs ${f.away_team.short_name}` })
-    setSearchParams((prev) => {
-      const next = new URLSearchParams(prev)
-      next.delete('pin_type')
-      next.delete('pin_id')
-      return next
-    })
+    if (!focused) {
+      clearWorkspaceCommands()
+      return
+    }
+    setWorkspaceCommands([
+      ...(canGenerate ? [{ id: 'generate', label: 'Generate Intelligence', icon: Sparkles, run: () => setActiveTab('predictions') }] : []),
+      { id: 'compare', label: 'Compare Teams', icon: GitCompare, run: () => setActiveTab('comparison') },
+      { id: 'graph', label: 'Open Knowledge Graph', icon: Waypoints, run: openGraph },
+      { id: 'export', label: 'Export Report', icon: Download, run: () => setNotebookOpen(true) },
+      { id: 'save', label: 'Save Session', icon: Save, run: workspace.saveSession },
+    ])
+    return () => clearWorkspaceCommands()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [crossLinkFixtureQuery.data])
-
-  const teamsQuery = useQuery({
-    queryKey: ['sports', 'teams', sportCode],
-    queryFn: () => sportsApi.listTeams(sportCode as SportCode),
-    enabled: !!sportCode && entityKind === 'team',
-  })
-  const fixturesQuery = useQuery({
-    queryKey: ['sports', 'fixtures', sportCode],
-    queryFn: () => sportsApi.listFixtures(sportCode as SportCode, { limit: 50 }),
-    enabled: !!sportCode && entityKind === 'fixture',
-  })
-
-  const teamResults = (teamsQuery.data ?? [])
-    .filter((t) => t.name.toLowerCase().includes(query.toLowerCase()))
-    .slice(0, 8)
-  const fixtureResults = (fixturesQuery.data ?? [])
-    .filter((f) => `${f.home_team.name} ${f.away_team.name}`.toLowerCase().includes(query.toLowerCase()))
-    .slice(0, 8)
-
-  function toggleSelect(id: string, label: string) {
-    setSelected((prev) => (prev.some((s) => s.id === id) ? prev.filter((s) => s.id !== id) : [...prev, { id, label }]))
-  }
-
-  function triggerCompare() {
-    if (selected.length < 2) {
-      appendTurn({ kind: 'note', message: 'Select at least two predictions below (check the boxes) to compare them.' })
-      return
-    }
-    appendTurn({
-      kind: 'compare',
-      predictionIds: selected.map((s) => s.id),
-      labels: Object.fromEntries(selected.map((s) => [s.id, s.label])),
-    })
-    setSelected([])
-  }
-
-  function triggerPulse() {
-    if (turns.some((t) => t.kind === 'pulse')) return
-    appendTurn({ kind: 'pulse' })
-  }
-
-  function triggerRelationships() {
-    if (pinned.length < 2) {
-      appendTurn({ kind: 'note', message: "Pin at least two teams or matches to see how they're connected." })
-      return
-    }
-    const [a, b] = pinned.slice(-2)
-    appendTurn({ kind: 'relationships', a, b })
-  }
-
-  function handleAsk(text: string) {
-    const q = text.trim().toLowerCase()
-    if (!q) return
-    if (q.includes('compare')) triggerCompare()
-    else if (q.includes('pulse') || q.includes('community')) triggerPulse()
-    else if (q.includes('connect') || q.includes('relationship') || q.includes('graph') || q.includes('link'))
-      triggerRelationships()
-    else if (q.includes('history'))
-      appendTurn({
-        kind: 'note',
-        message: 'Prediction history appears automatically for anything you pin — try pinning a team or match in the rail.',
-      })
-    else
-      appendTurn({
-        kind: 'note',
-        message:
-          "I can compare predictions, check community pulse, or find Knowledge Graph relationships for what's pinned — free-form questions beyond that need a backend NL service that doesn't exist yet. Try one of the suggestions below, or pin a team/match to get started.",
-      })
-    setFreeText('')
-  }
-
-  const hasContent = turns.length > 0
+  }, [focused?.kind, focused?.id, canGenerate])
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[240px_1fr_280px] xl:grid-cols-[280px_1fr_320px]">
-      {/* Context rail */}
-      <div className="space-y-4 lg:sticky lg:top-4 lg:self-start">
-        <div>
-          <p className="font-infinity-body text-[11px] font-semibold uppercase tracking-[0.16em] text-infinity-signal">
-            TitanIQ Assistant
-          </p>
-          <h1 className="mt-1 font-infinity-display text-lg font-semibold text-infinity-text-primary">
-            Intelligence Workspace
-          </h1>
+    <div className="command-deck space-y-5 rounded-[var(--cd-radius-xl)]" style={{ backgroundColor: 'var(--cd-bg)', padding: '1.5rem' }}>
+      <WorkspaceHero
+        sport={sport}
+        onSportChange={(s) => { setSport(s); setQuery('') }}
+        entityKind={entityKind}
+        onEntityKindChange={(k) => { setEntityKind(k); setQuery('') }}
+        query={query}
+        onQueryChange={setQuery}
+        onPredictionIdOpen={(id) => workspace.setFocusedPredictionId(id)}
+        quickActions={quickActions}
+        recentCount={workspace.recentlyOpened.length}
+        onOpenRecent={() => document.getElementById('investigation-context-rail')?.scrollIntoView({ behavior: 'smooth' })}
+      />
+
+      {searching && (
+        <div className="grid gap-1.5 rounded-[var(--cd-radius-lg)] border p-3 sm:grid-cols-2" style={{ borderColor: 'var(--cd-border-default)', backgroundColor: 'var(--cd-surface-1)' }}>
+          {entityKind === 'fixture' && fixtureResults.map((f) => (
+            <button key={f.id} type="button" onClick={() => focusFixture(f)} className="truncate rounded-[var(--cd-radius-sm)] px-2 py-1.5 text-left font-[var(--cd-font-body)] text-[12.5px] hover:bg-[var(--cd-surface-2)]" style={{ color: 'var(--cd-text-secondary)' }}>
+              {f.home_team.short_name} vs {f.away_team.short_name}
+            </button>
+          ))}
+          {entityKind === 'team' && teamResults.map((t) => (
+            <button key={t.id} type="button" onClick={() => { workspace.pin({ kind: 'team', id: t.id, label: t.name, logoUrl: t.logo_url }); setQuery('') }} className="truncate rounded-[var(--cd-radius-sm)] px-2 py-1.5 text-left font-[var(--cd-font-body)] text-[12.5px] hover:bg-[var(--cd-surface-2)]" style={{ color: 'var(--cd-text-secondary)' }}>
+              {t.name}
+            </button>
+          ))}
+          {entityKind === 'competition' && competitionResults.map((c) => (
+            <button key={c.id} type="button" onClick={() => { workspace.pin({ kind: 'competition', id: c.id, label: c.name, logoUrl: c.logo_url, meta: c.country ?? undefined }); setQuery('') }} className="truncate rounded-[var(--cd-radius-sm)] px-2 py-1.5 text-left font-[var(--cd-font-body)] text-[12.5px] hover:bg-[var(--cd-surface-2)]" style={{ color: 'var(--cd-text-secondary)' }}>
+              {c.name}
+            </button>
+          ))}
+          {entityKind === 'player' && playerResults.map((p) => (
+            <button key={p.id} type="button" onClick={() => { workspace.pin({ kind: 'player', id: p.id, label: p.name, meta: p.team_name ?? undefined }); setQuery('') }} className="truncate rounded-[var(--cd-radius-sm)] px-2 py-1.5 text-left font-[var(--cd-font-body)] text-[12.5px] hover:bg-[var(--cd-surface-2)]" style={{ color: 'var(--cd-text-secondary)' }}>
+              {p.name}
+            </button>
+          ))}
+          {fixtureResults.length === 0 && teamResults.length === 0 && competitionResults.length === 0 && playerResults.length === 0 && (
+            <p className="col-span-full font-[var(--cd-font-body)] text-[12.5px]" style={{ color: 'var(--cd-text-muted)' }}>No matches for "{query}".</p>
+          )}
+        </div>
+      )}
+
+      <div className="grid gap-5 lg:grid-cols-[220px_1fr] xl:grid-cols-[240px_1fr_320px]">
+        <div id="investigation-context-rail" className="lg:sticky lg:top-4 lg:self-start">
+          <InvestigationContextRail
+            pinned={workspace.pinned}
+            recentlyOpened={workspace.recentlyOpened}
+            focusedKey={entityKey(focused)}
+            onFocus={handleFocusEntity}
+            onUnpin={workspace.unpin}
+            onReorder={(kind, from, to) => {
+              const kindIndices = workspace.pinned.map((p, i) => (p.kind === kind ? i : -1)).filter((i) => i >= 0)
+              workspace.reorderPinned(kindIndices[from], kindIndices[to])
+            }}
+          />
         </div>
 
-        <InfinityPanel>
-          <InfinityLabel>Pin a team or match</InfinityLabel>
+        <div className="min-w-0 space-y-5">
+          {!focused && (
+            <WorkspaceEmptyState
+              query={query}
+              onQueryChange={setQuery}
+              onRestoreSession={workspace.restoreSession}
+              hasSavedSession={!!workspace.savedSession}
+            />
+          )}
 
-          <div className="mt-2 flex gap-1.5">
-            {SPORT_OPTIONS.map((s) => (
-              <InfinityButton
-                key={s.code}
-                size="sm"
-                variant={sportCode === s.code ? 'secondary' : 'ghost'}
-                onClick={() => setSportCode(sportCode === s.code ? '' : s.code)}
-              >
-                {s.label}
-              </InfinityButton>
-            ))}
-          </div>
-
-          {sportCode && (
+          {focused && (
             <>
-              <div className="mt-3 flex gap-1.5">
-                <InfinityButton
-                  size="sm"
-                  variant={entityKind === 'team' ? 'outline' : 'ghost'}
-                  onClick={() => { setEntityKind('team'); setQuery('') }}
-                  className="flex-1"
-                >
-                  <Users className="size-3.5" /> Teams
-                </InfinityButton>
-                <InfinityButton
-                  size="sm"
-                  variant={entityKind === 'fixture' ? 'outline' : 'ghost'}
-                  onClick={() => { setEntityKind('fixture'); setQuery('') }}
-                  className="flex-1"
-                >
-                  <CircleDot className="size-3.5" /> Matches
-                </InfinityButton>
-              </div>
+              <InvestigationHeader
+                entity={focused}
+                isPinned={workspace.pinned.some((p) => p.kind === focused.kind && p.id === focused.id)}
+                onTogglePin={() => (workspace.pinned.some((p) => p.kind === focused.kind && p.id === focused.id) ? workspace.unpin(focused) : workspace.pin(focused))}
+                aiReady={focused.kind === 'fixture' ? generatedCount > 0 : undefined}
+                generatedCount={generatedCount}
+                totalMarkets={markets.length}
+                lastUpdated={history.reduce<string | null>((max, p) => (p.generated_at && (!max || p.generated_at > max) ? p.generated_at : max), null)}
+                onShare={() => {
+                  const url = new URL(window.location.href)
+                  url.search = `?pin_type=${focused.kind}&pin_id=${focused.id}`
+                  void navigator.clipboard?.writeText(url.toString())
+                }}
+                onExport={() => setNotebookOpen(true)}
+                onSaveSession={workspace.saveSession}
+              />
 
-              <div className="mt-2">
-                <InfinitySearchInput
-                  placeholder={entityKind === 'team' ? 'Search teams…' : 'Search matches…'}
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  aria-label={entityKind === 'team' ? 'Search teams' : 'Search matches'}
+              <WorkspaceComposer
+                focused={focused}
+                capabilities={{
+                  hasFocusedPrediction: !!workspace.focusedPredictionId,
+                  onSwitchTab: setActiveTab,
+                  onOpenEvidence: () => setActiveTab('evidence'),
+                  onOpenGraph: openGraph,
+                }}
+              />
+
+              <WorkspaceTabBar active={activeTab} onChange={setActiveTab} compareCount={compareSelected.length} />
+
+              {activeTab === 'mission-brief' && (
+                <MissionBriefTab
+                  entity={focused}
+                  history={history}
+                  markets={markets}
+                  isLoading={historyQuery.isPending || marketsQuery.isPending}
+                  newsCount={newsQuery.data?.length ?? null}
+                  kgLinked={kgEntityQuery.isSuccess ? true : kgEntityQuery.isError ? false : null}
+                  pinnedCount={workspace.pinned.length}
                 />
-              </div>
+              )}
 
-              <div className="mt-2 max-h-64 space-y-1 overflow-y-auto">
-                {entityKind === 'team' && teamsQuery.isPending && <InfinitySkeleton className="h-8" />}
-                {entityKind === 'team' &&
-                  teamResults.map((t) => (
-                    <button
-                      key={t.id}
-                      type="button"
-                      onClick={() => pin({ kind: 'team', id: t.id, label: t.name })}
-                      className="block w-full truncate rounded-infinity-sm px-2 py-1.5 text-left font-infinity-body text-[12px] text-infinity-text-secondary hover:bg-infinity-ground-2 hover:text-infinity-text-primary"
-                    >
-                      {t.name}
-                    </button>
-                  ))}
-                {entityKind === 'fixture' && fixturesQuery.isPending && <InfinitySkeleton className="h-8" />}
-                {entityKind === 'fixture' &&
-                  fixtureResults.map((f) => (
-                    <button
-                      key={f.id}
-                      type="button"
-                      onClick={() =>
-                        pin({ kind: 'fixture', id: f.id, label: `${f.home_team.short_name} vs ${f.away_team.short_name}` })
-                      }
-                      className="block w-full truncate rounded-infinity-sm px-2 py-1.5 text-left font-infinity-body text-[12px] text-infinity-text-secondary hover:bg-infinity-ground-2 hover:text-infinity-text-primary"
-                    >
-                      {f.home_team.short_name} vs {f.away_team.short_name}
-                    </button>
-                  ))}
-              </div>
+              {activeTab === 'predictions' && (
+                <PredictionIntelligenceTab
+                  entity={focused}
+                  markets={markets}
+                  history={history}
+                  homeTeam={homeTeam}
+                  awayTeam={awayTeam}
+                  onFocusPrediction={workspace.setFocusedPredictionId}
+                  selectedMarketKey={selectedMarketKey}
+                  onSelectMarket={setSelectedMarketKey}
+                  onGenerateSelected={() => selectedMarketKey && generateMutation.mutate(selectedMarketKey)}
+                  generating={generateMutation.isPending}
+                  generateError={generateMutation.error}
+                  compareSelectedIds={compareSelected.map((c) => c.id)}
+                  onToggleCompare={handleToggleCompare}
+                />
+              )}
+
+              {activeTab === 'evidence' && (
+                <div className="rounded-[var(--cd-radius-lg)] border p-4" style={{ borderColor: 'var(--cd-border-default)', backgroundColor: 'var(--cd-surface-1)' }}>
+                  <p className="font-[var(--cd-font-body)] text-[13px]" style={{ color: 'var(--cd-text-muted)' }}>
+                    Open a prediction from the Predictions tab to inspect its full evidence.
+                  </p>
+                </div>
+              )}
+
+              {activeTab === 'comparison' && (
+                <ComparisonTab
+                  selectedIds={compareSelected.map((c) => c.id)}
+                  labels={Object.fromEntries(compareSelected.map((c) => [c.id, c.label]))}
+                  onFocusPrediction={workspace.setFocusedPredictionId}
+                  onClearSelection={() => setCompareSelected([])}
+                />
+              )}
+
+              {activeTab === 'timeline' && <PredictionTimelineTab history={history} markets={markets} onFocusPrediction={workspace.setFocusedPredictionId} />}
+
+              {activeTab === 'related' && <RelatedFixturesTab entity={focused} onFocusFixture={(f) => handleFocusEntity({ kind: 'fixture', ...f })} />}
+
+              {activeTab === 'insights' && <DecisionIntelligenceTab prediction={focusedPredictionQuery.data ?? null} isLoading={focusedPredictionQuery.isPending && !!workspace.focusedPredictionId} />}
+
+              <IntelligenceCompleteness items={completenessItems} />
             </>
           )}
-        </InfinityPanel>
+        </div>
 
-        {pinned.length > 0 && (
-          <div>
-            <InfinityLabel>Pinned</InfinityLabel>
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {pinned.map((p) => (
-                <span
-                  key={`${p.kind}:${p.id}`}
-                  className="inline-flex items-center gap-1 rounded-infinity-sm border border-infinity-border-default bg-infinity-ground-2 py-1 pl-2 pr-1 font-infinity-body text-[11px] text-infinity-text-primary"
-                >
-                  {p.label}
-                  <button
-                    type="button"
-                    onClick={() => unpin(p)}
-                    aria-label={`Unpin ${p.label}`}
-                    className="rounded-full p-0.5 text-infinity-text-muted hover:bg-infinity-ground-1 hover:text-infinity-text-primary"
-                  >
-                    <X className="size-3" aria-hidden="true" />
-                  </button>
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
+        <div id="workspace-kg-panel" className="hidden xl:block">
+          <KnowledgeGraphPanel entity={focused} onFocusEntity={handleFocusEntity} variant="panel" collapsed={kgCollapsed} onToggleCollapsed={() => setKgCollapsed((c) => !c)} />
+        </div>
       </div>
 
-      {/* Conversation stream */}
-      <div className="min-w-0 space-y-4">
-        {!hasContent && (
-          <InfinityEmptyState
-            icon={Sparkles}
-            title="Pin something to get started"
-            description="Search a team or match in the rail — TitanIQ pulls its real prediction history immediately, and you can compare, cross-reference, or explore its Knowledge Graph connections from there."
-          />
-        )}
+      <WorkspaceActionBar
+        onGenerate={() => setActiveTab('predictions')}
+        onCompare={() => setActiveTab('comparison')}
+        onKnowledgeGraph={() => setKgDrawerOpen(true)}
+        onExportReport={() => setNotebookOpen(true)}
+        onSaveSession={workspace.saveSession}
+        onOpenMatch={() => focused?.kind === 'fixture' && window.open(`/app/${sport.slug}/matches/${focused.id}`, '_self')}
+        canGenerate={!!canGenerate}
+        canOpenMatch={focused?.kind === 'fixture'}
+      />
 
-        {turns.map((turn) => {
-          if (turn.kind === 'history')
-            return (
-              <HistoryTurn
-                key={turn.id}
-                entity={turn.entity}
-                selectedIds={selected.map((s) => s.id)}
-                onToggleSelect={(id) => toggleSelect(id, turn.entity.label)}
-                onFocusPrediction={setFocusedPredictionId}
-              />
-            )
-          if (turn.kind === 'compare')
-            return (
-              <CompareTurn
-                key={turn.id}
-                predictionIds={turn.predictionIds}
-                labels={turn.labels}
-                onFocusPrediction={setFocusedPredictionId}
-              />
-            )
-          if (turn.kind === 'pulse') return <PulseTurn key={turn.id} />
-          if (turn.kind === 'relationships') return <RelationshipsTurn key={turn.id} a={turn.a} b={turn.b} />
-          return <NoteTurn key={turn.id} message={turn.message} />
-        })}
+      <EvidenceInspector
+        predictionId={workspace.focusedPredictionId}
+        markets={markets}
+        homeTeam={homeTeam}
+        awayTeam={awayTeam}
+        onClose={() => workspace.setFocusedPredictionId(null)}
+      />
 
-        <div className="sticky bottom-4 space-y-2 border-t border-infinity-border-hairline bg-infinity-ground-0/95 pt-3 backdrop-blur-sm">
-          <div className="flex flex-wrap gap-2">
-            <InfinityButton size="sm" variant="outline" onClick={triggerCompare} disabled={selected.length < 2}>
-              <GitCompare className="size-3.5" /> Compare {selected.length > 0 ? `${selected.length} selected` : 'selected'}
-            </InfinityButton>
-            <InfinityButton size="sm" variant="outline" onClick={triggerPulse}>
-              <MessageCircle className="size-3.5" /> Community pulse
-            </InfinityButton>
-            <InfinityButton size="sm" variant="outline" onClick={triggerRelationships} disabled={pinned.length < 2}>
-              <Waypoints className="size-3.5" /> How are these connected?
-            </InfinityButton>
-          </div>
-
-          <form
-            className="flex items-center gap-2 rounded-infinity-sm border border-infinity-border-default bg-infinity-ground-1 px-3 py-2"
-            onSubmit={(e) => { e.preventDefault(); handleAsk(freeText) }}
+      {kgDrawerOpen && (
+        <div className="fixed inset-0 z-50 flex items-end xl:hidden" onClick={() => setKgDrawerOpen(false)}>
+          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" aria-hidden="true" />
+          <div
+            className="relative max-h-[80vh] w-full overflow-hidden rounded-t-[var(--cd-radius-xl)] border-t"
+            style={{ borderColor: 'var(--cd-border-default)', backgroundColor: 'var(--cd-surface-1)' }}
+            onClick={(e) => e.stopPropagation()}
           >
-            <Sparkles className="size-4 shrink-0 text-infinity-signal" aria-hidden="true" />
-            <InfinityInput
-              value={freeText}
-              onChange={(e) => setFreeText(e.target.value)}
-              placeholder="Ask about what's pinned — try 'compare' or 'how are these connected'"
-              className="h-auto border-0 bg-transparent p-0 focus:ring-0"
-              aria-label="Ask the Assistant"
-            />
-            <button
-              type="submit"
-              disabled={!freeText.trim()}
-              aria-label="Send"
-              className="flex size-6 shrink-0 items-center justify-center rounded-full bg-infinity-ground-2 text-infinity-text-muted transition-colors hover:text-infinity-text-primary disabled:opacity-40"
-            >
-              <ArrowUp className="size-3" aria-hidden="true" />
-            </button>
-          </form>
-          <p className="font-infinity-body text-[11px] text-infinity-text-muted">
-            Grounded and deterministic today — every answer traces to real TitanIQ data, no free-form AI conversation yet.
-          </p>
+            <KnowledgeGraphPanel entity={focused} onFocusEntity={(e) => { handleFocusEntity(e); setKgDrawerOpen(false) }} variant="drawer" />
+          </div>
         </div>
-      </div>
+      )}
 
-      {/* Evidence panel */}
-      <div className="lg:sticky lg:top-4 lg:self-start">
-        <InfinityLabel>Evidence</InfinityLabel>
-        <div className="mt-2">
-          {!focusedPredictionId && (
-            <InfinityEmptyState
-              icon={Sparkles}
-              title="Nothing focused"
-              description="Click any prediction value in the conversation to see its full confidence breakdown and evidence here."
-            />
-          )}
-          {focusedPredictionId && <EvidencePanel predictionId={focusedPredictionId} />}
-        </div>
-      </div>
+      {notebookOpen && focused && (
+        <InvestigationNotebook
+          entity={focused}
+          history={history}
+          markets={markets}
+          completeness={completenessItems}
+          onClose={() => setNotebookOpen(false)}
+          onClearInvestigation={workspace.clearAll}
+        />
+      )}
     </div>
   )
 }

@@ -18,12 +18,27 @@ Two deliberate, honest stopping points, matching gates the codebase already enfo
   (`DatasetHasQualityIssuesError` on too few samples) — this is a mechanical quality gate, not a
   judgment call, so an automated approver is honest here in a way it wouldn't be for a market's
   or model's lifecycle (which the codebase deliberately keeps human-gated, see below).
-- Model promotion stops at CHALLENGER. `ModelRegistryService.promote_to_champion` already requires
-  a human `approved_by` — this orchestrator never calls it. "Automatic deployment only if metrics
-  improve" is satisfied by ranking on real held-out metrics inside `AutomaticModelSelectionService`;
-  "never automatically replace a production model without validation" is satisfied by leaving
-  Champion promotion exactly where the existing Ops Center "Promote to champion" action already
-  puts it — in a human's hands.
+- Model promotion stops at CHALLENGER for a market that already has a live CHAMPION.
+  `ModelRegistryService.promote_to_champion` already requires a human `approved_by` — replacing an
+  already-serving model is never automatic here. "Automatic deployment only if metrics improve" is
+  satisfied by ranking on real held-out metrics inside `AutomaticModelSelectionService`; "never
+  automatically replace a production model without validation" is satisfied by leaving that
+  replacement exactly where the existing Ops Center "Promote to champion" action already puts it
+  — in a human's hands.
+
+ML-architecture consolidation (2026-08-04), one narrow exception to the human-gate above:
+bootstrapping a market that has never had a CHAMPION at all (the "insufficient historical data"
+state — see `scripts/seed_football_markets.py`'s `NOT_YET_TRAINED_MARKET_KEYS`) is not "replacing
+a production model" — there is no production model yet, only an honest gap. For that one case,
+the first Challenger this orchestrator successfully trains and validates on real held-out metrics
+is auto-promoted straight to CHAMPION — the "scheduled training registers the first production
+model" self-learning loop, turning "insufficient historical data" into a real served prediction
+the moment enough verified completed matches exist. A market that already has a live CHAMPION
+never goes through this branch; its retraining stays exactly as human-gated as before.
+`RetrainingScheduler.should_retrain()` is also bypassed for a never-trained market — its
+staleness/drift check compares against a prior dataset that doesn't exist yet, so it would
+otherwise report "nothing to do" forever; a market with no CHAMPION always gets a bootstrap
+attempt on every sweep until one succeeds.
 
 One market's failure (bad dataset, training error) is captured per-market and never blocks the
 sweep from checking every other market — a scheduled sweep that silently stops at the first
@@ -53,6 +68,10 @@ class RetrainingOutcome:
     reason: str | None = None
     challenger: ModelDefinition | None = None
     skipped_reason: str | None = None
+    bootstrapped: bool = False
+    """True when this run auto-promoted `challenger` straight to CHAMPION because the market had
+    never had one before — the one case this orchestrator skips the human Champion-promotion
+    gate (see module docstring)."""
 
 
 @dataclass
@@ -76,11 +95,19 @@ class ScheduledRetrainingOrchestrator:
         return outcomes
 
     async def _check_and_retrain(self, market: MarketDefinition, now: datetime, candidates=None) -> RetrainingOutcome:
-        decision = await self.scheduler.should_retrain(market.id, now)
-        if not decision.get("should_retrain"):
-            return RetrainingOutcome(market_key=market.market_key, should_retrain=False, reason=self._reason(decision))
+        is_bootstrap = await self.models.get_champion(market.id) is None
 
-        reason = self._reason(decision)
+        if is_bootstrap:
+            # No CHAMPION exists yet — should_retrain()'s staleness/drift check has no prior
+            # dataset to compare against and would report "nothing to do" forever, so a
+            # never-trained market always gets a bootstrap attempt regardless of what it says.
+            reason = "never trained"
+        else:
+            decision = await self.scheduler.should_retrain(market.id, now)
+            if not decision.get("should_retrain"):
+                return RetrainingOutcome(market_key=market.market_key, should_retrain=False, reason=self._reason(decision))
+            reason = self._reason(decision)
+
         try:
             dataset = await self._build_validate_approve_dataset(market, now)
         except DatasetHasQualityIssuesError as exc:
@@ -110,7 +137,23 @@ class ScheduledRetrainingOrchestrator:
                 skipped_reason=f"model selection failed: {exc}",
             )
 
-        return RetrainingOutcome(market_key=market.market_key, should_retrain=True, reason=reason, challenger=challenger)
+        if not is_bootstrap:
+            return RetrainingOutcome(market_key=market.market_key, should_retrain=True, reason=reason, challenger=challenger)
+
+        try:
+            await self.model_selection.model_registry.promote_to_champion(
+                challenger.id, approved_by=SYSTEM_APPROVER, now=now
+            )
+        except Exception as exc:  # noqa: BLE001 — a promotion failure still leaves a real, reviewable
+            # CHALLENGER registered; report it rather than silently leaving the market untrained.
+            return RetrainingOutcome(
+                market_key=market.market_key, should_retrain=True, reason=reason, challenger=challenger,
+                skipped_reason=f"bootstrap promotion failed: {exc}",
+            )
+
+        return RetrainingOutcome(
+            market_key=market.market_key, should_retrain=True, reason=reason, challenger=challenger, bootstrapped=True
+        )
 
     async def _build_validate_approve_dataset(self, market: MarketDefinition, now: datetime):
         latest = await self.dataset_registry.datasets.get_latest_version(market.id)

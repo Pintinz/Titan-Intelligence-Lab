@@ -17,15 +17,18 @@ export function InfinityPanel({
   tone = 'var(--infinity-border-default)',
   glow = false,
   as: Component = 'div',
+  id,
 }: {
   children: ReactNode
   className?: string
   tone?: string
   glow?: boolean
   as?: 'div' | 'article' | 'section'
+  id?: string
 }) {
   return (
     <Component
+      id={id}
       className={cn(
         'relative border border-infinity-border-hairline bg-infinity-ground-1 p-4',
         'rounded-infinity-md',

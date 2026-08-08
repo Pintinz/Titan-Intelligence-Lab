@@ -1,17 +1,18 @@
 import { NavLink, Outlet, Link } from 'react-router-dom'
+import { Radio, CalendarDays, Users, User, Trophy } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { useSportParam } from '@/lib/hooks/use-sport'
 import { Button } from '@/components/ui/button'
 
+// Prediction Laboratory / News / Community stay real, routable pages (linked contextually from
+// match/team pages) but aren't ready to carry primary navigation weight yet — pulled from the
+// tab bar rather than left half-finished in front of every user.
 const TABS = [
-  { label: 'Live', to: '' },
-  { label: 'Matches', to: 'matches' },
-  { label: 'Teams', to: 'teams' },
-  { label: 'Players', to: 'players' },
-  { label: 'Competitions', to: 'competitions' },
-  { label: 'Prediction Laboratory', to: 'lab' },
-  { label: 'News', to: 'news' },
-  { label: 'Community', to: 'community' },
+  { label: 'Live', to: '', icon: Radio },
+  { label: 'Matches', to: 'matches', icon: CalendarDays },
+  { label: 'Teams', to: 'teams', icon: Users },
+  { label: 'Players', to: 'players', icon: User },
+  { label: 'Competitions', to: 'competitions', icon: Trophy },
 ]
 
 /**
@@ -40,7 +41,10 @@ export function SportShell() {
           Intelligence Center
         </p>
         <h1 className="mt-0.5 font-display text-xl font-semibold text-text-primary">{sport.label}</h1>
-        <nav className="mt-4 flex gap-1 overflow-x-auto" aria-label={`${sport.label} sections`}>
+        <nav
+          className="mt-4 flex w-fit max-w-full gap-0.5 overflow-x-auto rounded-full border border-border-subtle bg-bg-secondary p-1"
+          aria-label={`${sport.label} sections`}
+        >
           {TABS.map((tab) => (
             <NavLink
               key={tab.label}
@@ -48,13 +52,14 @@ export function SportShell() {
               end={tab.to === ''}
               className={({ isActive }) =>
                 cn(
-                  'shrink-0 whitespace-nowrap border-b-2 px-3 py-2 text-sm font-medium transition-colors',
+                  'inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-3.5 py-1.5 text-sm font-medium transition-colors duration-200',
                   isActive
-                    ? 'border-accent-primary text-text-primary'
-                    : 'border-transparent text-text-secondary hover:text-text-primary',
+                    ? 'bg-accent-primary-muted text-accent-primary'
+                    : 'text-text-secondary hover:text-text-primary',
                 )
               }
             >
+              <tab.icon className="size-3.5" aria-hidden="true" />
               {tab.label}
             </NavLink>
           ))}

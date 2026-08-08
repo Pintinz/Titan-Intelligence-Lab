@@ -719,6 +719,22 @@ function CompetitionFixtureSourceSection() {
     onError: (error) => toast.danger('Sync failed', error instanceof Error ? error.message : undefined),
   })
 
+  const triggerCompletedSync = useMutation({
+    mutationFn: () =>
+      adminPlatformApi.triggerCompletedFixturesSync('football', competitionId, {
+        season_label: seasonLabel,
+        season_id: seasonId,
+      }),
+    onSuccess: (run) => {
+      if (!run) {
+        toast.success('Sync skipped', 'Already synced recently — use force if you need it sooner')
+        return
+      }
+      toast.success('Completed fixtures synced', `${run.records_fetched} fetched, ${run.records_created} created, ${run.records_updated} updated`)
+    },
+    onError: (error) => toast.danger('Sync failed', error instanceof Error ? error.message : undefined),
+  })
+
   const preference = preferenceQuery.data
   const competitions = competitionsQuery.data ?? []
 
@@ -830,6 +846,14 @@ function CompetitionFixtureSourceSection() {
               className="gap-1"
             >
               <Zap className="size-3.5" /> {triggerSync.isPending ? 'Syncing…' : 'Sync upcoming fixtures now'}
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => triggerCompletedSync.mutate()}
+              disabled={!preference || !seasonLabel || !seasonId || triggerCompletedSync.isPending}
+              className="gap-1"
+            >
+              <Zap className="size-3.5" /> {triggerCompletedSync.isPending ? 'Syncing…' : 'Sync completed fixtures now'}
             </Button>
           </div>
         </div>
