@@ -191,6 +191,36 @@ def test_competition_standings_ranked(client, auth_headers, seeded):
     assert len(rows) == 2
     assert rows[0]["team_name"] == "Liverpool FC"
     assert rows[0]["rank"] == 1
+
+
+def test_competition_standings_returns_only_the_latest_snapshot_per_team(client, auth_headers, seeded, db_session_factory):
+    """Standings are point-in-time snapshots — a resync inserts a fresh row rather than updating
+    in place (EntityReconciliationService.reconcile_standing), so a team resynced more than once
+    ends up with multiple rows for the same season. The endpoint must collapse to each team's most
+    recent snapshot, not return every historical row."""
+    competition_id = str(seeded["competition"].id)
+    season_id = seeded["season"].id
+    home_team_id = seeded["home"].id
+
+    async def _insert_newer_snapshot():
+        async with db_session_factory() as session:
+            await SqlAlchemyStandingRepository(session=session).upsert(
+                Standing(
+                    id=EntityId(uuid.uuid4()), season_id=season_id, team_id=home_team_id,
+                    snapshot_at=T0 + timedelta(hours=1), rank=1, points=78.0, record={"w": 23},
+                )
+            )
+            await session.commit()
+
+    asyncio.run(_insert_newer_snapshot())
+
+    response = client.get(f"/api/v1/sports/competitions/{competition_id}/standings", headers=auth_headers)
+
+    assert response.status_code == 200
+    rows = response.json()["data"]
+    assert len(rows) == 2  # still one row per team, not one per snapshot
+    liverpool = next(r for r in rows if r["team_name"] == "Liverpool FC")
+    assert liverpool["points"] == 78.0  # the newer snapshot wins, not the original 75.0
     assert rows[1]["rank"] == 2
 
 

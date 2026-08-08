@@ -392,6 +392,49 @@ class SyncOrchestrator:
             fetch=fetch, process_one=process_one, force=force,
         )
 
+    async def sync_standings_alt(
+        self, sport_code: str, competition_id: str, season_label: str, season_id, now: datetime, *,
+        trigger=SyncTrigger.MANUAL, low_priority: bool = False, force: bool = False,
+    ) -> SyncRun | None:
+        """`sync_upcoming_fixtures`/`sync_completed_fixtures`'s companion for standings: same
+        `CompetitionFixtureSourcePreference` gate and provider, routed to
+        `router.fetch_standings_alt` instead of the sport's default adapter. Reuses
+        `reconciler.reconcile_standing` unchanged — it already resolves `team_ref` by provider key,
+        so this only works once every team in the table has a `football_data_org` provider_ref_index
+        entry (true for any competition that's already synced fixtures from this provider, since
+        that's what populates the mapping)."""
+        if self.fixture_source_preferences is None:
+            raise NoFixtureSourcePreferenceError(
+                "SyncOrchestrator wasn't wired with a fixture_source_preferences repository"
+            )
+        preference = await self.fixture_source_preferences.get_by_competition(competition_id)
+        if preference is None:
+            raise NoFixtureSourcePreferenceError(
+                f"competition '{competition_id}' has no fixture-source preference configured — "
+                "use sync_standings for the default provider, or set one via the admin API first"
+            )
+
+        async def fetch():
+            return await self.router.fetch_standings_alt(
+                sport_code, preference.preferred_provider_key, preference.provider_competition_ref,
+                season_label, now, low_priority=low_priority,
+            )
+
+        async def process_one(record):
+            result = self.validator.validate_standing(record)
+            if not result.is_valid:
+                return RecordOutcome(rejected=True, issue_category="invalid")
+            try:
+                await self.reconciler.reconcile_standing(record, season_id, now)
+            except Exception:  # noqa: BLE001 — team not yet reconciled is a rejection, not a sync failure
+                return RecordOutcome(rejected=True, issue_category="relationship")
+            return RecordOutcome(created=True)
+
+        return await self._run_sync(
+            sport_code, EntityKind.STANDING, f"alt:{competition_id}:{season_label}", trigger, now,
+            fetch=fetch, process_one=process_one, force=force, provider_key=preference.preferred_provider_key,
+        )
+
     async def sync_odds_for_fixture(
         self, sport_code: str, fixture_ref: ProviderRef, fixture_id: str, now: datetime, *,
         trigger=SyncTrigger.SCHEDULED, low_priority: bool = True, force: bool = False,

@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Workflow, Globe2, RefreshCw, Play, FlagTriangleRight, CalendarRange, Trophy, BarChart3 } from 'lucide-react'
+import { Workflow, Globe2, RefreshCw, Play, FlagTriangleRight, CalendarRange, Trophy, BarChart3, Copy } from 'lucide-react'
 import { adminPlatformApi } from '@/lib/api/admin-platform'
-import { SPORT_OPTIONS, type SportCode } from '@/lib/api/sports'
+import { sportsApi, SPORT_OPTIONS, type SportCode } from '@/lib/api/sports'
 import { useRealtimeInvalidate } from '@/lib/hooks/use-realtime-invalidate'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -18,8 +18,16 @@ function SportPipeline({ sportCode, sportLabel }: { sportCode: SportCode; sportL
   const [competitionName, setCompetitionName] = useState('')
   const [seasonLabel, setSeasonLabel] = useState('')
   const [seasonId, setSeasonId] = useState<string | null>(null)
+  const [competitionId, setCompetitionId] = useState<string | null>(null)
   const [statisticsFixtureId, setStatisticsFixtureId] = useState('')
   const queryClient = useQueryClient()
+
+  const fixtureHintQuery = useQuery({
+    queryKey: ['admin', 'pipeline-fixture-hint', sportCode, competitionId],
+    queryFn: () => sportsApi.listFixtures(sportCode, { competition_id: competitionId!, limit: 1 }),
+    enabled: !!competitionId,
+  })
+  const fixtureIdHint = fixtureHintQuery.data?.[0]?.id ?? null
 
   const statusQuery = useQuery({
     queryKey: ['admin', 'sync', 'status', sportCode],
@@ -56,6 +64,7 @@ function SportPipeline({ sportCode, sportLabel }: { sportCode: SportCode; sportL
       }),
     onSuccess: (result) => {
       setSeasonId(result.season_id)
+      setCompetitionId(result.competition_id)
       toast.success('Competition bootstrapped', `${competitionName} · ${seasonLabel}`)
     },
     onError: (error) => toast.danger('Could not bootstrap competition', error instanceof Error ? error.message : undefined),
@@ -75,6 +84,7 @@ function SportPipeline({ sportCode, sportLabel }: { sportCode: SportCode; sportL
     onSuccess: () => {
       toast.success('Fixture sync triggered')
       invalidateStatus()
+      void fixtureHintQuery.refetch()
     },
     onError: (error) => toast.danger('Could not trigger fixture sync', error instanceof Error ? error.message : undefined),
   })
@@ -184,6 +194,51 @@ function SportPipeline({ sportCode, sportLabel }: { sportCode: SportCode; sportL
             {bootstrap.isPending ? 'Bootstrapping…' : 'Bootstrap'}
           </Button>
         </div>
+        {seasonId && (
+          <div className="mt-3 space-y-2 rounded-md border border-border-subtle bg-surface-2 px-3 py-2">
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-text-muted">Season id</span>
+              <code className="flex-1 truncate font-mono text-xs text-text-primary">{seasonId}</code>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="gap-1"
+                onClick={() => {
+                  void navigator.clipboard?.writeText(seasonId)
+                  toast.success('Season id copied')
+                }}
+              >
+                <Copy className="size-3.5" /> Copy
+              </Button>
+            </div>
+            <div className="flex items-center gap-2 border-t border-border-subtle pt-2">
+              <span className="text-xs text-text-muted">Fixture id</span>
+              {fixtureIdHint ? (
+                <>
+                  <code className="flex-1 truncate font-mono text-xs text-text-primary">{fixtureIdHint}</code>
+                  <Button size="sm" variant="ghost" className="gap-1" onClick={() => setStatisticsFixtureId(fixtureIdHint)}>
+                    Use
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="gap-1"
+                    onClick={() => {
+                      void navigator.clipboard?.writeText(fixtureIdHint)
+                      toast.success('Fixture id copied')
+                    }}
+                  >
+                    <Copy className="size-3.5" /> Copy
+                  </Button>
+                </>
+              ) : (
+                <span className="flex-1 text-xs text-text-muted">
+                  {fixtureHintQuery.isFetching ? 'Looking for a synced fixture…' : 'No fixtures synced for this competition yet — run Sync fixtures first.'}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border-subtle pt-4">

@@ -75,6 +75,8 @@ class FakeRouter:
     upcoming_fixtures_to_return: list = field(default_factory=list)
     completed_fixtures_calls: list = field(default_factory=list)
     completed_fixtures_to_return: list = field(default_factory=list)
+    standings_alt_calls: list = field(default_factory=list)
+    standings_alt_to_return: list = field(default_factory=list)
     raise_on_fetch: Exception | None = None
 
     async def fetch_teams(self, sport_code, competition_ref, now, *, low_priority=False, season_label=None):
@@ -124,6 +126,12 @@ class FakeRouter:
         if self.raise_on_fetch:
             raise self.raise_on_fetch
         return self.completed_fixtures_to_return
+
+    async def fetch_standings_alt(self, sport_code, provider_key, competition_ref, season_label, now, *, low_priority=False):
+        self.standings_alt_calls.append((sport_code, provider_key, competition_ref, season_label))
+        if self.raise_on_fetch:
+            raise self.raise_on_fetch
+        return self.standings_alt_to_return
 
 
 @dataclass
@@ -733,6 +741,62 @@ async def test_sync_standings_rejects_records_for_unreconciled_teams(orchestrato
     ]
 
     run = await orchestrator.sync_standings("football", "39", "2026", season_id, T0)
+    await session.commit()
+
+    assert run.status is SyncStatus.PARTIAL
+    assert run.records_rejected == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_standings_alt_raises_when_orchestrator_not_wired_with_repository(orchestrator):
+    with pytest.raises(NoFixtureSourcePreferenceError):
+        await orchestrator.sync_standings_alt("football", "comp-1", "2026", SeasonId(uuid4()), T0)
+
+
+@pytest.mark.asyncio
+async def test_sync_standings_alt_raises_when_no_preference_configured(orchestrator_with_fixture_source):
+    with pytest.raises(NoFixtureSourcePreferenceError):
+        await orchestrator_with_fixture_source.sync_standings_alt("football", "comp-1", "2026", SeasonId(uuid4()), T0)
+
+
+@pytest.mark.asyncio
+async def test_sync_standings_alt_uses_preference_to_resolve_provider_and_reconciles(
+    orchestrator_with_fixture_source, session, router, fixture_source_preferences
+):
+    home = await _seed_team(orchestrator_with_fixture_source, session, "t1")
+    await orchestrator_with_fixture_source.reconciler.ref_index.upsert(
+        ProviderRefIndexEntry("football_data_org", "fd-t1", EntityKind.TEAM, str(home.id.value))
+    )
+    await session.commit()
+
+    fixture_source_preferences.store["comp-1"] = CompetitionFixtureSourcePreference(
+        competition_id="comp-1", preferred_provider_key="football_data_org", provider_competition_ref="PL",
+    )
+    router.standings_alt_to_return = [
+        ProviderStandingRecord(team_ref=ProviderRef("football_data_org", "fd-t1"), rank=1, points=85.0, record={"won": 27}),
+    ]
+
+    run = await orchestrator_with_fixture_source.sync_standings_alt("football", "comp-1", "2026", SeasonId(uuid4()), T0)
+    await session.commit()
+
+    assert run.status is SyncStatus.SUCCEEDED
+    assert run.records_created == 1
+    assert router.standings_alt_calls == [("football", "football_data_org", "PL", "2026")]
+
+
+@pytest.mark.asyncio
+async def test_sync_standings_alt_rejects_records_for_unreconciled_teams(
+    orchestrator_with_fixture_source, session, fixture_source_preferences, router
+):
+    await _seed_sport(orchestrator_with_fixture_source, session)
+    fixture_source_preferences.store["comp-1"] = CompetitionFixtureSourcePreference(
+        competition_id="comp-1", preferred_provider_key="football_data_org", provider_competition_ref="PL",
+    )
+    router.standings_alt_to_return = [
+        ProviderStandingRecord(team_ref=ProviderRef("football_data_org", "unknown"), rank=1, points=45.0, record={}),
+    ]
+
+    run = await orchestrator_with_fixture_source.sync_standings_alt("football", "comp-1", "2026", SeasonId(uuid4()), T0)
     await session.commit()
 
     assert run.status is SyncStatus.PARTIAL

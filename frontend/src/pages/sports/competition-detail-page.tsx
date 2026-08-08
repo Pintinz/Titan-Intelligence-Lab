@@ -96,13 +96,11 @@ export default function CompetitionDetailPage() {
 
   const nextMatch = overviewFixtures[0] ? `${overviewFixtures[0].home_team.name} vs ${overviewFixtures[0].away_team.name}` : null
 
-  const availableTabs = TABS.filter((t) => {
-    if (t.key === 'fixtures') return scheduleFixtures.length > 0
-    if (t.key === 'results') return completed.length > 0
-    if (t.key === 'teams') return teams.length > 0
-    return true
-  })
-  const activeTab = availableTabs.some((t) => t.key === tab) ? tab : 'overview'
+  // Every tab is always selectable — data-gating a tab out of the list is what silently broke
+  // the Hero's "View fixtures"/"View teams" quick actions (setTab() to a hidden tab fell straight
+  // back to 'overview' with no visible change). Each tab renders its own honest empty state
+  // instead, matching how 'standings' already behaved.
+  const activeTab = tab
 
   if (!sport) return null
   if (competitionQuery.isPending) {
@@ -165,14 +163,14 @@ export default function CompetitionDetailPage() {
         status={status}
         following={watchlist.isFollowing('competition', competition.id)}
         onToggleFollow={() => watchlist.toggle('competition', competition.id)}
-        onViewFixtures={() => setTab(scheduleFixtures.length > 0 ? 'fixtures' : 'overview')}
+        onViewFixtures={() => setTab('fixtures')}
         onViewTeams={() => setTab('teams')}
       />
 
       <CompetitionSnapshot fixtures={fixtures.length} upcoming={live.length + upcoming.length} completed={completed.length} teams={teams.length} nextMatch={nextMatch} />
 
       <div role="tablist" aria-label="Competition sections" className="-mx-1 flex w-fit max-w-full gap-1 overflow-x-auto rounded-[var(--cd-radius-md)] border p-1 backdrop-blur-md" style={{ borderColor: 'var(--cd-border-default)', backgroundColor: 'color-mix(in srgb, var(--cd-surface-2) 70%, transparent)' }}>
-        {availableTabs.map(({ key, label, icon: Icon }) => {
+        {TABS.map(({ key, label, icon: Icon }) => {
           const active = key === activeTab
           return (
             <button
@@ -295,6 +293,9 @@ export default function CompetitionDetailPage() {
 
       {activeTab === 'teams' && (
         <MissionSection title="Teams" subtitle={`${teams.length} in this competition`} icon={<Users className="size-4" aria-hidden="true" />}>
+          {teams.length === 0 ? (
+            <MissionEmptyState icon={Users} title="No teams yet" description="TitanIQ has not received team data for this competition yet." />
+          ) : (
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {teams.map((team) => (
               <Link
@@ -328,6 +329,7 @@ export default function CompetitionDetailPage() {
               </Link>
             ))}
           </div>
+          )}
         </MissionSection>
       )}
     </div>

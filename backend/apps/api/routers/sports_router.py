@@ -237,9 +237,17 @@ async def get_competition_standings(
         return envelope([], meta={"season_id": None})
 
     standings = await SqlAlchemyStandingRepository(session=session).list_by_season(season.id)
+    # Standings are point-in-time snapshots — a resync never updates a row in place, it inserts a
+    # fresh one (see EntityReconciliationService.reconcile_standing), so a season with more than
+    # one sync run accumulates multiple rows per team. Keep only each team's most recent snapshot.
+    latest_by_team: dict = {}
+    for standing in standings:
+        current = latest_by_team.get(standing.team_id)
+        if current is None or standing.snapshot_at > current.snapshot_at:
+            latest_by_team[standing.team_id] = standing
     teams = SqlAlchemyTeamRepository(session=session)
     rows = []
-    for standing in sorted(standings, key=lambda s: s.rank):
+    for standing in sorted(latest_by_team.values(), key=lambda s: s.rank):
         team = await teams.get(standing.team_id)
         rows.append(
             {

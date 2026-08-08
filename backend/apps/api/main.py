@@ -1550,6 +1550,27 @@ async def trigger_sync_completed_fixtures(
     return envelope(data=_serialize_sync_run(run))
 
 
+@app.post("/api/v1/admin/sync/{sport_code}/competitions/{competition_id}/standings-alt")
+async def trigger_sync_standings_alt(
+    sport_code: str, competition_id: str, body: TriggerUpcomingFixturesSyncBody,
+    session: AsyncSession = Depends(get_session), _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    """`sync_upcoming_fixtures`/`sync_completed_fixtures`'s companion for standings — routes
+    through this competition's `CompetitionFixtureSourcePreference` (football-data.org, when
+    api-football's free tier can't serve the current season) instead of the default provider."""
+    orchestrator = build_sync_orchestrator(session)
+    season_id = SeasonId(uuid.UUID(body.season_id))
+    try:
+        run = await orchestrator.sync_standings_alt(
+            sport_code, competition_id, body.season_label, season_id, _now(), force=body.force,
+        )
+    except NoFixtureSourcePreferenceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except ProviderNotConfiguredError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    return envelope(data=_serialize_sync_run(run))
+
+
 @app.get("/api/v1/admin/sync/status")
 async def get_sync_status(
     sport_code: str | None = Query(default=None),

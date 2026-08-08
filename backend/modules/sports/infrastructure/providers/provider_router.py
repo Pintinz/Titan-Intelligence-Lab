@@ -245,6 +245,46 @@ class SportsProviderRouter:
         self._cache_set(cache_key, result, now, cache_ttl)
         return result
 
+    async def fetch_standings_alt(
+        self, sport_code: str, provider_key: str, competition_ref: str, season_label: str, now: datetime, *,
+        low_priority: bool = False,
+    ) -> list[ProviderStandingRecord]:
+        """`fetch_upcoming_fixtures`/`fetch_completed_fixtures`'s counterpart for standings — same
+        `fixture_schedule_adapters` resolution, circuit-breaker, quota, and caching behavior, but
+        calls the adapter's `fetch_standings`. Kept separate from the generic `fetch_standings`
+        above (which always resolves the sport's *default* adapter) because a competition's
+        `CompetitionFixtureSourcePreference` opts into an explicit alternate provider — mirrors
+        `fetch_completed_fixtures`'s "no silent fallback" discipline exactly."""
+        cache_key = ("standings_alt", provider_key, competition_ref, season_label)
+        cached = self._cache_get(cache_key, now)
+        if cached is not None:
+            return cached
+
+        adapter, provider = await self._resolve_fixture_schedule_adapter(provider_key)
+        fetch_standings = getattr(adapter, "fetch_standings", None)
+        if fetch_standings is None:
+            raise ProviderNotConfiguredError(f"provider '{provider_key}' does not support standings sync")
+        cache_ttl = provider.cache_ttl_seconds if provider else 3600
+
+        if not self.circuit_breaker.allow_request(adapter.provider_key, now):
+            raise ProviderCircuitOpenError(f"circuit open for '{adapter.provider_key}'")
+        if provider and await self.quota_engine.should_throttle(provider.id, now, low_priority=low_priority):
+            raise ProviderThrottledError(f"quota protection throttled '{adapter.provider_key}'")
+        try:
+            result = await fetch_standings(competition_ref, season_label)
+        except Exception:
+            self.circuit_breaker.record_failure(adapter.provider_key, now)
+            if provider:
+                await self.quota_engine.record_request(provider.id, now, success=False)
+            raise
+        else:
+            self.circuit_breaker.record_success(adapter.provider_key)
+            if provider:
+                await self.quota_engine.record_request(provider.id, now, success=True)
+
+        self._cache_set(cache_key, result, now, cache_ttl)
+        return result
+
     async def fetch_completed_fixtures(
         self, sport_code: str, provider_key: str, competition_ref: str, season_label: str, now: datetime, *,
         low_priority: bool = False,

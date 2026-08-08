@@ -149,10 +149,71 @@ async def test_fetch_fixtures_leaves_score_unset_for_unplayed_matches(adapter):
 async def test_unsupported_methods_return_honest_empty_results(adapter):
     assert await adapter.fetch_countries() == []
     assert await adapter.fetch_players(ProviderRef("football_data_org", "61")) == []
-    assert await adapter.fetch_standings("PL", "2026") == []
     assert await adapter.fetch_team_statistics(ProviderRef("football_data_org", "500")) == []
     assert await adapter.fetch_lineups(ProviderRef("football_data_org", "500")) == []
     assert await adapter.fetch_odds(ProviderRef("football_data_org", "500")) is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_standings_maps_total_table_rows():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v4/competitions/PL/standings"
+        return _json_response({
+            "standings": [
+                {
+                    "type": "TOTAL",
+                    "table": [
+                        {
+                            "position": 1, "team": {"id": 65, "name": "Manchester City FC"}, "points": 85,
+                            "playedGames": 38, "won": 27, "draw": 4, "lost": 7,
+                            "goalsFor": 90, "goalsAgainst": 33, "goalDifference": 57,
+                        },
+                        {
+                            "position": 2, "team": {"id": 61, "name": "Chelsea FC"}, "points": 78,
+                            "playedGames": 38, "won": 24, "draw": 6, "lost": 8,
+                            "goalsFor": 75, "goalsAgainst": 40, "goalDifference": 35,
+                        },
+                    ],
+                }
+            ]
+        })
+
+    adapter = FootballDataOrgAdapter(get_api_key=_get_key, client=_client_for(handler))
+    standings = await adapter.fetch_standings("PL", "2026")
+
+    assert len(standings) == 2
+    assert standings[0].team_ref == ProviderRef(provider="football_data_org", external_id="65")
+    assert standings[0].rank == 1
+    assert standings[0].points == 85.0
+    assert standings[0].record == {
+        "played": 38, "won": 27, "drawn": 4, "lost": 7,
+        "goals_for": 90, "goals_against": 33, "goal_difference": 57,
+    }
+
+
+@pytest.mark.asyncio
+async def test_fetch_standings_ignores_non_total_groups_and_skips_teamless_rows():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response({
+            "standings": [
+                {"type": "HOME", "table": [{"position": 1, "team": {"id": 65}, "points": 40}]},
+                {"type": "TOTAL", "table": [{"position": 1, "team": {"id": None}, "points": 0}]},
+            ]
+        })
+
+    adapter = FootballDataOrgAdapter(get_api_key=_get_key, client=_client_for(handler))
+
+    assert await adapter.fetch_standings("PL", "2026") == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_standings_returns_empty_when_no_standings_in_payload():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response({"standings": []})
+
+    adapter = FootballDataOrgAdapter(get_api_key=_get_key, client=_client_for(handler))
+
+    assert await adapter.fetch_standings("PL", "2026") == []
 
 
 @pytest.mark.asyncio

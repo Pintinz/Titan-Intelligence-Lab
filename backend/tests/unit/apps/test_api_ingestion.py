@@ -333,6 +333,23 @@ def test_trigger_completed_fixtures_sync_requires_preference(client, db_session_
     assert response.status_code == 409
 
 
+def test_trigger_standings_alt_sync_requires_preference(client, db_session_factory):
+    asyncio.run(_seed_reconciled_sport(db_session_factory))
+    bootstrap = client.post(
+        "/api/v1/admin/sync/football/bootstrap",
+        json={"competition_ref": "39", "competition_name": "Premier League", "season_label": "2026"},
+    )
+    competition_id = bootstrap.json()["data"]["competition_id"]
+    season_id = bootstrap.json()["data"]["season_id"]
+
+    response = client.post(
+        f"/api/v1/admin/sync/football/competitions/{competition_id}/standings-alt",
+        json={"season_label": "2026", "season_id": season_id},
+    )
+
+    assert response.status_code == 409
+
+
 def test_team_suggestions_matches_by_name_against_existing_teams(client, db_session_factory, monkeypatch):
     import apps.api.main as main_module
 

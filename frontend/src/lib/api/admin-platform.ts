@@ -207,6 +207,15 @@ export const adminPlatformApi = {
       `/api/v1/admin/sync/${sportCode}/competitions/${competitionId}/completed-fixtures`,
       input,
     ),
+  triggerStandingsAltSync: (
+    sportCode: string,
+    competitionId: string,
+    input: { season_label: string; season_id: string; force?: boolean },
+  ) =>
+    api.post<SyncRunSummaryDto | null>(
+      `/api/v1/admin/sync/${sportCode}/competitions/${competitionId}/standings-alt`,
+      input,
+    ),
 
   // -- Redis ----------------------------------------------------------------------------------------
   redisHealth: () => api.get<{ healthy: boolean; latency_ms: number | null; error: string | null }>('/api/v1/admin/monitoring/redis'),

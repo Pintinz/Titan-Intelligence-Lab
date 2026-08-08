@@ -163,8 +163,37 @@ class FootballDataOrgAdapter:
         return []
 
     async def fetch_standings(self, competition_ref: str, season_label: str) -> list[ProviderStandingRecord]:
-        """Standings stay api-football's job — this adapter only serves fixture schedules."""
-        return []
+        """Real standings for the competition's current season (confirmed live: free tier serves
+        `/competitions/{ref}/standings` with full team records, unlike statistics/lineups/odds,
+        which genuinely aren't available on this provider — see module docstring). Only the
+        `TOTAL` table is used; a competition split into groups (e.g. a cup's group stage) would
+        have multiple `standings` entries, but every top-flight league this adapter targets has
+        exactly one. `record` mirrors the shape `ApiFootballAdapter` already produces so
+        `reconcile_standing` doesn't need to special-case the provider."""
+        payload = await self._get(f"/competitions/{competition_ref}/standings", {})
+        total_table = next((group.get("table", []) for group in payload.get("standings", []) if group.get("type") == "TOTAL"), [])
+        records = []
+        for row in total_table:
+            team = row.get("team") or {}
+            if team.get("id") is None or row.get("position") is None:
+                continue
+            records.append(
+                ProviderStandingRecord(
+                    team_ref=ProviderRef(provider=self.provider_key, external_id=str(team.get("id"))),
+                    rank=row.get("position"),
+                    points=float(row.get("points", 0)),
+                    record={
+                        "played": row.get("playedGames"),
+                        "won": row.get("won"),
+                        "drawn": row.get("draw"),
+                        "lost": row.get("lost"),
+                        "goals_for": row.get("goalsFor"),
+                        "goals_against": row.get("goalsAgainst"),
+                        "goal_difference": row.get("goalDifference"),
+                    },
+                )
+            )
+        return records
 
     async def fetch_team_statistics(self, fixture_ref: ProviderRef) -> list[ProviderTeamStatisticsRecord]:
         """Statistics stay api-football's job by design (see module docstring) — this adapter's

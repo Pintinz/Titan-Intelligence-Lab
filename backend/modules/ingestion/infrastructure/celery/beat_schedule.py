@@ -76,6 +76,9 @@ BEAT_SCHEDULE = {
     "sync-completed-fixtures-football-data-org": {
         "task": "ingestion.sync_completed_fixtures", "schedule": timedelta(seconds=PROVIDER_POLL_INTERVAL_SECONDS),
     },
+    "sync-standings-football-data-org": {
+        "task": "ingestion.sync_standings_alt", "schedule": timedelta(seconds=STANDINGS_INTERVAL_SECONDS),
+    },
     # Milestone 11B — Provider Registry health monitoring (docs/admin_center.md §2a), the follow-
     # up ADR-011 flagged as needing Celery beat rather than a new scheduler.
     "check-all-provider-health": {

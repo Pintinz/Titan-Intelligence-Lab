@@ -496,3 +496,99 @@ async def test_fetch_completed_fixtures_response_is_cached_within_ttl():
     await router.fetch_completed_fixtures("football", "football_data_org", "PL", "2026", T0)
 
     assert len(calls) == 1
+
+
+# -- fetch_standings_alt (fixture_schedule_adapters) ---------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_standings_alt_raises_when_provider_key_not_registered():
+    router, _, _ = _build_router()
+
+    with pytest.raises(ProviderNotConfiguredError):
+        await router.fetch_standings_alt("football", "football_data_org", "PL", "2026", T0)
+
+
+@pytest.mark.asyncio
+async def test_fetch_standings_alt_raises_when_adapter_lacks_the_method():
+    @dataclass
+    class _UpcomingOnlyAdapter:
+        provider_key: str
+
+        async def fetch_fixtures(self, competition_ref, season_label, now):
+            return ["upcoming-fixture"]
+
+    router, provider_repo, credential_repo = _build_router(
+        fixture_schedule_adapters={"football_data_org": _UpcomingOnlyAdapter(provider_key="football_data_org")}
+    )
+    provider = ProviderDefinition(
+        id=ProviderId(uuid.uuid4()), key="football_data_org", name="football-data.org",
+        category=ProviderCategory.SPORTS_DATA, status=ProviderStatus.ACTIVE,
+    )
+    await provider_repo.upsert(provider)
+    await credential_repo.upsert(
+        ProviderCredential(id=CredentialId(uuid.uuid4()), provider_id=provider.id, label="primary", encrypted_value="k")
+    )
+
+    with pytest.raises(ProviderNotConfiguredError):
+        await router.fetch_standings_alt("football", "football_data_org", "PL", "2026", T0)
+
+
+@pytest.mark.asyncio
+async def test_fetch_standings_alt_calls_the_resolved_adapter_when_active_with_credential():
+    calls = []
+
+    @dataclass
+    class _RecordingStandingsAdapter:
+        provider_key: str
+
+        async def fetch_standings(self, competition_ref, season_label):
+            calls.append((competition_ref, season_label))
+            return ["standing-row"]
+
+    router, provider_repo, credential_repo = _build_router(
+        fixture_schedule_adapters={"football_data_org": _RecordingStandingsAdapter(provider_key="football_data_org")}
+    )
+    provider = ProviderDefinition(
+        id=ProviderId(uuid.uuid4()), key="football_data_org", name="football-data.org",
+        category=ProviderCategory.SPORTS_DATA, status=ProviderStatus.ACTIVE,
+    )
+    await provider_repo.upsert(provider)
+    await credential_repo.upsert(
+        ProviderCredential(id=CredentialId(uuid.uuid4()), provider_id=provider.id, label="primary", encrypted_value="k")
+    )
+
+    result = await router.fetch_standings_alt("football", "football_data_org", "PL", "2026", T0)
+
+    assert result == ["standing-row"]
+    assert calls == [("PL", "2026")]
+
+
+@pytest.mark.asyncio
+async def test_fetch_standings_alt_response_is_cached_within_ttl():
+    calls = []
+
+    @dataclass
+    class _CountingStandingsAdapter:
+        provider_key: str
+
+        async def fetch_standings(self, competition_ref, season_label):
+            calls.append(1)
+            return ["standing-row"]
+
+    router, provider_repo, credential_repo = _build_router(
+        fixture_schedule_adapters={"football_data_org": _CountingStandingsAdapter(provider_key="football_data_org")}
+    )
+    provider = ProviderDefinition(
+        id=ProviderId(uuid.uuid4()), key="football_data_org", name="football-data.org",
+        category=ProviderCategory.SPORTS_DATA, status=ProviderStatus.ACTIVE, cache_ttl_seconds=3600,
+    )
+    await provider_repo.upsert(provider)
+    await credential_repo.upsert(
+        ProviderCredential(id=CredentialId(uuid.uuid4()), provider_id=provider.id, label="primary", encrypted_value="k")
+    )
+
+    await router.fetch_standings_alt("football", "football_data_org", "PL", "2026", T0)
+    await router.fetch_standings_alt("football", "football_data_org", "PL", "2026", T0)
+
+    assert len(calls) == 1
