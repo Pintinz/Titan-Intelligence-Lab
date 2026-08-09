@@ -153,6 +153,9 @@ from modules.predictions.application.prediction_engine import PredictionEngine
 from modules.predictions.application.prediction_serving_service import AsyncPredictionQueueService, BatchPredictionService
 from modules.predictions.application.calibration_fitting_service import CalibrationFittingService
 from modules.predictions.application.predictor_registry import PredictorRegistry
+from modules.predictions.application.backtest_service import BacktestService
+from modules.predictions.application.challenger_evaluation_service import ChallengerEvaluationService
+from modules.predictions.application.error_memory_service import ErrorMemoryService
 from modules.predictions.application.scheduled_retraining_orchestrator import ScheduledRetrainingOrchestrator
 from modules.predictions.application.training_pipeline_service import RetrainingScheduler, TrainingPipelineService
 from modules.predictions.application.windowed_feature_engineering_service import (
@@ -183,6 +186,9 @@ from modules.predictions.infrastructure.monitoring.in_memory_latency_repository 
     InMemoryLatencySampleRepository,
 )
 from modules.predictions.infrastructure.persistence.in_memory_dataset_repository import InMemoryDatasetRepository
+from modules.predictions.infrastructure.persistence.in_memory_model_comparison_repository import (
+    InMemoryModelComparisonRepository,
+)
 from modules.predictions.infrastructure.persistence.repositories import (
     SqlAlchemyExperimentRepository,
     SqlAlchemyFeatureMarketMappingRepository,
@@ -200,6 +206,7 @@ from modules.predictions.infrastructure.predictors.weighted_scoring import (
 )
 from modules.predictions.ports.calibrator import CalibratorPort
 from modules.predictions.ports.dataset_repository import DatasetRepositoryPort
+from modules.predictions.ports.repositories import ModelComparisonRepositoryPort
 from modules.predictions.ports.ml_model import ModelArtifactStorePort
 from modules.predictions.ports.monitoring import LatencySampleRepositoryPort
 from modules.predictions.table_tennis.market_seeding import TableTennisMarketSeeder
@@ -818,6 +825,16 @@ def build_prediction_admin_service(session: AsyncSession) -> PredictionAdminServ
     )
 
 
+def build_error_memory_service(session: AsyncSession) -> ErrorMemoryService:
+    return ErrorMemoryService(
+        markets=SqlAlchemyMarketRepository(session=session),
+        models=SqlAlchemyModelRepository(session=session),
+        predictions=SqlAlchemyPredictionRepository(session=session),
+        outcomes=SqlAlchemyPredictionOutcomeRepository(session=session),
+        model_evaluations=SqlAlchemyModelEvaluationRepository(session=session),
+    )
+
+
 def build_experiment_repository(session: AsyncSession) -> SqlAlchemyExperimentRepository:
     return SqlAlchemyExperimentRepository(session=session)
 
@@ -836,6 +853,14 @@ def get_dataset_repo() -> DatasetRepositoryPort:
     table already exists for it) is future work, added when a real production need for
     persistence-across-restarts shows up, same posture as `PlattScalingCalibrator`."""
     return InMemoryDatasetRepository()
+
+
+@lru_cache
+def get_model_comparison_repo() -> ModelComparisonRepositoryPort:
+    """Same in-memory posture as `get_dataset_repo()` — a Continuous Outcome Learning Engine
+    Challenger-vs-Champion verdict is reviewable for the life of this process (Ops Center, `/api/v1/admin/ml/*`);
+    a SQL-backed implementation is the same documented future work as `datasets`."""
+    return InMemoryModelComparisonRepository()
 
 
 @lru_cache
@@ -896,6 +921,10 @@ def build_automatic_model_selection_service(session: AsyncSession) -> AutomaticM
     )
 
 
+def build_backtest_service() -> BacktestService:
+    return BacktestService(evaluator=ChallengerEvaluationService())
+
+
 def build_retraining_scheduler(session: AsyncSession) -> RetrainingScheduler:
     return RetrainingScheduler(dataset_registry=build_dataset_registry_service(session))
 
@@ -908,6 +937,9 @@ def build_scheduled_retraining_orchestrator(session: AsyncSession) -> ScheduledR
         dataset_builder=build_dataset_builder(session),
         dataset_registry=build_dataset_registry_service(session),
         model_selection=build_automatic_model_selection_service(session),
+        model_loader=get_model_loader_service(),
+        evaluator=ChallengerEvaluationService(),
+        comparisons=get_model_comparison_repo(),
     )
 
 

@@ -32,10 +32,13 @@ from apps.api.composition import (
     build_dataset_registry_service,
     build_experiment_tracking_service,
     build_market_registry_service,
+    build_backtest_service,
+    build_error_memory_service,
     build_model_monitoring_service,
     build_model_registry_service,
     build_model_version_resolver,
     build_retraining_scheduler,
+    get_model_comparison_repo,
     get_model_loader_service,
     get_session,
     get_shap_explainer_service,
@@ -441,6 +444,75 @@ async def benchmark_candidate(
     return envelope(data={"algorithm": algorithm.value, "framework": framework.value, "ranking_metric": result.ranking_metric, "ranking_value": result.ranking_value})
 
 
+# --- Backtest (Continuous Outcome Learning Engine, spec §18) ----------------------------------
+
+
+class BacktestBody(BaseModel):
+    market_key: str
+    algorithm: str = "lightgbm_gbm"
+    framework: str = "lightgbm"
+    target_type: str = "classification"
+    min_train_size: int = 60
+    step: int = 20
+
+
+@router.post("/backtest")
+async def run_backtest(
+    body: BacktestBody, session: AsyncSession = Depends(get_session), _user: User = Depends(require_role(Role.ADMINISTRATOR))
+):
+    """Chronological backtest (spec §18): "Train on 1..N, predict N+1..N+k, roll forward" —
+    compares a model retrained every round against one frozen after the earliest round, on the
+    market's own real outcome history, using the identical `ChallengerEvaluationService.score`
+    every other comparison surface in this router already uses. Sources samples the same honest
+    way `DatasetBuilder` always does (`Prediction.feature_snapshot` + realized `PredictionOutcome`)
+    — never a raw feature read."""
+    from modules.predictions.application.backtest_service import InsufficientBacktestSamplesError
+    from modules.predictions.application.model_selection_service import _build_model
+
+    market_id = await _require_market_id(session, body.market_key)
+    try:
+        target_type = TargetType(body.target_type)
+        candidate = CandidateSpec(MLAlgorithm(body.algorithm), MLFramework(body.framework))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    dataset = await build_dataset_builder(session).build(market_id, _now())
+    class_labels = dataset.lineage.class_labels
+
+    service = build_backtest_service()
+    try:
+        report = await service.run(
+            market_id=market_id, target_type=target_type,
+            samples_newest_first=dataset.samples,
+            model_factory=lambda: _build_model(candidate, target_type, class_labels),
+            now=_now(), min_train_size=body.min_train_size, step=body.step,
+        )
+    except InsufficientBacktestSamplesError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    def _metrics(m):
+        return {"log_loss": m.log_loss, "brier_score": m.brier_score, "expected_calibration_error": m.expected_calibration_error, "mae": m.mae}
+
+    return envelope(
+        data={
+            "market_id": str(report.market_id),
+            "target_type": report.target_type.value,
+            "decisive_metric": report.decisive_metric,
+            "continuous_mean_metric": report.continuous_mean_metric,
+            "static_mean_metric": report.static_mean_metric,
+            "continuous_learning_improved": report.continuous_learning_improved,
+            "rounds": [
+                {
+                    "round_index": r.round_index, "train_size": r.train_size, "test_size": r.test_size,
+                    "continuous_metrics": _metrics(r.continuous_metrics), "static_metrics": _metrics(r.static_metrics),
+                }
+                for r in report.rounds
+            ],
+            "generated_at": report.generated_at.isoformat(),
+        }
+    )
+
+
 # --- Monitoring -------------------------------------------------------------------------------
 
 
@@ -491,6 +563,43 @@ async def check_retraining(
     return envelope(data=await scheduler.should_retrain(market_id, now=_now()))
 
 
+@router.get("/retraining/{market_key}/comparison")
+async def latest_challenger_comparison(
+    market_key: str, session: AsyncSession = Depends(get_session), _user: User = Depends(require_role(Role.ADMINISTRATOR))
+):
+    """The most recent `ChallengerEvaluationService` verdict for this market (Continuous Outcome
+    Learning Engine) — what the Ops Center's "Promote to champion" action should be confirming,
+    not re-deriving by hand. `None` `data` means either this market has never had a non-bootstrap
+    retrain with enough samples for a comparison holdout, or comparisons aren't wired in this
+    deployment — an honest gap, not an error."""
+    market_id = await _require_market_id(session, market_key)
+    comparison = await get_model_comparison_repo().get_latest(market_id)
+    return envelope(data=_serialize_comparison(comparison) if comparison else None)
+
+
+def _serialize_comparison(comparison) -> dict:
+    def _metrics(m):
+        if m is None:
+            return None
+        return {
+            "log_loss": m.log_loss, "brier_score": m.brier_score,
+            "expected_calibration_error": m.expected_calibration_error, "mae": m.mae,
+        }
+
+    return {
+        "id": str(comparison.id),
+        "market_id": str(comparison.market_id),
+        "challenger_model_id": str(comparison.challenger_model_id),
+        "champion_model_id": str(comparison.champion_model_id) if comparison.champion_model_id else None,
+        "challenger_metrics": _metrics(comparison.challenger_metrics),
+        "champion_metrics": _metrics(comparison.champion_metrics),
+        "verdict": comparison.verdict.value,
+        "decisive_metric": comparison.decisive_metric,
+        "holdout_sample_count": comparison.holdout_sample_count,
+        "evaluated_at": comparison.evaluated_at.isoformat(),
+    }
+
+
 # --- Evaluation -------------------------------------------------------------------------------
 
 
@@ -512,4 +621,91 @@ async def list_model_evaluations(
             for e in evaluations
         ],
         meta={"count": len(evaluations)},
+    )
+
+
+# --- Error Memory (Continuous Outcome Learning Engine, spec §12) ------------------------------
+
+
+@router.get("/error-memory/market-ranking")
+async def market_performance_ranking(
+    sport_code: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+    _user: User = Depends(require_role(Role.ADMINISTRATOR)),
+):
+    """"Which markets does the model perform best on?" — every market, best-performing first,
+    ranked on real `PredictionOutcome` history."""
+    service = build_error_memory_service(session)
+    ranking = await service.market_performance_ranking(sport_code=sport_code)
+    return envelope(
+        data=[
+            {
+                "market_id": str(s.market_id), "market_key": s.market_key, "sample_count": s.sample_count,
+                "mean_error": s.mean_error, "accuracy": s.accuracy,
+            }
+            for s in ranking
+        ]
+    )
+
+
+@router.get("/error-memory/{market_key}/feature-failures")
+async def feature_failure_association(
+    market_key: str, session: AsyncSession = Depends(get_session), _user: User = Depends(require_role(Role.ADMINISTRATOR))
+):
+    """"Which features are associated with prediction failures?" — real, measured divergence
+    between a feature's average value on correct vs. incorrect predictions for this market; never
+    a hardcoded hypothesis (see module docstring in `domain/error_memory.py`)."""
+    market_id = await _require_market_id(session, market_key)
+    service = build_error_memory_service(session)
+    associations = await service.feature_failure_association(market_id)
+    return envelope(
+        data=[
+            {
+                "feature_key": a.feature_key, "correct_mean": a.correct_mean, "incorrect_mean": a.incorrect_mean,
+                "divergence": a.divergence, "correct_sample_count": a.correct_sample_count,
+                "incorrect_sample_count": a.incorrect_sample_count,
+            }
+            for a in associations
+        ]
+    )
+
+
+@router.get("/error-memory/{market_key}/overconfidence")
+async def overconfidence_summary(
+    market_key: str, session: AsyncSession = Depends(get_session), _user: User = Depends(require_role(Role.ADMINISTRATOR))
+):
+    """"Is the model systematically overconfident?" — real stated-probability-vs-actual-outcome
+    comparison for this market."""
+    market_id = await _require_market_id(session, market_key)
+    service = build_error_memory_service(session)
+    summary = await service.overconfidence_summary(market_id, now=_now())
+    return envelope(
+        data={
+            "market_id": str(summary.market_id), "sample_count": summary.sample_count,
+            "mean_predicted_probability": summary.mean_predicted_probability,
+            "mean_actual_positive_rate": summary.mean_actual_positive_rate,
+            "overconfidence_score": summary.overconfidence_score,
+            "expected_calibration_error": summary.expected_calibration_error,
+        }
+    )
+
+
+@router.get("/error-memory/{market_key}/model-versions")
+async def model_version_ranking(
+    market_key: str, session: AsyncSession = Depends(get_session), _user: User = Depends(require_role(Role.ADMINISTRATOR))
+):
+    """"Which model version performs best? Has performance improved or deteriorated?" — every
+    model ever registered for this market, newest first, with its latest offline evaluation."""
+    market_id = await _require_market_id(session, market_key)
+    service = build_error_memory_service(session)
+    ranking = await service.model_version_ranking(market_id)
+    return envelope(
+        data=[
+            {
+                "model_id": str(s.model_id), "model_key": s.model_key, "version": s.version,
+                "status": s.status.value, "latest_metrics": s.latest_metrics,
+                "evaluated_at": s.evaluated_at.isoformat() if s.evaluated_at else None,
+            }
+            for s in ranking
+        ]
     )

@@ -131,8 +131,8 @@ class TestSelect:
         result = await service.select(dataset, TargetType.CLASSIFICATION, candidates=FAST_CLASSIFICATION_CANDIDATES)
 
         assert result.winning_candidate in FAST_CLASSIFICATION_CANDIDATES
-        assert result.ranking_metric == "accuracy"
-        assert 0.0 <= result.ranking_value <= 1.0
+        assert result.ranking_metric == "log_loss"
+        assert result.ranking_value >= 0.0
         assert result.winning_model.is_fitted()
 
     @pytest.mark.parametrize(

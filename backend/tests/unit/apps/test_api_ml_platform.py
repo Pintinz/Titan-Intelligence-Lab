@@ -354,6 +354,115 @@ class TestRetraining:
         assert response.status_code == 200
         assert response.json()["data"]["should_retrain"] is False
 
+    def test_latest_comparison_with_none_recorded_returns_none(self, client, db_session_factory):
+        headers = _admin_headers(client, db_session_factory)
+        asyncio.run(_seed_market(db_session_factory, "football.ml_comparison_market"))
+
+        response = client.get("/api/v1/admin/ml/retraining/football.ml_comparison_market/comparison", headers=headers)
+
+        assert response.status_code == 200
+        assert response.json()["data"] is None
+
+    def test_latest_comparison_returns_the_recorded_verdict(self, client, db_session_factory):
+        from datetime import datetime, timezone
+        from uuid import uuid4
+
+        from apps.api.composition import get_model_comparison_repo
+        from modules.predictions.domain.model_comparison import ChallengerEvaluation, ComparisonMetrics, ComparisonVerdict
+        from modules.predictions.domain.value_objects import ChallengerEvaluationId
+
+        headers = _admin_headers(client, db_session_factory)
+        market_id = asyncio.run(_seed_market(db_session_factory, "football.ml_comparison_market2"))
+
+        evaluation = ChallengerEvaluation(
+            id=ChallengerEvaluationId(uuid4()), market_id=market_id,
+            challenger_model_id=ModelId(uuid4()), champion_model_id=ModelId(uuid4()),
+            challenger_metrics=ComparisonMetrics(log_loss=0.4, brier_score=0.15, expected_calibration_error=0.02),
+            champion_metrics=ComparisonMetrics(log_loss=0.6, brier_score=0.2, expected_calibration_error=0.05),
+            verdict=ComparisonVerdict.CHALLENGER_BETTER, decisive_metric="log_loss",
+            holdout_sample_count=12, evaluated_at=datetime(2026, 8, 8, tzinfo=timezone.utc),
+        )
+        asyncio.run(get_model_comparison_repo().record(evaluation))
+
+        response = client.get("/api/v1/admin/ml/retraining/football.ml_comparison_market2/comparison", headers=headers)
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["verdict"] == "challenger_better"
+        assert data["decisive_metric"] == "log_loss"
+        assert data["holdout_sample_count"] == 12
+        assert data["challenger_metrics"]["log_loss"] == 0.4
+        assert data["champion_metrics"]["brier_score"] == 0.2
+
+
+class TestBacktest:
+    def test_backtest_with_no_outcomes_returns_409_not_a_fabricated_report(self, client, db_session_factory):
+        headers = _admin_headers(client, db_session_factory)
+        asyncio.run(_seed_market(db_session_factory, "football.ml_backtest_market", with_champion=False))
+
+        response = client.post(
+            "/api/v1/admin/ml/backtest",
+            json={"market_key": "football.ml_backtest_market"},
+            headers=headers,
+        )
+
+        assert response.status_code == 409
+
+    def test_backtest_rejects_unknown_algorithm(self, client, db_session_factory):
+        headers = _admin_headers(client, db_session_factory)
+        asyncio.run(_seed_market(db_session_factory, "football.ml_backtest_market2", with_champion=False))
+
+        response = client.post(
+            "/api/v1/admin/ml/backtest",
+            json={"market_key": "football.ml_backtest_market2", "algorithm": "not_a_real_algorithm"},
+            headers=headers,
+        )
+
+        assert response.status_code == 422
+
+
+class TestErrorMemory:
+    def test_market_ranking_with_no_data_returns_empty_ranking(self, client, db_session_factory):
+        headers = _admin_headers(client, db_session_factory)
+        asyncio.run(_seed_market(db_session_factory, "football.ml_error_memory_market", with_champion=False))
+
+        response = client.get("/api/v1/admin/ml/error-memory/market-ranking", headers=headers)
+
+        assert response.status_code == 200
+        keys = [m["market_key"] for m in response.json()["data"]]
+        assert "football.ml_error_memory_market" in keys
+
+    def test_feature_failures_with_no_outcomes_returns_empty_list(self, client, db_session_factory):
+        headers = _admin_headers(client, db_session_factory)
+        asyncio.run(_seed_market(db_session_factory, "football.ml_error_memory_market2", with_champion=False))
+
+        response = client.get("/api/v1/admin/ml/error-memory/football.ml_error_memory_market2/feature-failures", headers=headers)
+
+        assert response.status_code == 200
+        assert response.json()["data"] == []
+
+    def test_overconfidence_with_no_outcomes_returns_honest_empty_summary(self, client, db_session_factory):
+        headers = _admin_headers(client, db_session_factory)
+        asyncio.run(_seed_market(db_session_factory, "football.ml_error_memory_market3", with_champion=False))
+
+        response = client.get("/api/v1/admin/ml/error-memory/football.ml_error_memory_market3/overconfidence", headers=headers)
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["sample_count"] == 0
+        assert data["overconfidence_score"] is None
+
+    def test_model_version_ranking_reflects_the_seeded_champion(self, client, db_session_factory):
+        headers = _admin_headers(client, db_session_factory)
+        asyncio.run(_seed_market(db_session_factory, "football.ml_error_memory_market4", with_champion=True))
+
+        response = client.get("/api/v1/admin/ml/error-memory/football.ml_error_memory_market4/model-versions", headers=headers)
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert len(data) == 1
+        assert data[0]["status"] == "champion"
+
 
 class TestEvaluation:
     def test_list_evaluations_for_model_with_none_returns_empty(self, client, db_session_factory):

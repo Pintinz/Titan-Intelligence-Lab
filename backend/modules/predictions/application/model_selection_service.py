@@ -79,19 +79,26 @@ def _build_model(
 
 
 def _ranking_metric_name(target_type: TargetType) -> str:
-    return "accuracy" if target_type is TargetType.CLASSIFICATION else "mae"
+    # Continuous Outcome Learning Engine (2026-08-08): classification candidates now rank by log
+    # loss, not accuracy — spec §8's priority order ("For probability predictions prioritize:
+    # 1. Log Loss ...") applies to picking a winner among the roster exactly as much as it applies
+    # to comparing a Challenger against the Champion (`model_comparison_service.py`), so both use
+    # the identical metric. Regression has no probability to score, so it's unaffected — MAE stays.
+    return "log_loss" if target_type is TargetType.CLASSIFICATION else "mae"
 
 
 def _ranking_value(target_type: TargetType, test_metrics) -> float | None:
     if target_type is TargetType.CLASSIFICATION:
-        return test_metrics.accuracy
+        return test_metrics.log_loss
     return test_metrics.mae
 
 
 def _is_better(target_type: TargetType, candidate_value: float, current_best: float) -> bool:
-    if target_type is TargetType.CLASSIFICATION:
-        return candidate_value > current_best  # higher accuracy wins
-    return candidate_value < current_best  # lower MAE wins
+    # Both metrics are now "lower is better" post log-loss switch — kept as an explicit branch
+    # (rather than collapsing to one `<` everywhere) so a future metric with the opposite
+    # direction doesn't have to fight this function's assumption silently.
+    del target_type
+    return candidate_value < current_best
 
 
 @dataclass

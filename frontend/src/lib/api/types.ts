@@ -575,6 +575,56 @@ export interface CalibrationReportDto {
   reliability_curve: Array<{ predicted_mean: number; actual_rate: number; sample_count: number }>
 }
 
+// -- Continuous Outcome Learning Engine (2026-08-08) --------------------------------------------
+
+export type ComparisonVerdict = 'challenger_better' | 'champion_better' | 'inconclusive'
+
+export interface ComparisonMetricsDto {
+  log_loss: number | null
+  brier_score: number | null
+  expected_calibration_error: number | null
+  mae: number | null
+}
+
+export interface ChallengerComparisonDto {
+  id: string
+  market_id: string
+  challenger_model_id: string
+  champion_model_id: string | null
+  challenger_metrics: ComparisonMetricsDto
+  champion_metrics: ComparisonMetricsDto | null
+  verdict: ComparisonVerdict
+  decisive_metric: string
+  holdout_sample_count: number
+  evaluated_at: string
+}
+
+export interface MarketPerformanceSummaryDto {
+  market_id: string
+  market_key: string
+  sample_count: number
+  mean_error: number | null
+  accuracy: number | null
+}
+
+export interface FeatureFailureAssociationDto {
+  feature_key: string
+  correct_mean: number | null
+  incorrect_mean: number | null
+  divergence: number | null
+  correct_sample_count: number
+  incorrect_sample_count: number
+}
+
+export interface OverconfidenceSummaryDto {
+  market_id: string
+  sample_count: number
+  mean_predicted_probability: number | null
+  mean_actual_positive_rate: number | null
+  overconfidence_score: number | null
+  expected_calibration_error: number | null
+}
+
 // -- Provider Registry (Milestone 11B) ----------------------------------------------------------
 
 export type ProviderCategory = 'sports_data' | 'ai' | 'news' | 'odds' | 'general'

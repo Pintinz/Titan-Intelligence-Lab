@@ -1,5 +1,15 @@
 import { api } from '@/lib/api/client'
-import type { CalibrationReportDto, DatasetDto, DeploymentMode, ExperimentDto, ModelDto } from '@/lib/api/types'
+import type {
+  CalibrationReportDto,
+  ChallengerComparisonDto,
+  DatasetDto,
+  DeploymentMode,
+  ExperimentDto,
+  FeatureFailureAssociationDto,
+  MarketPerformanceSummaryDto,
+  ModelDto,
+  OverconfidenceSummaryDto,
+} from '@/lib/api/types'
 
 export const mlPlatformApi = {
   buildDataset: (marketKey: string) =>
@@ -61,10 +71,19 @@ export const mlPlatformApi = {
     api.post<{ recorded: boolean }>(`/api/v1/admin/ml/monitoring/${marketKey}/latency`, { duration_ms: durationMs }),
 
   checkRetraining: (marketKey: string) => api.post<Record<string, unknown>>(`/api/v1/admin/ml/retraining/${marketKey}/check`),
+  latestComparison: (marketKey: string) =>
+    api.get<ChallengerComparisonDto | null>(`/api/v1/admin/ml/retraining/${marketKey}/comparison`),
 
   listEvaluations: (modelId: string, limit = 50) =>
     api.get<Array<{ id: string; evaluated_at: string; metrics: Record<string, number>; calibration_report: unknown }>>(
       `/api/v1/admin/ml/evaluation/${modelId}`,
       { limit },
     ),
+
+  marketPerformanceRanking: (sportCode?: string) =>
+    api.get<MarketPerformanceSummaryDto[]>('/api/v1/admin/ml/error-memory/market-ranking', sportCode ? { sport_code: sportCode } : undefined),
+  featureFailures: (marketKey: string) =>
+    api.get<FeatureFailureAssociationDto[]>(`/api/v1/admin/ml/error-memory/${marketKey}/feature-failures`),
+  overconfidence: (marketKey: string) =>
+    api.get<OverconfidenceSummaryDto>(`/api/v1/admin/ml/error-memory/${marketKey}/overconfidence`),
 }

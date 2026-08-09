@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Cpu, Crown, Swords, FlaskConical, Gauge, RotateCw } from 'lucide-react'
+import { Cpu, Crown, Swords, FlaskConical, Gauge, RotateCw, BrainCircuit } from 'lucide-react'
 import { mlPlatformApi } from '@/lib/api/ml-platform'
 import { marketsApi } from '@/lib/api/markets'
 import { Button } from '@/components/ui/button'
@@ -60,6 +60,25 @@ export default function MlOperationsPage() {
     queryFn: () => mlPlatformApi.listEvaluations(selectedModelId!),
     enabled: !!selectedModelId,
   })
+  const comparisonQuery = useQuery({
+    queryKey: ['ml', 'comparison', marketKey],
+    queryFn: () => mlPlatformApi.latestComparison(marketKey!),
+    enabled: !!marketKey,
+  })
+  const marketRankingQuery = useQuery({
+    queryKey: ['ml', 'market-ranking'],
+    queryFn: () => mlPlatformApi.marketPerformanceRanking(),
+  })
+  const featureFailuresQuery = useQuery({
+    queryKey: ['ml', 'feature-failures', marketKey],
+    queryFn: () => mlPlatformApi.featureFailures(marketKey!),
+    enabled: !!marketKey,
+  })
+  const overconfidenceQuery = useQuery({
+    queryKey: ['ml', 'overconfidence', marketKey],
+    queryFn: () => mlPlatformApi.overconfidence(marketKey!),
+    enabled: !!marketKey,
+  })
 
   const promote = useMutation({
     mutationFn: (modelId: string) => mlPlatformApi.promoteChampion(modelId, 'ops-console'),
@@ -113,6 +132,7 @@ export default function MlOperationsPage() {
             <TabsTrigger value="experiments">Experiments</TabsTrigger>
             <TabsTrigger value="importance">Feature Importance</TabsTrigger>
             <TabsTrigger value="monitoring">Monitoring</TabsTrigger>
+            <TabsTrigger value="error-memory">Error Memory</TabsTrigger>
           </TabsList>
 
           <TabsContent value="models" className="space-y-4">
@@ -234,6 +254,144 @@ export default function MlOperationsPage() {
                 <RotateCw className="size-3.5" /> {checkRetraining.isPending ? 'Checking…' : 'Run retraining check'}
               </Button>
             </SectionCard>
+
+            <SectionCard
+              icon={Swords}
+              title="Challenger vs. Champion"
+              description="The Continuous Outcome Learning Engine's most recent automated comparison — what a Promote to champion decision above should confirm, not re-derive by hand."
+            >
+              {comparisonQuery.isPending && <Skeleton className="h-24" />}
+              {comparisonQuery.isError && <ErrorState error={comparisonQuery.error} onRetry={() => void comparisonQuery.refetch()} />}
+              {comparisonQuery.isSuccess && !comparisonQuery.data && (
+                <EmptyState
+                  variant="minimal"
+                  title="No comparison recorded yet"
+                  description="A comparison runs automatically the next time a scheduled retrain finds enough new outcomes to score a Challenger against this market's live Champion."
+                />
+              )}
+              {comparisonQuery.data && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <Badge
+                      variant={
+                        comparisonQuery.data.verdict === 'challenger_better' ? 'success'
+                        : comparisonQuery.data.verdict === 'champion_better' ? 'danger' : 'neutral'
+                      }
+                    >
+                      {comparisonQuery.data.verdict === 'challenger_better' ? 'Challenger better'
+                        : comparisonQuery.data.verdict === 'champion_better' ? 'Champion better — challenger auto-retired'
+                        : 'Inconclusive'}
+                    </Badge>
+                    <p className="text-xs text-text-muted">
+                      decided by {comparisonQuery.data.decisive_metric} · {comparisonQuery.data.holdout_sample_count} holdout samples ·{' '}
+                      {new Date(comparisonQuery.data.evaluated_at).toLocaleString()}
+                    </p>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="rounded-md border border-border-subtle p-3">
+                      <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-text-muted">Challenger</p>
+                      <KeyValueGrid
+                        data={Object.fromEntries(
+                          Object.entries(comparisonQuery.data.challenger_metrics).filter(([, v]) => v !== null),
+                        )}
+                      />
+                    </div>
+                    <div className="rounded-md border border-border-subtle p-3">
+                      <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-text-muted">Champion</p>
+                      {comparisonQuery.data.champion_metrics ? (
+                        <KeyValueGrid
+                          data={Object.fromEntries(
+                            Object.entries(comparisonQuery.data.champion_metrics).filter(([, v]) => v !== null),
+                          )}
+                        />
+                      ) : (
+                        <p className="text-sm text-text-secondary">No champion at comparison time.</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </SectionCard>
+          </TabsContent>
+
+          <TabsContent value="error-memory" className="space-y-4">
+            <SectionCard
+              icon={BrainCircuit}
+              title="Market performance ranking"
+              description="Every market, best real accuracy/mean error first — real PredictionOutcome history, not a fabricated leaderboard."
+            >
+              {marketRankingQuery.isPending && <Skeleton className="h-32" />}
+              {marketRankingQuery.isError && <ErrorState error={marketRankingQuery.error} onRetry={() => void marketRankingQuery.refetch()} />}
+              {marketRankingQuery.data && marketRankingQuery.data.length === 0 && (
+                <EmptyState variant="minimal" title="No markets yet" description="Rankings appear once markets exist." />
+              )}
+              {marketRankingQuery.data && marketRankingQuery.data.length > 0 && (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-border-subtle text-left text-xs uppercase tracking-wide text-text-muted">
+                        <th className="py-2 pr-4">Market</th>
+                        <th className="py-2 pr-4">Samples</th>
+                        <th className="py-2 pr-4">Accuracy</th>
+                        <th className="py-2 pr-4">Mean error</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {marketRankingQuery.data.map((m) => (
+                        <tr key={m.market_id} className="border-b border-border-subtle/50">
+                          <td className="py-2 pr-4 font-telemetry text-text-primary">{m.market_key}</td>
+                          <td className="py-2 pr-4 text-text-secondary">{m.sample_count}</td>
+                          <td className="py-2 pr-4 text-text-secondary">{m.accuracy !== null ? `${(m.accuracy * 100).toFixed(1)}%` : '—'}</td>
+                          <td className="py-2 pr-4 text-text-secondary">{m.mean_error !== null ? m.mean_error.toFixed(3) : '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </SectionCard>
+
+            {marketKey && (
+              <div className="grid gap-4 lg:grid-cols-2">
+                <SectionCard icon={Gauge} title="Overconfidence" description="Stated probability vs. real outcome for this market.">
+                  {overconfidenceQuery.isPending && <Skeleton className="h-16" />}
+                  {overconfidenceQuery.isError && <ErrorState error={overconfidenceQuery.error} onRetry={() => void overconfidenceQuery.refetch()} />}
+                  {overconfidenceQuery.data && overconfidenceQuery.data.sample_count === 0 && (
+                    <EmptyState variant="minimal" title="No resolved outcomes yet" description="This market has no real outcome history to score against." />
+                  )}
+                  {overconfidenceQuery.data && overconfidenceQuery.data.sample_count > 0 && (
+                    <KeyValueGrid
+                      data={{
+                        sample_count: overconfidenceQuery.data.sample_count,
+                        mean_predicted_probability: overconfidenceQuery.data.mean_predicted_probability,
+                        mean_actual_positive_rate: overconfidenceQuery.data.mean_actual_positive_rate,
+                        overconfidence_score: overconfidenceQuery.data.overconfidence_score,
+                        expected_calibration_error: overconfidenceQuery.data.expected_calibration_error,
+                      }}
+                    />
+                  )}
+                </SectionCard>
+                <SectionCard icon={Gauge} title="Feature/failure association" description="Features whose average value diverges most between correct and incorrect predictions.">
+                  {featureFailuresQuery.isPending && <Skeleton className="h-32" />}
+                  {featureFailuresQuery.isError && <ErrorState error={featureFailuresQuery.error} onRetry={() => void featureFailuresQuery.refetch()} />}
+                  {featureFailuresQuery.data && featureFailuresQuery.data.length === 0 && (
+                    <EmptyState variant="minimal" title="No resolved outcomes yet" description="Feature/failure divergence needs real correct and incorrect predictions to compare." />
+                  )}
+                  {featureFailuresQuery.data && featureFailuresQuery.data.length > 0 && (
+                    <ul className="space-y-1.5">
+                      {featureFailuresQuery.data.slice(0, 8).map((f) => (
+                        <li key={f.feature_key} className="flex items-center justify-between text-sm">
+                          <span className="font-telemetry text-text-primary">{f.feature_key}</span>
+                          <span className="font-mono text-xs text-text-muted">
+                            correct {f.correct_mean?.toFixed(2) ?? '—'} · incorrect {f.incorrect_mean?.toFixed(2) ?? '—'} · Δ {f.divergence?.toFixed(2) ?? '—'}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </SectionCard>
+              </div>
+            )}
           </TabsContent>
         </Tabs>
       )}

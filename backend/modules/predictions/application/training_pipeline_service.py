@@ -27,6 +27,7 @@ from modules.predictions.application.dataset_registry_service import DatasetRegi
 from modules.predictions.application.dataset_splitter import split
 from modules.predictions.application.preprocessing import detect_outliers, impute_missing, select_features
 from modules.predictions.domain.dataset import Dataset, SplitStrategy
+from modules.predictions.domain.probability_metrics import log_loss
 from modules.predictions.domain.value_objects import MarketId, TargetType
 from modules.predictions.ports.ml_model import PredictionModelPort, TrainingMetrics, TrainingSample
 
@@ -43,6 +44,12 @@ class EvaluationMetrics:
     f1: float | None = None
     mae: float | None = None
     rmse: float | None = None
+    # Continuous Outcome Learning Engine (2026-08-08): the probability the fitted model assigned
+    # to whichever class actually happened, averaged over the held-out test split — classification
+    # only (None for regression, where there's no probability to score). This is what
+    # `AutomaticModelSelectionService` now ranks candidates by (spec §8's priority order), and what
+    # `ChallengerEvaluationService` scores a Challenger against its market's current Champion with.
+    log_loss: float | None = None
 
 
 @dataclass(frozen=True)
@@ -58,9 +65,12 @@ class TrainingRunResult:
 
 def _evaluate_classification(model: PredictionModelPort, test_samples: list[TrainingSample]) -> EvaluationMetrics:
     tp = fp = tn = fn = 0
+    true_class_probabilities = []
     for sample in test_samples:
-        predicted_positive = model.predict_one(sample.features).probability >= 0.5
+        probability = model.predict_one(sample.features).probability
+        predicted_positive = probability >= 0.5
         actual_positive = sample.label >= 0.5
+        true_class_probabilities.append(probability if actual_positive else 1.0 - probability)
         if predicted_positive and actual_positive:
             tp += 1
         elif predicted_positive and not actual_positive:
@@ -75,7 +85,9 @@ def _evaluate_classification(model: PredictionModelPort, test_samples: list[Trai
     precision = tp / (tp + fp) if (tp + fp) else 0.0
     recall = tp / (tp + fn) if (tp + fn) else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
-    return EvaluationMetrics(accuracy=accuracy, precision=precision, recall=recall, f1=f1)
+    return EvaluationMetrics(
+        accuracy=accuracy, precision=precision, recall=recall, f1=f1, log_loss=log_loss(true_class_probabilities)
+    )
 
 
 def _evaluate_multiclass(model: PredictionModelPort, test_samples: list[TrainingSample]) -> EvaluationMetrics:
@@ -85,14 +97,19 @@ def _evaluate_multiclass(model: PredictionModelPort, test_samples: list[Training
     real-label equality: decode both the model's predicted label and the sample's own true index
     through the same `model.class_labels` ordering both were encoded with, and compare directly.
     Precision/recall/f1 stay `None` here rather than fabricating a micro/macro-average nobody
-    asked for — `AutomaticModelSelectionService` only ever ranks candidates by accuracy anyway."""
+    asked for. `log_loss` reads the probability the model's own `distribution` assigned to
+    whichever class actually happened (2026-08-08) — every adapter populates `distribution` for a
+    multiclass model, so this is real per-class probability, not a derived approximation."""
     n = len(test_samples)
-    correct = sum(
-        1
-        for sample in test_samples
-        if model.predict_one(sample.features).value == model.class_labels[int(sample.label)]
-    )
-    return EvaluationMetrics(accuracy=correct / n if n else 0.0)
+    correct = 0
+    true_class_probabilities = []
+    for sample in test_samples:
+        prediction = model.predict_one(sample.features)
+        true_label = model.class_labels[int(sample.label)]
+        if prediction.value == true_label:
+            correct += 1
+        true_class_probabilities.append(prediction.distribution.get(true_label, 0.0))
+    return EvaluationMetrics(accuracy=correct / n if n else 0.0, log_loss=log_loss(true_class_probabilities))
 
 
 def _evaluate_regression(model: PredictionModelPort, test_samples: list[TrainingSample]) -> EvaluationMetrics:

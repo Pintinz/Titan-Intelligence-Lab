@@ -6,12 +6,14 @@ from uuid import uuid4
 
 import pytest
 
+from modules.predictions.application.challenger_evaluation_service import ChallengerEvaluationService
 from modules.predictions.application.dataset_builder_service import DatasetBuilder
 from modules.predictions.application.dataset_registry_service import DatasetRegistryService
 from modules.predictions.application.experiment_tracking_service import ExperimentTrackingService
 from modules.predictions.application.model_registry_service import ModelRegistryService
 from modules.predictions.application.model_selection_service import AutomaticModelSelectionService
 from modules.predictions.application.scheduled_retraining_orchestrator import (
+    MIN_TRAINING_POOL_AFTER_HOLDOUT,
     SYSTEM_APPROVER,
     ScheduledRetrainingOrchestrator,
 )
@@ -32,6 +34,7 @@ from modules.predictions.domain.entities import (
     PredictionOutcome,
 )
 from modules.predictions.domain.ml_value_objects import MLAlgorithm, MLFramework
+from modules.predictions.domain.model_comparison import ComparisonVerdict
 from modules.predictions.domain.model_selection import CandidateSpec
 from modules.predictions.domain.value_objects import (
     MarketId,
@@ -43,6 +46,10 @@ from modules.predictions.domain.value_objects import (
     PredictionOutcomeId,
     PredictionStatus,
     TargetType,
+)
+from modules.predictions.infrastructure.ml.model_loader import ModelLoaderService
+from modules.predictions.infrastructure.persistence.in_memory_model_comparison_repository import (
+    InMemoryModelComparisonRepository,
 )
 
 T0 = datetime(2026, 8, 2, tzinfo=timezone.utc)
@@ -159,6 +166,41 @@ def orchestrator(market_repo, model_repo, dataset_repo, prediction_repo, predict
             experiments=ExperimentTrackingService(experiments=_ExperimentRepoFake()),
             artifact_store=_InMemoryArtifactStore(),
         ),
+    )
+
+
+@pytest.fixture
+def artifact_store():
+    return _InMemoryArtifactStore()
+
+
+@pytest.fixture
+def comparison_repo():
+    return InMemoryModelComparisonRepository()
+
+
+@pytest.fixture
+def orchestrator_with_comparison(market_repo, model_repo, dataset_repo, prediction_repo, prediction_outcome_repo, artifact_store, comparison_repo):
+    """Same wiring as `orchestrator`, plus the Continuous Outcome Learning Engine's
+    Challenger-vs-Champion comparison pieces (`model_loader`/`evaluator`/`comparisons`) — kept as
+    a separate fixture rather than always-on so every pre-existing test in this file keeps
+    exercising the "not wired" fallback path unchanged."""
+    dataset_registry = DatasetRegistryService(datasets=dataset_repo)
+    return ScheduledRetrainingOrchestrator(
+        markets=market_repo,
+        models=model_repo,
+        scheduler=RetrainingScheduler(dataset_registry=dataset_registry),
+        dataset_builder=DatasetBuilder(markets=market_repo, predictions=prediction_repo, outcomes=prediction_outcome_repo),
+        dataset_registry=dataset_registry,
+        model_selection=AutomaticModelSelectionService(
+            training_pipeline=TrainingPipelineService(),
+            model_registry=ModelRegistryService(models=model_repo),
+            experiments=ExperimentTrackingService(experiments=_ExperimentRepoFake()),
+            artifact_store=artifact_store,
+        ),
+        model_loader=ModelLoaderService(artifact_store=artifact_store),
+        evaluator=ChallengerEvaluationService(),
+        comparisons=comparison_repo,
     )
 
 
@@ -310,3 +352,89 @@ class TestScheduledRetrainingOrchestrator:
         assert result.should_retrain is True
         assert result.bootstrapped is True
         assert await model_repo.get_champion(market.id) is not None
+
+
+# -- Continuous Outcome Learning Engine: Challenger-vs-Champion comparison (2026-08-08) ---------
+
+
+class TestChallengerVsChampionComparison:
+    async def test_non_bootstrap_retrain_with_real_champion_runs_comparison_and_records_a_verdict(
+        self, orchestrator_with_comparison, market_repo, model_repo, prediction_repo, prediction_outcome_repo, comparison_repo
+    ):
+        market = await market_repo.upsert(_market())
+        assert await model_repo.get_champion(market.id) is None
+        await _seed_outcomes(market, prediction_repo, prediction_outcome_repo, n=60)
+
+        # Bootstrap a real, artifact-backed CHAMPION first — the scenario every non-bootstrap
+        # comparison assumes (a Champion this orchestrator itself already trained and promoted).
+        bootstrap_outcomes = await orchestrator_with_comparison.run(T0, candidates=FAST_CANDIDATES)
+        assert bootstrap_outcomes[0].bootstrapped is True
+        champion = await model_repo.get_champion(market.id)
+        assert champion is not None
+        assert champion.artifact_ref is not None
+
+        # New outcomes the bootstrap Champion never saw, plus enough total samples to clear
+        # MIN_TRAINING_POOL_AFTER_HOLDOUT after carving a comparison holdout — and advance past
+        # the 7-day staleness window so should_retrain() actually fires a second time.
+        await _seed_outcomes(market, prediction_repo, prediction_outcome_repo, n=MIN_TRAINING_POOL_AFTER_HOLDOUT + 20)
+        later = T0 + timedelta(days=8)
+
+        outcomes = await orchestrator_with_comparison.run(later, candidates=FAST_CANDIDATES)
+
+        assert len(outcomes) == 1
+        result = outcomes[0]
+        assert result.bootstrapped is False  # a live CHAMPION already existed
+        assert result.challenger is not None
+        assert result.comparison is not None
+        assert result.comparison.verdict in (
+            ComparisonVerdict.CHALLENGER_BETTER, ComparisonVerdict.CHAMPION_BETTER, ComparisonVerdict.INCONCLUSIVE,
+        )
+        assert result.comparison.champion_model_id == champion.id
+        assert result.comparison.challenger_model_id == result.challenger.id
+        assert result.comparison.holdout_sample_count > 0
+
+        recorded = await comparison_repo.get_latest(market.id)
+        assert recorded == result.comparison
+
+        # A CHAMPION_BETTER verdict must have already retired the losing Challenger; anything
+        # else must have left it exactly as registered (still eligible for human promotion).
+        persisted_challenger = await model_repo.get(result.challenger.id)
+        if result.comparison.verdict is ComparisonVerdict.CHAMPION_BETTER:
+            assert persisted_challenger.status is ModelStatus.RETIRED
+        else:
+            assert persisted_challenger.status is ModelStatus.CHALLENGER
+
+        # Either way, the original Champion is untouched — this comparison never auto-promotes.
+        assert await model_repo.get_champion(market.id) == champion
+
+    async def test_dataset_too_small_for_a_safe_holdout_skips_comparison_but_still_retrains(
+        self, orchestrator_with_comparison, market_repo, model_repo, dataset_repo, prediction_repo, prediction_outcome_repo
+    ):
+        market = await market_repo.upsert(_market())
+        await _seed_champion(model_repo, market)
+        await dataset_repo.upsert(_stale_dataset(market.id, T0))
+        await _seed_outcomes(market, prediction_repo, prediction_outcome_repo, n=50)  # too few to clear the holdout margin
+
+        outcomes = await orchestrator_with_comparison.run(T0, candidates=FAST_CANDIDATES)
+
+        assert len(outcomes) == 1
+        result = outcomes[0]
+        assert result.challenger is not None
+        assert result.comparison is None
+
+    async def test_comparison_pieces_not_wired_leaves_prior_behavior_unchanged(
+        self, orchestrator, market_repo, model_repo, dataset_repo, prediction_repo, prediction_outcome_repo
+    ):
+        """The plain `orchestrator` fixture (no `model_loader`/`evaluator`/`comparisons`) must
+        keep behaving exactly like before this feature existed — `comparison` stays `None`
+        unconditionally, never raises for being unwired."""
+        market = await market_repo.upsert(_market())
+        await _seed_champion(model_repo, market)
+        await dataset_repo.upsert(_stale_dataset(market.id, T0))
+        await _seed_outcomes(market, prediction_repo, prediction_outcome_repo, n=MIN_TRAINING_POOL_AFTER_HOLDOUT + 20)
+
+        outcomes = await orchestrator.run(T0, candidates=FAST_CANDIDATES)
+
+        assert len(outcomes) == 1
+        assert outcomes[0].challenger is not None
+        assert outcomes[0].comparison is None

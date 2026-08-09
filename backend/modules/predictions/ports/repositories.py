@@ -19,6 +19,7 @@ from modules.predictions.domain.entities import (
     PredictionAudit,
     PredictionOutcome,
 )
+from modules.predictions.domain.model_comparison import ChallengerEvaluation
 from modules.predictions.domain.value_objects import (
     ExperimentId,
     MarketId,
@@ -89,3 +90,13 @@ class PredictionAuditRepositoryPort(Protocol):
     async def record(self, audit: PredictionAudit) -> PredictionAudit: ...
     async def list_by_prediction(self, prediction_id: PredictionId) -> list[PredictionAudit]: ...
     async def list_recent(self, since: datetime | None = None, limit: int = 200) -> list[PredictionAudit]: ...
+
+
+class ModelComparisonRepositoryPort(Protocol):
+    """Continuous Outcome Learning Engine (2026-08-08) — one row per `ChallengerEvaluationService.evaluate()`
+    call, the record a human reviewing a CHALLENGER_BETTER verdict in the Ops Center confirms
+    rather than re-derives by hand."""
+
+    async def record(self, evaluation: ChallengerEvaluation) -> ChallengerEvaluation: ...
+    async def get_latest(self, market_id: MarketId) -> ChallengerEvaluation | None: ...
+    async def list_by_market(self, market_id: MarketId, limit: int = 50) -> list[ChallengerEvaluation]: ...

@@ -43,22 +43,65 @@ attempt on every sweep until one succeeds.
 One market's failure (bad dataset, training error) is captured per-market and never blocks the
 sweep from checking every other market — a scheduled sweep that silently stops at the first
 problem market would starve every market after it in the iteration order.
+
+Continuous Outcome Learning Engine (2026-08-08): the non-bootstrap branch (a market that already
+has a live CHAMPION) now also runs `ChallengerEvaluationService` — the "Compare Against Current
+Production Model" half of the spec this orchestrator's earlier version was missing entirely. A
+chronological holdout is carved off the freshly-built dataset BEFORE the Challenger ever trains on
+it (`_comparison_holdout`), so the comparison never scores the Challenger on samples it already
+saw; the Champion, trained on an older dataset build, was never at risk of that either way. Both
+models are scored on the identical holdout via the same log-loss/Brier/calibration priority order
+`AutomaticModelSelectionService` now ranks its own candidate roster by. A CHAMPION_BETTER verdict
+auto-`retire()`s the losing Challenger (touches no production traffic — safe to automate); a
+CHALLENGER_BETTER verdict leaves the Challenger exactly as before, still requiring the same human
+`promote_to_champion` call, but with the comparison recorded so that decision is "confirm" rather
+than "re-derive by hand." Too few samples to carve a safe holdout (`_comparison_holdout` returning
+`None`) falls back to the pre-existing behavior unchanged: Challenger registered, no verdict, no
+auto-retire — an honest "not enough data to compare yet," never a fabricated one.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
+from modules.predictions.application.challenger_evaluation_service import ChallengerEvaluationService
 from modules.predictions.application.dataset_builder_service import DatasetBuilder
 from modules.predictions.application.dataset_registry_service import DatasetHasQualityIssuesError, DatasetRegistryService
 from modules.predictions.application.model_selection_service import AutomaticModelSelectionService
 from modules.predictions.application.training_pipeline_service import RetrainingScheduler
+from modules.predictions.domain.dataset import Dataset
 from modules.predictions.domain.entities import MarketDefinition, ModelDefinition
+from modules.predictions.domain.model_comparison import ChallengerEvaluation, ComparisonVerdict
 from modules.predictions.domain.value_objects import MarketStatus
-from modules.predictions.ports.repositories import MarketRepositoryPort, ModelRepositoryPort
+from modules.predictions.infrastructure.ml.model_loader import ModelLoaderService
+from modules.predictions.ports.ml_model import TrainingSample
+from modules.predictions.ports.repositories import MarketRepositoryPort, ModelComparisonRepositoryPort, ModelRepositoryPort
 
 SYSTEM_APPROVER = "scheduled-retraining"
+
+# A comparison holdout is only carved off when doing so still leaves the Challenger's own training
+# comfortably above `MIN_TRAINING_SAMPLES` (30) after `TrainingPipelineService`'s own internal
+# 80/20 split — 45 remaining samples clears that with real margin. Below this, skip the comparison
+# entirely rather than starve the Challenger's training to run a nearly-meaningless comparison.
+MIN_TRAINING_POOL_AFTER_HOLDOUT = 45
+COMPARISON_HOLDOUT_RATIO = 0.15
+MIN_COMPARISON_HOLDOUT_SAMPLES = 10
+
+
+def _comparison_holdout(dataset: Dataset) -> tuple[list[TrainingSample], list[TrainingSample]] | None:
+    """Splits `dataset.samples` into (training_pool, holdout) for a Challenger-vs-Champion
+    comparison. `PredictionOutcomeRepositoryPort.list_by_market` (what `DatasetBuilder` sources
+    from) orders by `evaluated_at.desc()` — newest first — so the *head* of `dataset.samples` is
+    the most recent history, not the tail; this takes that head as the holdout (never seen by
+    training) and the older tail as the pool the Challenger actually trains on. Returns `None` when
+    the dataset isn't large enough to spare a holdout without starving the Challenger's own fit."""
+    samples = dataset.samples
+    holdout_count = max(MIN_COMPARISON_HOLDOUT_SAMPLES, int(len(samples) * COMPARISON_HOLDOUT_RATIO))
+    training_pool = samples[holdout_count:]
+    if len(training_pool) < MIN_TRAINING_POOL_AFTER_HOLDOUT:
+        return None
+    return list(training_pool), list(samples[:holdout_count])
 
 
 @dataclass(frozen=True)
@@ -72,6 +115,10 @@ class RetrainingOutcome:
     """True when this run auto-promoted `challenger` straight to CHAMPION because the market had
     never had one before — the one case this orchestrator skips the human Champion-promotion
     gate (see module docstring)."""
+    comparison: ChallengerEvaluation | None = None
+    """Set only for a non-bootstrap retrain that had enough samples to carve a comparison holdout
+    (see `_comparison_holdout`) — `None` for a bootstrap run (nothing to compare against yet) or a
+    market whose dataset was too small to spare one."""
 
 
 @dataclass
@@ -82,6 +129,13 @@ class ScheduledRetrainingOrchestrator:
     dataset_builder: DatasetBuilder
     dataset_registry: DatasetRegistryService
     model_selection: AutomaticModelSelectionService
+    model_loader: ModelLoaderService | None = None
+    evaluator: ChallengerEvaluationService | None = None
+    comparisons: ModelComparisonRepositoryPort | None = None
+    """`model_loader`/`evaluator`/`comparisons` are optional (default `None`) so existing callers
+    that construct this orchestrator without them keep working unchanged — the Continuous Outcome
+    Learning Engine's comparison step is simply skipped (same as an insufficient-holdout market)
+    when any of the three isn't wired, rather than raising."""
 
     async def run(self, now: datetime, candidates=None) -> list[RetrainingOutcome]:
         """Checks, and retrains where warranted, every PRODUCTION market — the periodic sweep a
@@ -95,7 +149,8 @@ class ScheduledRetrainingOrchestrator:
         return outcomes
 
     async def _check_and_retrain(self, market: MarketDefinition, now: datetime, candidates=None) -> RetrainingOutcome:
-        is_bootstrap = await self.models.get_champion(market.id) is None
+        champion = await self.models.get_champion(market.id)
+        is_bootstrap = champion is None
 
         if is_bootstrap:
             # No CHAMPION exists yet — should_retrain()'s staleness/drift check has no prior
@@ -120,11 +175,21 @@ class ScheduledRetrainingOrchestrator:
                 skipped_reason=f"dataset build failed: {exc}",
             )
 
+        # Carve off a comparison holdout BEFORE training so the Challenger never trains on samples
+        # its own comparison will later score it on — see module docstring and `_comparison_holdout`.
+        holdout_samples: list[TrainingSample] = []
+        training_dataset = dataset
+        if not is_bootstrap and self.model_loader is not None and self.evaluator is not None and self.comparisons is not None:
+            split = _comparison_holdout(dataset)
+            if split is not None:
+                training_pool, holdout_samples = split
+                training_dataset = replace(dataset, samples=training_pool)
+
         try:
             next_model_version = await self._next_model_version(market)
-            challenger, _selection = await self.model_selection.select_and_register_challenger(
+            challenger, selection = await self.model_selection.select_and_register_challenger(
                 market_id=market.id,
-                dataset=dataset,
+                dataset=training_dataset,
                 target_type=market.target_type,
                 model_key_prefix=market.market_key,
                 next_version=next_model_version,
@@ -138,7 +203,19 @@ class ScheduledRetrainingOrchestrator:
             )
 
         if not is_bootstrap:
-            return RetrainingOutcome(market_key=market.market_key, should_retrain=True, reason=reason, challenger=challenger)
+            comparison = None
+            if holdout_samples:
+                try:
+                    comparison = await self._compare_against_champion(
+                        market, champion, challenger, selection.winning_model, holdout_samples, now
+                    )
+                except Exception:  # noqa: BLE001 — a comparison failure never blocks the Challenger
+                    # from being registered for human review; it just means no automated verdict.
+                    comparison = None
+            return RetrainingOutcome(
+                market_key=market.market_key, should_retrain=True, reason=reason, challenger=challenger,
+                comparison=comparison,
+            )
 
         try:
             await self.model_selection.model_registry.promote_to_champion(
@@ -154,6 +231,40 @@ class ScheduledRetrainingOrchestrator:
         return RetrainingOutcome(
             market_key=market.market_key, should_retrain=True, reason=reason, challenger=challenger, bootstrapped=True
         )
+
+    async def _compare_against_champion(
+        self,
+        market: MarketDefinition,
+        champion: ModelDefinition,
+        challenger: ModelDefinition,
+        challenger_model,
+        holdout_samples: list[TrainingSample],
+        now: datetime,
+    ) -> ChallengerEvaluation:
+        """Scores `challenger_model` (already fitted in-memory — no need to reload it) and the
+        current Champion (loaded fresh via `ModelLoaderService`, since only its serialized artifact
+        is available here) on the identical `holdout_samples`, records the verdict, and auto-
+        `retire()`s the Challenger when the Champion wins — the one comparison outcome this
+        orchestrator is allowed to act on without a human (see module docstring)."""
+        champion_model = await self.model_loader.load(
+            champion.id, champion.framework, champion.algorithm, market.target_type, champion.artifact_ref
+        )
+        comparison = self.evaluator.evaluate(
+            market_id=market.id,
+            target_type=market.target_type,
+            challenger_model_id=challenger.id,
+            challenger=challenger_model,
+            champion_model_id=champion.id,
+            champion=champion_model,
+            holdout_samples=holdout_samples,
+            now=now,
+        )
+        await self.comparisons.record(comparison)
+
+        if comparison.verdict is ComparisonVerdict.CHAMPION_BETTER:
+            await self.model_selection.model_registry.retire(challenger.id, now)
+
+        return comparison
 
     async def _build_validate_approve_dataset(self, market: MarketDefinition, now: datetime):
         latest = await self.dataset_registry.datasets.get_latest_version(market.id)

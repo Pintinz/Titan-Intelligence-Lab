@@ -174,3 +174,11 @@ class PredictionAuditId:
 
     def __str__(self) -> str:
         return str(self.value)
+
+
+@dataclass(frozen=True)
+class ChallengerEvaluationId:
+    value: UUID
+
+    def __str__(self) -> str:
+        return str(self.value)
