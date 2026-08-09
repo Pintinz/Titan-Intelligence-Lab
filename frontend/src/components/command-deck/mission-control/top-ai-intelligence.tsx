@@ -5,6 +5,7 @@ import { predictionsApi } from '@/lib/api/predictions'
 import { sportsApi } from '@/lib/api/sports'
 import { SPORT_SLUGS } from '@/lib/hooks/use-sport'
 import { dedupeByFixture } from '@/lib/predictions/dedupe-by-fixture'
+import { fixtureCardStatus } from '@/lib/sports-status'
 import { AiPickCard, AI_PICK_CONFIDENCE_FLOOR } from '../ai-picks/ai-pick-card'
 import { MissionSection, MissionCardGrid, MissionSkeletonGrid, MissionEmptyState } from './mission-section'
 import type { PredictionPickDto, FixtureSummaryDto } from '@/lib/api/types'
@@ -71,7 +72,13 @@ export function TopAiIntelligence() {
       {!isLoading && cards.length > 0 && (
         <MissionCardGrid>
           {cards.map(({ pick, fixture }) => (
-            <AiPickCard key={pick.id} pick={pick} fixture={fixture} sportSlug={sportSlugFor(pick.sport_code)} />
+            <AiPickCard
+              key={pick.id}
+              pick={pick}
+              fixture={fixture}
+              sportSlug={sportSlugFor(pick.sport_code)}
+              matchStatus={fixtureCardStatus(fixture.status) === 'completed' ? 'completed' : 'upcoming'}
+            />
           ))}
         </MissionCardGrid>
       )}

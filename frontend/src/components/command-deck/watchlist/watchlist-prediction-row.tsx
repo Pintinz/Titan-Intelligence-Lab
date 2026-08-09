@@ -1,21 +1,7 @@
 import { Link } from 'react-router-dom'
 import { ChevronRight, Star } from 'lucide-react'
-import { resolveVerdict, type TeamRef } from '@/components/infinity/evidence-explorer'
-
-const VALUE_LABELS: Record<string, string> = {
-  YES: 'Yes',
-  NO: 'No',
-  OVER: 'Over',
-  UNDER: 'Under',
-  positive: 'Yes',
-  negative: 'No',
-}
-
-function valueLabel(value: string | number, homeTeam?: TeamRef, awayTeam?: TeamRef): string {
-  const stringValue = String(value)
-  if (stringValue in VALUE_LABELS) return VALUE_LABELS[stringValue]
-  return resolveVerdict(value, homeTeam, awayTeam).text
-}
+import type { TeamRef } from '@/components/infinity/evidence-explorer'
+import { predictionValueLabel } from '@/lib/predictions/value-label'
 
 /**
  * WatchlistPredictionRow — a compact intelligence-feed row, deliberately not a card: the shaped
@@ -65,7 +51,7 @@ export function WatchlistPredictionRow({
           {marketName ?? 'Prediction'}
         </p>
         <p className="mt-0.5 truncate font-[var(--cd-font-display)] text-[14px] font-semibold" style={{ color: 'var(--cd-text-primary)' }}>
-          {valueLabel(value, homeTeam, awayTeam)}
+          {predictionValueLabel(value, homeTeam, awayTeam)}
         </p>
       </div>
       <div className="relative z-10 flex shrink-0 items-center gap-4">

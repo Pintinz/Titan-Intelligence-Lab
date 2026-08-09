@@ -110,12 +110,16 @@ export function MissionEmptyState({
   description,
   actionLabel,
   actionHref,
+  secondaryActionLabel,
+  secondaryActionHref,
 }: {
   icon?: IconComponent
   title: string
   description: string
   actionLabel?: string
   actionHref?: string
+  secondaryActionLabel?: string
+  secondaryActionHref?: string
 }) {
   return (
     <div
@@ -145,11 +149,20 @@ export function MissionEmptyState({
           {description}
         </p>
       </div>
-      {actionLabel && actionHref && (
-        <CDButton variant="secondary" size="sm" href={actionHref} className="mt-1">
-          {actionLabel}
-        </CDButton>
-      )}
+      {(actionLabel && actionHref) || (secondaryActionLabel && secondaryActionHref) ? (
+        <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
+          {actionLabel && actionHref && (
+            <CDButton variant="secondary" size="sm" href={actionHref}>
+              {actionLabel}
+            </CDButton>
+          )}
+          {secondaryActionLabel && secondaryActionHref && (
+            <CDButton variant="secondary" size="sm" href={secondaryActionHref}>
+              {secondaryActionLabel}
+            </CDButton>
+          )}
+        </div>
+      ) : null}
     </div>
   )
 }

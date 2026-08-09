@@ -3,23 +3,9 @@ import { Sparkles, MapPin, ChevronRight, Star } from 'lucide-react'
 import { CDStatusDot } from '../primitives/status'
 import { CDButton } from '../primitives/button'
 import { CD_DOMAIN_COLOR_VAR, domainTint, type DomainKey } from '../primitives/domain'
-import { resolveVerdict, type TeamRef } from '@/components/infinity/evidence-explorer'
+import type { TeamRef } from '@/components/infinity/evidence-explorer'
+import { predictionValueLabel } from '@/lib/predictions/value-label'
 import type { PredictionPickDto } from '@/lib/api/types'
-
-const VALUE_LABELS: Record<string, string> = {
-  YES: 'Yes',
-  NO: 'No',
-  OVER: 'Over',
-  UNDER: 'Under',
-  positive: 'Yes',
-  negative: 'No',
-}
-
-function pickLabel(value: string | number, homeTeam: TeamRef, awayTeam: TeamRef): string {
-  const stringValue = String(value)
-  if (stringValue in VALUE_LABELS) return VALUE_LABELS[stringValue]
-  return resolveVerdict(value, homeTeam, awayTeam).text
-}
 
 /**
  * WatchlistMatchCard — the followed-match unit: MATCH -> CURRENT STATE -> AI INTELLIGENCE -> ACTION,
@@ -145,7 +131,7 @@ export function WatchlistMatchCard({
                 {topPick.market_name}
               </p>
               <p className="truncate font-[var(--cd-font-display)] text-[14.5px] font-semibold" style={{ color: 'var(--cd-text-primary)' }}>
-                {pickLabel(topPick.value, homeRef, awayRef)}
+                {predictionValueLabel(topPick.value, homeRef, awayRef)}
               </p>
             </div>
             <span
