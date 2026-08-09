@@ -252,7 +252,14 @@ export const router = createBrowserRouter([
           { path: 'players/:playerId', element: <PlayerDetailPage /> },
           { path: 'competitions', element: <CompetitionListPage /> },
           { path: 'competitions/:competitionId', element: <CompetitionDetailPage /> },
-          { path: 'lab', element: <PredictionLabPage /> },
+          {
+            path: 'lab',
+            element: (
+              <RoleRoute minRole="administrator">
+                <PredictionLabPage />
+              </RoleRoute>
+            ),
+          },
           { path: 'news', element: <SportNewsPage /> },
           { path: 'community', element: <SportCommunityPage /> },
         ],

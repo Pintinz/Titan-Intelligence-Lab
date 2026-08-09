@@ -8,6 +8,8 @@ import { useWatchlist } from '@/lib/hooks/use-watchlist'
 import { isLiveStatus } from '@/lib/sports-status'
 import { todayRange } from '@/lib/sports-date-ranges'
 import { useAuthStore } from '@/stores/auth-store'
+import { isAtLeast } from '@/lib/api/types'
+import { getDisplayNameFromEmail, getTimeAwareGreeting } from '@/lib/user-display-name'
 import { MissionHero, type MissionHeroStatus, type SystemStatusTone } from '@/components/command-deck/mission-control/mission-hero'
 import { AiOperationsOverview, type OperationsMetric } from '@/components/command-deck/mission-control/ai-operations-overview'
 import { LiveIntelligence, type FixtureCardItem } from '@/components/command-deck/mission-control/live-intelligence'
@@ -34,7 +36,9 @@ import { MissionAmbientBackground } from '@/components/command-deck/mission-cont
 export default function HomePage() {
   const profile = useAuthStore((s) => s.profile)
   const watchlist = useWatchlist()
-  const firstName = profile?.email?.split('@')[0]
+  const displayName = getDisplayNameFromEmail(profile?.email)
+  const greeting = getTimeAwareGreeting()
+  const isAdmin = !!profile && isAtLeast(profile.role, 'administrator')
 
   const liveQueries = useQueries({
     queries: SPORT_SLUGS.map((sport) => ({
@@ -131,7 +135,7 @@ export default function HomePage() {
     <div className="command-deck relative isolate space-y-8 rounded-[var(--cd-radius-xl)]" style={{ backgroundColor: 'var(--cd-bg)', padding: '1.5rem' }}>
       <MissionAmbientBackground />
 
-      <MissionHero firstName={firstName} status={heroStatus} />
+      <MissionHero greeting={greeting} name={displayName} isAdmin={isAdmin} status={heroStatus} />
 
       <AiOperationsOverview metrics={overviewMetrics} />
 

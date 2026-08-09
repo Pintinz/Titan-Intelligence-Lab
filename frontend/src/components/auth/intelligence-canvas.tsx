@@ -6,12 +6,23 @@ type Sport = 'football' | 'basketball' | 'baseball' | 'table-tennis'
 
 const sports: Sport[] = ['football', 'basketball', 'baseball', 'table-tennis']
 
-const sportMatches = {
-  football: { home: 'Arsenal', away: 'Chelsea', confidence: 81, market: 'BTTS', pick: 'YES' },
-  basketball: { home: 'Boston Celtics', away: 'Denver Nuggets', confidence: 74, market: 'Spread', pick: '-4.5' },
-  baseball: { home: 'Dodgers', away: 'Giants', confidence: 88, market: 'Under', pick: '7.5' },
-  'table-tennis': { home: 'Zhang', away: 'Ito', confidence: 69, market: 'Handicap', pick: '-2.5' },
+const sportLabels: Record<Sport, string> = {
+  football: 'Football',
+  basketball: 'Basketball',
+  baseball: 'Baseball',
+  'table-tennis': 'Table Tennis',
 }
+
+/** Real, evergreen platform mechanisms (PRODUCT.md "Evidence on Hand") — never a specific match,
+ * score, or confidence number, since no sports/prediction data is reachable before authentication
+ * (every real endpoint requires a session). True regardless of which sport is showing, so this
+ * never overclaims coverage a given sport doesn't have yet. */
+const capabilities = [
+  { icon: TrendingUp, title: 'Explainable predictions', detail: 'Every verdict traces to real SHAP-based feature evidence, never a black box.' },
+  { icon: Network, title: 'Knowledge Graph', detail: 'Teams, players, and competitions connected through a real relationship graph.' },
+  { icon: RefreshCw, title: 'Confidence engine', detail: 'A 9-factor composite score grounded in feature quality, freshness, and model reliability.' },
+  { icon: CheckCircle, title: 'Continuous learning', detail: 'Models recalibrate on a scheduled loop against real resolved outcomes.' },
+]
 
 const feedEvents = [
   { icon: TrendingUp, label: 'Prediction Updated', color: 'text-accent-primary' },
@@ -24,8 +35,10 @@ const feedEvents = [
 
 export function IntelligenceCanvas() {
   const [currentSport, setCurrentSport] = useState<Sport>('football')
+  const [capabilityIndex, setCapabilityIndex] = useState(0)
   const [feedIndex, setFeedIndex] = useState(0)
-  const match = sportMatches[currentSport]
+  const capability = capabilities[capabilityIndex]
+  const Icon = capability.icon
 
   useEffect(() => {
     const sportInterval = setInterval(() => {
@@ -36,6 +49,14 @@ export function IntelligenceCanvas() {
     }, 10000)
 
     return () => clearInterval(sportInterval)
+  }, [])
+
+  useEffect(() => {
+    const capabilityInterval = setInterval(() => {
+      setCapabilityIndex((prev) => (prev + 1) % capabilities.length)
+    }, 6000)
+
+    return () => clearInterval(capabilityInterval)
   }, [])
 
   useEffect(() => {
@@ -68,49 +89,27 @@ export function IntelligenceCanvas() {
           </p>
         </div>
 
-        {/* Match Card */}
+        {/* Capability Card — real platform mechanisms, never a fabricated match or score */}
         <div className="relative w-full max-w-sm">
           <div className="absolute inset-0 bg-gradient-to-r from-accent-primary/20 to-premium/20 rounded-lg blur-lg" />
           <div className="relative border border-border-default/30 backdrop-blur-md bg-bg-secondary/40 rounded-lg p-4 space-y-3 hover:border-border-default/50 transition-all duration-300">
             <div className="flex items-center justify-between text-xs">
-              <span className="font-telemetry uppercase tracking-wider text-text-muted">{currentSport}</span>
-              <span className="font-telemetry text-accent-primary font-bold">{match.confidence}%</span>
+              <span className="font-telemetry uppercase tracking-wider text-text-muted">{sportLabels[currentSport]}</span>
+              <span className="font-telemetry text-accent-primary font-bold uppercase tracking-wider">Live intelligence</span>
             </div>
-            <div className="flex items-center justify-between gap-2">
-              <span className="font-display font-semibold text-text-primary text-sm truncate">{match.home}</span>
-              <span className="text-xs text-text-muted">vs</span>
-              <span className="font-display font-semibold text-text-primary text-sm truncate">{match.away}</span>
+            <div className="flex items-center gap-2.5">
+              <Icon className="size-4 shrink-0 text-accent-primary" aria-hidden="true" />
+              <span className="font-display font-semibold text-text-primary text-sm">{capability.title}</span>
             </div>
-            <div className="flex items-center justify-between pt-2 border-t border-border-default/20">
-              <span className="text-xs text-text-muted">{match.market}</span>
-              <span className="font-telemetry font-medium text-accent-primary text-sm">{match.pick}</span>
-            </div>
+            <p className="text-xs text-text-secondary leading-relaxed">{capability.detail}</p>
           </div>
-        </div>
-
-        {/* Confidence Bars */}
-        <div className="space-y-2">
-          {[match.confidence, match.confidence - 10, match.confidence + 8].map((conf, i) => (
-            <div key={i} className="flex items-center gap-2">
-              <span className="text-xs font-mono text-text-muted w-8">{conf}%</span>
-              <div className="flex-1 h-1.5 bg-bg-secondary/50 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-gradient-to-r from-accent-primary to-accent-primary-hover animate-pulse"
-                  style={{
-                    width: `${conf}%`,
-                    animationDelay: `${i * 0.2}s`,
-                  }}
-                />
-              </div>
-            </div>
-          ))}
         </div>
       </div>
 
       {/* Intelligence Feed */}
       <div className="relative z-10 space-y-2">
         {feedEvents.map((event, i) => {
-          const Icon = event.icon
+          const FeedIcon = event.icon
           const isActive = i === feedIndex
           return (
             <div
@@ -120,7 +119,7 @@ export function IntelligenceCanvas() {
                 isActive ? 'bg-bg-secondary/60 border border-border-default/30' : 'opacity-40'
               )}
             >
-              <Icon className={cn('size-3', event.color)} />
+              <FeedIcon className={cn('size-3', event.color)} />
               <span className="text-xs text-text-secondary">{event.label}</span>
             </div>
           )

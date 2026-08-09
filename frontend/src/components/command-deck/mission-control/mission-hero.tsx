@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import { Search, Sparkles, CalendarDays, FlaskConical, Waypoints, LayoutGrid } from 'lucide-react'
 import { useCommandPaletteStore } from '@/stores/command-palette-store'
 import { CDStatusDot } from '../primitives/status'
@@ -13,15 +14,35 @@ export interface MissionHeroStatus {
 }
 
 /**
- * Mission Hero — full-width opening instrument. The search trigger opens the app's one real
- * Command Palette (via `useCommandPaletteStore`, shared with the topbar) rather than building a
- * second search surface. "Generate Intelligence" scrolls to the AI Ready Fixtures section below
- * (an honest anchor — there's no single generic "generate" target without a chosen fixture) while
- * every other quick action deep-links to a real, already-shipped destination.
+ * Mission Hero — the authenticated home's opening instrument, not a marketing hero and not a
+ * second navigation surface (global nav already covers that). The search trigger opens the app's
+ * one real Command Palette (via `useCommandPaletteStore`, shared with the topbar) rather than
+ * building a second search surface. "Generate Intelligence" scrolls to the AI Ready Fixtures
+ * section below (an honest anchor — there's no single generic "generate" target without a chosen
+ * fixture) while every other quick action deep-links to a real, already-shipped destination.
+ * Prediction Laboratory — an admin tool — only renders for `isAdmin`; the array of quick actions
+ * itself omits it for everyone else rather than disabling or graying it out.
  */
-export function MissionHero({ firstName, status }: { firstName?: string; status: MissionHeroStatus }) {
+export function MissionHero({
+  greeting,
+  name,
+  isAdmin,
+  status,
+}: {
+  greeting: string
+  name: string | null
+  isAdmin: boolean
+  status: MissionHeroStatus
+}) {
   const setPaletteOpen = useCommandPaletteStore((s) => s.setOpen)
   const defaultSport = SPORT_SLUGS[0].slug
+
+  const secondaryActions = [
+    { label: 'Browse Matches', href: `/app/${defaultSport}/matches`, icon: CalendarDays },
+    ...(isAdmin ? [{ label: 'Prediction Laboratory', href: `/app/${defaultSport}/lab`, icon: FlaskConical }] : []),
+    { label: 'Knowledge Graph', href: '/app/graph', icon: Waypoints },
+    { label: 'Open Workspace', href: '/app/insights', icon: LayoutGrid },
+  ]
 
   return (
     <div
@@ -45,48 +66,47 @@ export function MissionHero({ firstName, status }: { firstName?: string; status:
             className="font-[var(--cd-font-display)] text-[28px] font-semibold leading-tight tracking-[-0.015em] sm:text-[34px]"
             style={{ color: 'var(--cd-text-primary)' }}
           >
-            {firstName ? `Mission Control — welcome back, ${firstName}` : 'Mission Control'}
+            {name ? `${greeting}, ${name}` : greeting}
           </h1>
-          <p className="mt-2.5 max-w-xl font-[var(--cd-font-body)] text-[13.5px] leading-relaxed sm:text-[15px]" style={{ color: 'var(--cd-text-secondary)' }}>
-            Real-time AI sports intelligence across Football, Basketball, Baseball and Table Tennis.
+          <p className="mt-2.5 font-[var(--cd-font-body)] text-[13.5px] leading-relaxed sm:text-[15px]" style={{ color: 'var(--cd-text-secondary)' }}>
+            Your intelligence desk is ready.
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2.5">
-          <button
-            type="button"
-            onClick={() => setPaletteOpen(true)}
-            aria-label="Search matches, teams, players, competitions"
-            className="flex h-11 w-full max-w-sm items-center gap-2.5 rounded-[var(--cd-radius-md)] border px-3.5 backdrop-blur-md transition-all duration-[var(--cd-motion-base)] hover:border-[var(--cd-accent)] hover:shadow-[var(--cd-glow-accent)]"
-            style={{ borderColor: 'var(--cd-border-default)', backgroundColor: 'color-mix(in srgb, var(--cd-surface-2) 65%, transparent)', color: 'var(--cd-text-muted)' }}
+        <button
+          type="button"
+          onClick={() => setPaletteOpen(true)}
+          aria-label="Search matches, teams, players, competitions"
+          className="flex h-12 w-full max-w-lg items-center gap-2.5 rounded-[var(--cd-radius-lg)] border px-4 backdrop-blur-md transition-all duration-[var(--cd-motion-base)] hover:border-[var(--cd-accent)] hover:shadow-[var(--cd-glow-accent)]"
+          style={{ borderColor: 'var(--cd-border-default)', backgroundColor: 'color-mix(in srgb, var(--cd-surface-2) 65%, transparent)', color: 'var(--cd-text-muted)' }}
+        >
+          <Search className="size-4 shrink-0" aria-hidden="true" />
+          <span className="min-w-0 flex-1 truncate text-left font-[var(--cd-font-body)] text-[13.5px]">Search matches, teams, players, competitions…</span>
+          <kbd
+            className="hidden shrink-0 rounded border px-1.5 py-0.5 font-[var(--cd-font-tabular)] text-[10px] sm:inline-block"
+            style={{ borderColor: 'var(--cd-border-hairline)', color: 'var(--cd-text-muted)' }}
           >
-            <Search className="size-4 shrink-0" aria-hidden="true" />
-            <span className="min-w-0 flex-1 truncate text-left font-[var(--cd-font-body)] text-[13px]">Search matches, teams, players, competitions…</span>
-            <kbd
-              className="hidden shrink-0 rounded border px-1.5 py-0.5 font-[var(--cd-font-tabular)] text-[10px] sm:inline-block"
-              style={{ borderColor: 'var(--cd-border-hairline)', color: 'var(--cd-text-muted)' }}
-            >
-              Ctrl K
-            </kbd>
-          </button>
-        </div>
+            Ctrl K
+          </kbd>
+        </button>
 
-        <div className="flex flex-wrap gap-2">
-          <CDButton variant="secondary" size="sm" href="#ai-ready" icon={<Sparkles className="size-3.5" aria-hidden="true" />}>
+        <div className="flex flex-col gap-3">
+          <CDButton variant="primary" size="md" href="#ai-ready" icon={<Sparkles className="size-4" aria-hidden="true" />} className="w-fit">
             Generate Intelligence
           </CDButton>
-          <CDButton variant="secondary" size="sm" href={`/app/${defaultSport}/matches`} icon={<CalendarDays className="size-3.5" aria-hidden="true" />}>
-            Browse Matches
-          </CDButton>
-          <CDButton variant="secondary" size="sm" href={`/app/${defaultSport}/lab`} icon={<FlaskConical className="size-3.5" aria-hidden="true" />}>
-            Prediction Laboratory
-          </CDButton>
-          <CDButton variant="secondary" size="sm" href="/app/graph" icon={<Waypoints className="size-3.5" aria-hidden="true" />}>
-            Knowledge Graph
-          </CDButton>
-          <CDButton variant="secondary" size="sm" href="/app/insights" icon={<LayoutGrid className="size-3.5" aria-hidden="true" />}>
-            Open Workspace
-          </CDButton>
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+            {secondaryActions.map((action) => (
+              <Link
+                key={action.label}
+                to={action.href}
+                className="group inline-flex items-center gap-1.5 font-[var(--cd-font-body)] text-[13px] font-medium transition-colors"
+                style={{ color: 'var(--cd-text-secondary)' }}
+              >
+                <action.icon className="size-3.5 shrink-0 transition-colors group-hover:text-[var(--cd-accent)]" style={{ color: 'var(--cd-text-muted)' }} aria-hidden="true" />
+                <span className="group-hover:text-[var(--cd-accent)]">{action.label}</span>
+              </Link>
+            ))}
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-t pt-4" style={{ borderColor: 'var(--cd-border-hairline)' }}>
