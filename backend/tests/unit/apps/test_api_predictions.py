@@ -26,7 +26,9 @@ from modules.features.infrastructure.persistence.repositories import (
     SqlAlchemyFeatureDefinitionRepository,
     SqlAlchemyFeatureValueRepository,
 )
+from modules.identity.domain.value_objects import Email, Role
 from modules.identity.infrastructure.persistence.models import Base as IdentityBase
+from modules.identity.infrastructure.persistence.repositories import SqlAlchemyUserRepository
 from modules.identity.infrastructure.security import MockJWTValidator
 from modules.intelligence.infrastructure.persistence.models import Base as IntelligenceBase
 from modules.knowledge_graph.infrastructure.persistence.models import Base as KnowledgeGraphBase
@@ -85,6 +87,25 @@ def _auth_headers(client, email="predictor@titaniq.test", password="correct-hors
     login = client.post("/api/v1/auth/login", json={"email": email, "password": password})
     token = login.json()["data"]["access_token"]
     return {"Authorization": f"Bearer {token}"}
+
+
+async def _promote_to_admin(db_session_factory, email: str) -> None:
+    async with db_session_factory() as session:
+        users = SqlAlchemyUserRepository(session=session)
+        user = await users.get_by_email(Email(email))
+        user.role = Role.ADMINISTRATOR
+        await users.upsert(user)
+        await session.commit()
+
+
+def _admin_headers(client, db_session_factory, email="prediction-admin@titaniq.test", password="correct-horse-battery"):
+    # approve/reject are ADMINISTRATOR-only (C-3) — a plain authenticated user must not be able
+    # to publish or void a below-threshold DRAFT prediction.
+    import asyncio
+
+    headers = _auth_headers(client, email, password)
+    asyncio.run(_promote_to_admin(db_session_factory, email))
+    return headers
 
 
 async def _seed_production_market(
@@ -184,6 +205,56 @@ def test_generate_prediction_returns_published_prediction(client, db_session_fac
     assert data["feature_snapshot"] == {"football.api_test_feature": 0.8}
     assert "composite" in data["confidence"]
     assert data["explanation"]["ai_explanation"]
+
+
+def test_generate_prediction_rejects_pat_without_required_scope(client, db_session_factory):
+    headers = _auth_headers(client, email="scoped@titaniq.test")
+    import asyncio
+
+    asyncio.run(_seed_production_market(db_session_factory, "football.scope_test_market", "football.scope_test_feature"))
+
+    narrow_token = client.post(
+        "/api/v1/users/me/tokens", json={"name": "read-only", "scopes": ["read:predictions"]}, headers=headers
+    ).json()["data"]["raw_token"]
+
+    response = client.post(
+        "/api/v1/predictions/generate",
+        json={
+            "market_key": "football.scope_test_market",
+            "entity_type": "fixture",
+            "entity_id": "fixture-1",
+            "subject_ref": "fixture-1",
+        },
+        headers={"Authorization": f"Bearer {narrow_token}"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_generate_prediction_allows_pat_with_required_scope(client, db_session_factory):
+    headers = _auth_headers(client, email="scoped2@titaniq.test")
+    import asyncio
+
+    asyncio.run(_seed_production_market(db_session_factory, "football.scope_test_market2", "football.scope_test_feature2"))
+
+    scoped_token = client.post(
+        "/api/v1/users/me/tokens",
+        json={"name": "generator", "scopes": ["predictions:generate"]},
+        headers=headers,
+    ).json()["data"]["raw_token"]
+
+    response = client.post(
+        "/api/v1/predictions/generate",
+        json={
+            "market_key": "football.scope_test_market2",
+            "entity_type": "fixture",
+            "entity_id": "fixture-1",
+            "subject_ref": "fixture-1",
+        },
+        headers={"Authorization": f"Bearer {scoped_token}"},
+    )
+
+    assert response.status_code == 200
 
 
 async def _seed_production_market_without_champion(db_session_factory, market_key: str) -> MarketId:
@@ -306,6 +377,7 @@ def test_list_predictions_for_market(client, db_session_factory):
 
 def test_approve_and_reject_draft_prediction(client, db_session_factory):
     headers = _auth_headers(client)
+    admin_headers = _admin_headers(client, db_session_factory)
     import asyncio
 
     asyncio.run(
@@ -325,12 +397,28 @@ def test_approve_and_reject_draft_prediction(client, db_session_factory):
     ).json()["data"]
     assert generated["status"] == "draft"
 
-    approved = client.post(f"/api/v1/predictions/{generated['id']}/approve", headers=headers)
+    approved = client.post(f"/api/v1/predictions/{generated['id']}/approve", headers=admin_headers)
     assert approved.status_code == 200
     assert approved.json()["data"]["status"] == "published"
 
-    already_published = client.post(f"/api/v1/predictions/{generated['id']}/reject", json={}, headers=headers)
+    already_published = client.post(f"/api/v1/predictions/{generated['id']}/reject", json={}, headers=admin_headers)
     assert already_published.status_code == 409
+
+
+def test_non_admin_cannot_approve_prediction(client, db_session_factory):
+    headers = _auth_headers(client)
+
+    response = client.post(f"/api/v1/predictions/{uuid4()}/approve", headers=headers)
+
+    assert response.status_code == 403
+
+
+def test_non_admin_cannot_reject_prediction(client, db_session_factory):
+    headers = _auth_headers(client)
+
+    response = client.post(f"/api/v1/predictions/{uuid4()}/reject", json={}, headers=headers)
+
+    assert response.status_code == 403
 
 
 def test_generate_prediction_invalid_entity_type_returns_422(client):
@@ -371,18 +459,18 @@ def test_list_predictions_invalid_status_returns_422(client):
     assert response.status_code == 422
 
 
-def test_approve_unknown_prediction_returns_404(client):
-    headers = _auth_headers(client)
+def test_approve_unknown_prediction_returns_404(client, db_session_factory):
+    admin_headers = _admin_headers(client, db_session_factory)
 
-    response = client.post(f"/api/v1/predictions/{uuid4()}/approve", headers=headers)
+    response = client.post(f"/api/v1/predictions/{uuid4()}/approve", headers=admin_headers)
 
     assert response.status_code == 404
 
 
-def test_reject_unknown_prediction_returns_404(client):
-    headers = _auth_headers(client)
+def test_reject_unknown_prediction_returns_404(client, db_session_factory):
+    admin_headers = _admin_headers(client, db_session_factory)
 
-    response = client.post(f"/api/v1/predictions/{uuid4()}/reject", json={}, headers=headers)
+    response = client.post(f"/api/v1/predictions/{uuid4()}/reject", json={}, headers=admin_headers)
 
     assert response.status_code == 404
 

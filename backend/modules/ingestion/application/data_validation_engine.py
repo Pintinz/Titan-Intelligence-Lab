@@ -13,14 +13,17 @@ from datetime import datetime, timedelta
 
 from modules.sports.domain.value_objects import ProviderRef
 from modules.sports.ports.provider_gateway import (
+    ProviderCoachRecord,
     ProviderCountryRecord,
     ProviderFixtureRecord,
+    ProviderInjuryRecord,
     ProviderLineupRecord,
     ProviderOddsRecord,
     ProviderPlayerRecord,
     ProviderStandingRecord,
     ProviderTeamRecord,
     ProviderTeamStatisticsRecord,
+    ProviderTransferRecord,
 )
 
 MIN_REASONABLE_BIRTH_YEAR = 1930
@@ -128,6 +131,21 @@ class DataValidationEngine:
             if slot.role not in ("starter", "substitute"):
                 issues.append(f"unrecognized lineup role {slot.role!r} (invalid values)")
         return ValidationResult.failed(*issues) if issues else ValidationResult.ok()
+
+    def validate_injury(self, record: ProviderInjuryRecord) -> ValidationResult:
+        if not record.status.strip():
+            return ValidationResult.failed("injury status is required (missing values)")
+        return ValidationResult.ok()
+
+    def validate_transfer(self, record: ProviderTransferRecord) -> ValidationResult:
+        if record.from_team_ref is None and record.to_team_ref is None:
+            return ValidationResult.failed("transfer has neither a from-team nor a to-team (missing values)")
+        return ValidationResult.ok()
+
+    def validate_coach(self, record: ProviderCoachRecord) -> ValidationResult:
+        if not record.person_name.strip():
+            return ValidationResult.failed("coach name is required (missing values)")
+        return ValidationResult.ok()
 
     # -- batch-level: duplicates ----------------------------------------------------------------
 

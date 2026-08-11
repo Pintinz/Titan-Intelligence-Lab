@@ -101,3 +101,17 @@ def test_non_member_cannot_create_team(client):
     )
 
     assert response.status_code == 403
+
+
+def test_non_member_cannot_list_members(client):
+    owner_token = register_and_login(client, "owner5@example.com")
+    org = client.post(
+        "/api/v1/organizations", json={"name": "Acme"}, headers={"Authorization": f"Bearer {owner_token}"}
+    ).json()["data"]
+
+    outsider_token = register_and_login(client, "outsider2@example.com")
+    response = client.get(
+        f"/api/v1/organizations/{org['id']}/members", headers={"Authorization": f"Bearer {outsider_token}"}
+    )
+
+    assert response.status_code == 403

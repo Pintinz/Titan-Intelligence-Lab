@@ -7,8 +7,9 @@ import {
   Target,
   Star,
   Bell,
-  Sparkles,
+  BrainCircuit,
   ServerCog,
+  FlaskConical,
   Settings,
   CreditCard,
   HelpCircle,
@@ -56,13 +57,14 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: 'AI Picks', href: '/app/picks', icon: Target },
       { label: 'Watchlist', href: '/app/watchlist', icon: Star },
       { label: 'Alerts', href: '/app/notifications', icon: Bell },
-      { label: 'Intelligence Workspace', href: '/app/insights', icon: Sparkles },
+      { label: 'Intelligence Workspace', href: '/app/insights', icon: BrainCircuit },
     ],
   },
   {
     label: 'Platform',
     items: [
       { label: 'Operations Center', href: '/app/ops', icon: ServerCog, minRole: 'administrator' },
+      { label: 'Prediction Laboratory', href: '/app/football/lab', icon: FlaskConical, minRole: 'administrator' },
     ],
   },
   {

@@ -19,8 +19,10 @@ import httpx
 
 from modules.sports.domain.value_objects import ProviderRef
 from modules.sports.ports.provider_gateway import (
+    ProviderCoachRecord,
     ProviderCountryRecord,
     ProviderFixtureRecord,
+    ProviderInjuryRecord,
     ProviderLineupRecord,
     ProviderLineupSlotRecord,
     ProviderOddsRecord,
@@ -28,6 +30,7 @@ from modules.sports.ports.provider_gateway import (
     ProviderStandingRecord,
     ProviderTeamRecord,
     ProviderTeamStatisticsRecord,
+    ProviderTransferRecord,
 )
 
 ApiKeyGetter = Callable[[], Awaitable[str]]
@@ -95,6 +98,20 @@ class _ApiSportsHttpAdapterBase:
             for entry in payload.get("response", [])
             if entry.get("code")
         ]
+
+    async def fetch_injuries(self, team_ref: ProviderRef, season_label: str | None = None) -> list[ProviderInjuryRecord]:
+        """No documented injuries endpoint for this sport's API-SPORTS product yet — only
+        ``ApiFootballAdapter`` overrides this with a real implementation, same posture as
+        ``fetch_lineups``/``fetch_odds`` above."""
+        return []
+
+    async def fetch_transfers(self, team_ref: ProviderRef) -> list[ProviderTransferRecord]:
+        """No documented transfers endpoint for this sport's API-SPORTS product yet."""
+        return []
+
+    async def fetch_coach(self, team_ref: ProviderRef) -> ProviderCoachRecord | None:
+        """No documented coaches endpoint for this sport's API-SPORTS product yet."""
+        return None
 
 
 class ApiFootballAdapter(_ApiSportsHttpAdapterBase):
@@ -272,6 +289,87 @@ class ApiFootballAdapter(_ApiSportsHttpAdapterBase):
                     return ProviderOddsRecord(fixture_ref=fixture_ref, home_win=home, draw=draw, away_win=away)
         return None
 
+    async def fetch_injuries(self, team_ref: ProviderRef, season_label: str | None = None) -> list[ProviderInjuryRecord]:
+        """``/injuries?team={id}&season={year}`` — confirmed free-tier accessible (api-football's
+        public plan comparison lists Injuries alongside Fixtures/Standings, unlike the
+        historical-season restriction that applies to some other endpoints). Each entry's
+        ``player.type``/``player.reason`` are the provider's own raw unavailability text (see
+        ``ProviderInjuryRecord``'s docstring) — no expected-return date is reported by this
+        endpoint, so none is invented."""
+        payload = await self._get(
+            "/injuries", {"team": team_ref.external_id, "season": season_label or str(datetime.now().year)}
+        )
+        records = []
+        for entry in payload.get("response", []):
+            player = entry.get("player", {})
+            player_id = player.get("id")
+            if player_id is None:
+                continue
+            fixture = entry.get("fixture") or {}
+            reported_at = None
+            if fixture.get("date"):
+                try:
+                    reported_at = datetime.fromisoformat(fixture["date"])
+                except ValueError:
+                    reported_at = None
+            records.append(
+                ProviderInjuryRecord(
+                    player_ref=ProviderRef(provider=self.provider_key, external_id=str(player_id)),
+                    team_ref=team_ref,
+                    status=player.get("type") or "Unavailable",
+                    reason=player.get("reason"),
+                    reported_at=reported_at,
+                )
+            )
+        return records
+
+    async def fetch_transfers(self, team_ref: ProviderRef) -> list[ProviderTransferRecord]:
+        """``/transfers?team={id}`` returns one entry per player who has ever transferred
+        to/from this team, each with a ``transfers`` array of individual moves. Only moves where
+        either side of the transfer is this team are kept (a player's full history includes
+        transfers to/from other clubs too)."""
+        payload = await self._get("/transfers", {"team": team_ref.external_id})
+        records = []
+        for entry in payload.get("response", []):
+            player = entry.get("player", {})
+            player_id = player.get("id")
+            if player_id is None:
+                continue
+            player_ref = ProviderRef(provider=self.provider_key, external_id=str(player_id))
+            for move in entry.get("transfers", []):
+                teams = move.get("teams") or {}
+                team_in, team_out = (teams.get("in") or {}), (teams.get("out") or {})
+                in_id, out_id = team_in.get("id"), team_out.get("id")
+                if str(in_id) != team_ref.external_id and str(out_id) != team_ref.external_id:
+                    continue
+                if not move.get("date"):
+                    continue
+                try:
+                    effective_date = datetime.fromisoformat(move["date"])
+                except ValueError:
+                    continue
+                records.append(
+                    ProviderTransferRecord(
+                        player_ref=player_ref,
+                        from_team_ref=ProviderRef(provider=self.provider_key, external_id=str(out_id)) if out_id else None,
+                        to_team_ref=ProviderRef(provider=self.provider_key, external_id=str(in_id)) if in_id else None,
+                        effective_date=effective_date,
+                        transfer_type=move.get("type"),
+                    )
+                )
+        return records
+
+    async def fetch_coach(self, team_ref: ProviderRef) -> ProviderCoachRecord | None:
+        """``/coachs?team={id}`` returns every coach on record for this team, current and past —
+        the current one is the entry with no ``career`` end date for this team."""
+        payload = await self._get("/coachs", {"team": team_ref.external_id})
+        for entry in payload.get("response", []):
+            for spell in entry.get("career", []):
+                spell_team = spell.get("team") or {}
+                if str(spell_team.get("id")) == team_ref.external_id and not spell.get("end"):
+                    return ProviderCoachRecord(team_ref=team_ref, person_name=entry.get("name", ""))
+        return None
+
 
 class ApiBasketballAdapter(_ApiSportsHttpAdapterBase):
     provider_key = "api_basketball"
@@ -287,6 +385,7 @@ class ApiBasketballAdapter(_ApiSportsHttpAdapterBase):
                     name=team.get("name", ""),
                     short_name=(team.get("name", "") or "")[:3].upper(),
                     country=(team.get("country") or {}).get("name"),
+                    logo_url=team.get("logo"),
                 )
             )
         return records
@@ -299,6 +398,14 @@ class ApiBasketballAdapter(_ApiSportsHttpAdapterBase):
         for game in payload.get("response", []):
             teams = game.get("teams", {})
             home, away = teams.get("home", {}), teams.get("away", {})
+            # Audit fix (2026-08-10): "scores" was never read — every completed basketball
+            # fixture silently kept home_score/away_score = None despite the provider reporting
+            # a real final score here. Shape verified live: {"scores": {"home": {..., "total": N},
+            # "away": {..., "total": N}}}, same "total" convention as API-Baseball's scores block.
+            scores = game.get("scores") or {}
+            home_score = (scores.get("home") or {}).get("total")
+            away_score = (scores.get("away") or {}).get("total")
+            period_scores = self._extract_quarter_scores(scores)
             records.append(
                 ProviderFixtureRecord(
                     external_ref=ProviderRef(provider=self.provider_key, external_id=str(game.get("id"))),
@@ -308,9 +415,30 @@ class ApiBasketballAdapter(_ApiSportsHttpAdapterBase):
                     competition_ref=competition_ref,
                     season_label=season_label,
                     status=(game.get("status") or {}).get("short"),
+                    home_score=home_score,
+                    away_score=away_score,
+                    period_scores=period_scores,
                 )
             )
         return records
+
+    @staticmethod
+    def _extract_quarter_scores(scores: dict) -> dict | None:
+        """Real quarter-by-quarter score breakdown — verified live against v1.basketball's
+        `/games` response shape: `{"scores": {"home": {"quarter_1"..."quarter_4", "over_time",
+        "total"}, "away": {...}}}`. None until at least the first quarter has been reported
+        (scheduled fixtures carry the same keys, all null)."""
+        home = scores.get("home") or {}
+        away = scores.get("away") or {}
+        quarter_keys = ("quarter_1", "quarter_2", "quarter_3", "quarter_4")
+        if home.get("quarter_1") is None and away.get("quarter_1") is None:
+            return None
+        home_periods = [home.get(k) for k in quarter_keys]
+        away_periods = [away.get(k) for k in quarter_keys]
+        if home.get("over_time") is not None or away.get("over_time") is not None:
+            home_periods.append(home.get("over_time"))
+            away_periods.append(away.get("over_time"))
+        return {"kind": "quarter", "home": home_periods, "away": away_periods}
 
     async def fetch_players(self, team_ref: ProviderRef, season_label: str | None = None) -> list[ProviderPlayerRecord]:
         payload = await self._get("/players", {"team": team_ref.external_id, "season": season_label or datetime.now().year})
@@ -350,27 +478,44 @@ class ApiBasketballAdapter(_ApiSportsHttpAdapterBase):
         return records
 
     async def fetch_team_statistics(self, fixture_ref: ProviderRef) -> list[ProviderTeamStatisticsRecord]:
-        """Endpoint path is a best-effort guess (``/games/statistics/teams``) — API-Basketball's
-        exact statistics route is less consistently documented than API-Football's; verify
-        against a live response before relying on this in production (unlike fetch_teams/
-        fetch_fixtures/fetch_players/fetch_standings above, which follow well-documented
-        conventions)."""
+        """Verified live against v1.basketball.api-sports.io/games/statistics/teams (2026-08-10):
+        the endpoint is real, but the response is a flat list of
+        ``{game, team, field_goals, threepoint_goals, freethrows_goals, rebounds, assists,
+        steals, blocks, turnovers, personal_fouls}`` — no ``"statistics"`` wrapper array (the
+        previous parser's assumption), and no raw ``points`` field. Points is computed from made
+        field goals/threes/free-throws below, the same way a real box score derives it."""
         payload = await self._get("/games/statistics/teams", {"id": fixture_ref.external_id})
         records = []
         for entry in payload.get("response", []):
             team = entry.get("team", {})
-            stats = entry.get("statistics", [{}])
-            row = stats[0] if isinstance(stats, list) and stats else {}
+            field_goals = entry.get("field_goals") or {}
+            threes = entry.get("threepoint_goals") or {}
+            free_throws = entry.get("freethrows_goals") or {}
+            rebounds = entry.get("rebounds") or {}
+            made_field_goals = field_goals.get("total") or 0
+            made_threes = threes.get("total") or 0
+            made_free_throws = free_throws.get("total") or 0
+            points = 2 * (made_field_goals - made_threes) + 3 * made_threes + made_free_throws
             records.append(
                 ProviderTeamStatisticsRecord(
                     fixture_ref=fixture_ref,
                     team_ref=ProviderRef(provider=self.provider_key, external_id=str(team.get("id"))),
                     stat_set={
-                        "points": row.get("points", 0),
-                        "field_goals_made": row.get("field_goals_made", 0),
-                        "field_goals_attempted": row.get("field_goals_attempted", 0),
-                        "rebounds": row.get("rebounds", 0),
-                        "turnovers": row.get("turnovers", 0),
+                        "points": points,
+                        "field_goals_made": made_field_goals,
+                        "field_goals_attempted": field_goals.get("attempts") or 0,
+                        "three_pointers_made": made_threes,
+                        "three_pointers_attempted": threes.get("attempts") or 0,
+                        "free_throws_made": made_free_throws,
+                        "free_throws_attempted": free_throws.get("attempts") or 0,
+                        "rebounds_total": rebounds.get("total") or 0,
+                        "rebounds_offensive": rebounds.get("offence") or 0,
+                        "rebounds_defensive": rebounds.get("defense") or 0,
+                        "assists": entry.get("assists") or 0,
+                        "steals": entry.get("steals") or 0,
+                        "blocks": entry.get("blocks") or 0,
+                        "turnovers": entry.get("turnovers") or 0,
+                        "personal_fouls": entry.get("personal_fouls") or 0,
                     },
                 )
             )
@@ -398,6 +543,7 @@ class ApiBaseballAdapter(_ApiSportsHttpAdapterBase):
                     name=team.get("name", ""),
                     short_name=(team.get("name", "") or "")[:3].upper(),
                     country=(team.get("country") or {}).get("name"),
+                    logo_url=team.get("logo"),
                 )
             )
         return records
@@ -410,6 +556,13 @@ class ApiBaseballAdapter(_ApiSportsHttpAdapterBase):
         for game in payload.get("response", []):
             teams = game.get("teams", {})
             home, away = teams.get("home", {}), teams.get("away", {})
+            # Audit fix (2026-08-10): "scores" was never read, same class of bug as
+            # ApiBasketballAdapter.fetch_fixtures — verified live, the real shape is
+            # {"scores": {"home": {"hits", "errors", "total"}, "away": {...}}}, "total" is runs.
+            scores = game.get("scores") or {}
+            home_score = (scores.get("home") or {}).get("total")
+            away_score = (scores.get("away") or {}).get("total")
+            period_scores = self._extract_inning_scores(scores)
             records.append(
                 ProviderFixtureRecord(
                     external_ref=ProviderRef(provider=self.provider_key, external_id=str(game.get("id"))),
@@ -419,9 +572,30 @@ class ApiBaseballAdapter(_ApiSportsHttpAdapterBase):
                     competition_ref=competition_ref,
                     season_label=season_label,
                     status=(game.get("status") or {}).get("short"),
+                    home_score=home_score,
+                    away_score=away_score,
+                    period_scores=period_scores,
                 )
             )
         return records
+
+    @staticmethod
+    def _extract_inning_scores(scores: dict) -> dict | None:
+        """Real inning-by-inning run breakdown — verified live against v1.baseball's `/games`
+        response shape: `{"scores": {"home": {"innings": {"1"..."9", "extra"}, "total"}, "away":
+        {...}}}`. None until at least the first inning has been reported (scheduled fixtures
+        carry the same keys, all null)."""
+        home_innings = (scores.get("home") or {}).get("innings") or {}
+        away_innings = (scores.get("away") or {}).get("innings") or {}
+        if home_innings.get("1") is None and away_innings.get("1") is None:
+            return None
+        inning_keys = [str(i) for i in range(1, 10)]
+        home_periods = [home_innings.get(k) for k in inning_keys]
+        away_periods = [away_innings.get(k) for k in inning_keys]
+        if home_innings.get("extra") is not None or away_innings.get("extra") is not None:
+            home_periods.append(home_innings.get("extra"))
+            away_periods.append(away_innings.get("extra"))
+        return {"kind": "inning", "home": home_periods, "away": away_periods}
 
     async def fetch_players(self, team_ref: ProviderRef, season_label: str | None = None) -> list[ProviderPlayerRecord]:
         payload = await self._get("/players", {"team": team_ref.external_id, "season": season_label or datetime.now().year})
@@ -461,23 +635,34 @@ class ApiBaseballAdapter(_ApiSportsHttpAdapterBase):
         return records
 
     async def fetch_team_statistics(self, fixture_ref: ProviderRef) -> list[ProviderTeamStatisticsRecord]:
-        """Same caveat as ApiBasketballAdapter.fetch_team_statistics — endpoint path is a
-        best-effort guess, not verified against a live response."""
-        payload = await self._get("/games/statistics/teams", {"id": fixture_ref.external_id})
+        """Verified live against v1.baseball.api-sports.io (2026-08-10): unlike football/
+        basketball, there is no per-game team-statistics endpoint at all —
+        ``/games/statistics/teams`` returns "This endpoint do not exist." The box score
+        (hits/errors/runs) is embedded directly in the game resource's own ``scores`` block
+        instead, so this re-fetches the game by id and reads it from there. ``left_on_base``,
+        present in the old (unverified) parser, does not actually exist anywhere in this
+        response and has been dropped rather than left as a permanently-zero fabricated field."""
+        payload = await self._get("/games", {"id": fixture_ref.external_id})
+        response = payload.get("response") or []
+        if not response:
+            return []
+        game = response[0]
+        teams = game.get("teams") or {}
+        scores = game.get("scores") or {}
         records = []
-        for entry in payload.get("response", []):
-            team = entry.get("team", {})
-            stats = entry.get("statistics", [{}])
-            row = stats[0] if isinstance(stats, list) and stats else {}
+        for side in ("home", "away"):
+            team = teams.get(side) or {}
+            score = scores.get(side) or {}
+            if not team.get("id"):
+                continue
             records.append(
                 ProviderTeamStatisticsRecord(
                     fixture_ref=fixture_ref,
-                    team_ref=ProviderRef(provider=self.provider_key, external_id=str(team.get("id"))),
+                    team_ref=ProviderRef(provider=self.provider_key, external_id=str(team["id"])),
                     stat_set={
-                        "runs": row.get("runs", 0),
-                        "hits": row.get("hits", 0),
-                        "errors": row.get("errors", 0),
-                        "left_on_base": row.get("left_on_base", 0),
+                        "runs": score.get("total") or 0,
+                        "hits": score.get("hits") or 0,
+                        "errors": score.get("errors") or 0,
                     },
                 )
             )

@@ -16,8 +16,10 @@ from datetime import datetime, timedelta, timezone
 
 from modules.sports.domain.value_objects import ProviderRef
 from modules.sports.ports.provider_gateway import (
+    ProviderCoachRecord,
     ProviderCountryRecord,
     ProviderFixtureRecord,
+    ProviderInjuryRecord,
     ProviderLineupRecord,
     ProviderLineupSlotRecord,
     ProviderOddsRecord,
@@ -25,6 +27,7 @@ from modules.sports.ports.provider_gateway import (
     ProviderStandingRecord,
     ProviderTeamRecord,
     ProviderTeamStatisticsRecord,
+    ProviderTransferRecord,
 )
 
 _CITY_NAMES = (
@@ -55,6 +58,10 @@ _COUNTRIES = (
     ("GB", "United Kingdom"), ("US", "United States"), ("BR", "Brazil"), ("DE", "Germany"),
     ("JP", "Japan"), ("FR", "France"), ("ES", "Spain"), ("IT", "Italy"),
 )
+_INJURY_REASONS = ("Hamstring", "Knee Injury", "Ankle Sprain", "Illness", "Muscle Strain", "Calf Injury")
+_TRANSFER_TYPES = ("Loan", "Free", "Undisclosed Fee", "€8.5M", "€22M")
+_COACH_FIRST_NAMES = ("Marco", "David", "Erik", "Thiago", "Klaus", "Pierre", "Hiroshi", "Carlos")
+_COACH_LAST_NAMES = ("Ferreira", "Novak", "Lindqvist", "Almeida", "Bauer", "Dubois", "Tanaka", "Reyes")
 
 
 def _team_stat_set(rng: random.Random, sport_code: str) -> dict:
@@ -265,3 +272,47 @@ class MockSportsDataProvider:
             fixture_ref=fixture_ref,
             home_win=_odds(home_strength), draw=_odds(draw_strength), away_win=_odds(away_strength),
         )
+
+    async def fetch_injuries(self, team_ref: ProviderRef, season_label: str | None = None) -> list[ProviderInjuryRecord]:
+        """Deterministic, small (0-2 players) — most real squads have few or no reported
+        injuries at any given moment, and an always-populated mock would misrepresent that."""
+        rng = self._rng(f"injuries:{team_ref.external_id}")
+        count = rng.choice([0, 0, 1, 1, 2])
+        records = []
+        for i in rng.sample(range(15), k=count):
+            records.append(
+                ProviderInjuryRecord(
+                    player_ref=ProviderRef(provider=self.provider_key, external_id=f"{team_ref.external_id}-player-{i}"),
+                    team_ref=team_ref,
+                    status="Missing Fixture",
+                    reason=rng.choice(_INJURY_REASONS),
+                    reported_at=None,
+                )
+            )
+        return records
+
+    async def fetch_transfers(self, team_ref: ProviderRef) -> list[ProviderTransferRecord]:
+        """A small, deterministic set of past transfers involving this team — mock has no
+        cross-team consistency (no shared player namespace across two mock teams), so every
+        transfer is modeled as this team's own roster slot moving in from an unspecified prior
+        club, which is enough to exercise the real ingestion/display path without fabricating a
+        misleading second team's involvement."""
+        rng = self._rng(f"transfers:{team_ref.external_id}")
+        count = rng.choice([0, 1, 1, 2])
+        records = []
+        for i in rng.sample(range(15), k=count):
+            records.append(
+                ProviderTransferRecord(
+                    player_ref=ProviderRef(provider=self.provider_key, external_id=f"{team_ref.external_id}-player-{i}"),
+                    from_team_ref=None,
+                    to_team_ref=team_ref,
+                    effective_date=datetime(2026, 7, rng.randint(1, 28), tzinfo=timezone.utc),
+                    transfer_type=rng.choice(_TRANSFER_TYPES),
+                )
+            )
+        return records
+
+    async def fetch_coach(self, team_ref: ProviderRef) -> ProviderCoachRecord | None:
+        rng = self._rng(f"coach:{team_ref.external_id}")
+        name = f"{rng.choice(_COACH_FIRST_NAMES)} {rng.choice(_COACH_LAST_NAMES)}"
+        return ProviderCoachRecord(team_ref=team_ref, person_name=name)

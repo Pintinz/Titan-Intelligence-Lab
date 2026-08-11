@@ -120,8 +120,13 @@ async def set_entitlement(
 
 @router.post("/subscriptions")
 async def subscribe(
-    payload: SubscribeRequest, session: AsyncSession = Depends(get_session), user: User = Depends(get_current_user)
+    payload: SubscribeRequest,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(require_role(Role.ADMINISTRATOR)),
 ):
+    # Self-service subscribe is disabled until a real payment provider is integrated (no charge
+    # is ever taken here — see the module docstring). Without this gate, any authenticated user
+    # could grant themselves or any other subject an ACTIVE subscription to any plan for free.
     service = build_billing_service(session)
     plan = await service.plans.get_by_key(payload.plan_key)
     if plan is None:
@@ -132,7 +137,9 @@ async def subscribe(
 
 @router.post("/subscriptions/{subscription_id}/cancel")
 async def cancel_subscription(
-    subscription_id: str, session: AsyncSession = Depends(get_session), user: User = Depends(get_current_user)
+    subscription_id: str,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(require_role(Role.ADMINISTRATOR)),
 ):
     service = build_billing_service(session)
     try:

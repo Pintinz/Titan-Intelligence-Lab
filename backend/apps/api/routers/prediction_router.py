@@ -16,10 +16,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.api.auth_deps import get_current_user
+from apps.api.auth_deps import get_current_user, require_role, require_scope
 from apps.api.composition import build_prediction_cache_service, get_session
+from apps.api.rate_limit import rate_limit_by_user
 from modules.features.domain.value_objects import EntityType
 from modules.identity.domain.entities import User
+from modules.identity.domain.value_objects import Role
 from modules.predictions.application.prediction_cache_service import (
     InvalidPredictionStatusTransitionError,
     MarketNotFoundError,
@@ -125,11 +127,14 @@ class ReviewPredictionBody(BaseModel):
     reason: str | None = None
 
 
-@router.post("/generate")
+@router.post(
+    "/generate",
+    dependencies=[Depends(rate_limit_by_user("predictions_generate", limit=30, window_seconds=60))],
+)
 async def generate_prediction(
     body: GeneratePredictionBody,
     session: AsyncSession = Depends(get_session),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_scope("predictions:generate")),
 ):
     service = build_prediction_cache_service(session)
     try:
@@ -174,7 +179,9 @@ async def list_predictions_for_market(
 
 @router.post("/{prediction_id}/approve")
 async def approve_prediction(
-    prediction_id: str, session: AsyncSession = Depends(get_session), user: User = Depends(get_current_user)
+    prediction_id: str,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(require_role(Role.ADMINISTRATOR)),
 ):
     service = build_prediction_cache_service(session)
     prediction = await service.predictions.get(_parse_prediction_id(prediction_id))
@@ -192,7 +199,7 @@ async def reject_prediction(
     prediction_id: str,
     body: ReviewPredictionBody,
     session: AsyncSession = Depends(get_session),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_role(Role.ADMINISTRATOR)),
 ):
     service = build_prediction_cache_service(session)
     prediction = await service.predictions.get(_parse_prediction_id(prediction_id))

@@ -15,7 +15,21 @@ from modules.ingestion.domain.entities import SyncRun
 from modules.ingestion.domain.value_objects import EntityKind as IngestionEntityKind, SyncRunId, SyncStatus, SyncTrigger
 from modules.ingestion.infrastructure.persistence.models import Base as IngestionBase
 from modules.ingestion.infrastructure.persistence.repositories import SqlAlchemySyncRunRepository
-from modules.sports.domain.entities import Competition, Fixture, Match, Player, Season, Sport, Standing, Team, TeamStatistics, Venue
+from modules.sports.domain.entities import (
+    CoachingStaffMember,
+    Competition,
+    Fixture,
+    Injury,
+    Match,
+    Player,
+    Season,
+    Sport,
+    Standing,
+    Team,
+    TeamStatistics,
+    Transfer,
+    Venue,
+)
 from modules.sports.domain.value_objects import (
     CompetitionId,
     CompetitionType,
@@ -34,8 +48,10 @@ from modules.sports.domain.value_objects import (
 )
 from modules.sports.infrastructure.persistence.models import Base as SportsBase
 from modules.sports.infrastructure.persistence.repositories import (
+    SqlAlchemyCoachingStaffRepository,
     SqlAlchemyCompetitionRepository,
     SqlAlchemyFixtureRepository,
+    SqlAlchemyInjuryRepository,
     SqlAlchemyMatchRepository,
     SqlAlchemyPlayerRepository,
     SqlAlchemySeasonRepository,
@@ -43,6 +59,7 @@ from modules.sports.infrastructure.persistence.repositories import (
     SqlAlchemyStandingRepository,
     SqlAlchemyTeamRepository,
     SqlAlchemyTeamStatisticsRepository,
+    SqlAlchemyTransferRepository,
     SqlAlchemyVenueRepository,
 )
 
@@ -236,6 +253,22 @@ def test_competition_fixtures(client, auth_headers, seeded):
     assert data[0]["status"] == "scheduled"
 
 
+def test_list_competition_seasons(client, auth_headers, seeded):
+    competition_id = str(seeded["competition"].id)
+    response = client.get(f"/api/v1/sports/competitions/{competition_id}/seasons", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert len(data) == 1
+    assert data[0]["id"] == str(seeded["season"].id)
+    assert data[0]["label"] == "2025/26"
+    assert data[0]["status"] == "active"
+
+
+def test_list_competition_seasons_unknown_competition_returns_404(client, auth_headers):
+    response = client.get(f"/api/v1/sports/competitions/{uuid.uuid4()}/seasons", headers=auth_headers)
+    assert response.status_code == 404
+
+
 def test_list_teams_for_sport(client, auth_headers, seeded):
     response = client.get("/api/v1/sports/football/teams", headers=auth_headers)
     assert response.status_code == 200
@@ -266,6 +299,125 @@ def test_team_players(client, auth_headers, seeded):
     assert len(data) == 1
     assert data[0]["name"] == "Test Striker"
     assert data[0]["team_id"] == team_id
+
+
+def test_team_injuries_returns_empty_when_none_reported(client, auth_headers, seeded):
+    """A team with no reported injuries is a real, honest outcome — never an error."""
+    team_id = str(seeded["home"].id)
+    response = client.get(f"/api/v1/sports/teams/{team_id}/injuries", headers=auth_headers)
+    assert response.status_code == 200
+    assert response.json()["data"] == []
+
+
+def test_team_injuries_returns_real_reported_injury(client, auth_headers, seeded, db_session_factory):
+    async def _seed():
+        async with db_session_factory() as session:
+            await SqlAlchemyInjuryRepository(session=session).upsert(
+                Injury(
+                    id=EntityId(uuid.uuid4()), player_id=seeded["player"].id, reported_at=T0,
+                    status="Missing Fixture", reason="Hamstring",
+                )
+            )
+            await session.commit()
+
+    asyncio.run(_seed())
+    team_id = str(seeded["home"].id)
+    response = client.get(f"/api/v1/sports/teams/{team_id}/injuries", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert len(data) == 1
+    assert data[0]["status"] == "Missing Fixture"
+    assert data[0]["reason"] == "Hamstring"
+    assert data[0]["player_name"] == "Test Striker"
+    assert data[0]["expected_return"] is None  # never fabricated
+
+
+def test_team_transfers_returns_real_transfer(client, auth_headers, seeded, db_session_factory):
+    async def _seed():
+        async with db_session_factory() as session:
+            await SqlAlchemyTransferRepository(session=session).upsert(
+                Transfer(
+                    id=EntityId(uuid.uuid4()), player_id=seeded["player"].id, from_team_id=None,
+                    to_team_id=seeded["home"].id, effective_date=T0, transfer_type="Free",
+                )
+            )
+            await session.commit()
+
+    asyncio.run(_seed())
+    team_id = str(seeded["home"].id)
+    response = client.get(f"/api/v1/sports/teams/{team_id}/transfers", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert len(data) == 1
+    assert data[0]["to_team_name"] == "Liverpool FC"
+    assert data[0]["from_team_id"] is None
+    assert data[0]["transfer_type"] == "Free"
+
+
+def test_team_coaching_staff_reports_current_and_history(client, auth_headers, seeded, db_session_factory):
+    async def _seed():
+        async with db_session_factory() as session:
+            repo = SqlAlchemyCoachingStaffRepository(session=session)
+            await repo.upsert(
+                CoachingStaffMember(
+                    id=EntityId(uuid.uuid4()), team_id=seeded["home"].id, person_name="Former Coach",
+                    role="head_coach", valid_from=T0 - timedelta(days=400), valid_to=T0 - timedelta(days=10),
+                )
+            )
+            await repo.upsert(
+                CoachingStaffMember(
+                    id=EntityId(uuid.uuid4()), team_id=seeded["home"].id, person_name="Current Coach",
+                    role="head_coach", valid_from=T0 - timedelta(days=10), valid_to=None,
+                )
+            )
+            await session.commit()
+
+    asyncio.run(_seed())
+    team_id = str(seeded["home"].id)
+    response = client.get(f"/api/v1/sports/teams/{team_id}/coaching-staff", headers=auth_headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["data"]) == 2
+    current = next(c for c in body["data"] if c["person_name"] == "Current Coach")
+    assert body["meta"]["current_coach_id"] == current["id"]
+    assert current["valid_to"] is None
+
+
+def test_player_injuries(client, auth_headers, seeded, db_session_factory):
+    async def _seed():
+        async with db_session_factory() as session:
+            await SqlAlchemyInjuryRepository(session=session).upsert(
+                Injury(id=EntityId(uuid.uuid4()), player_id=seeded["player"].id, reported_at=T0, status="Questionable", reason="Illness")
+            )
+            await session.commit()
+
+    asyncio.run(_seed())
+    player_id = str(seeded["player"].id)
+    response = client.get(f"/api/v1/sports/players/{player_id}/injuries", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert len(data) == 1
+    assert data[0]["reason"] == "Illness"
+
+
+def test_player_transfers(client, auth_headers, seeded, db_session_factory):
+    async def _seed():
+        async with db_session_factory() as session:
+            await SqlAlchemyTransferRepository(session=session).upsert(
+                Transfer(
+                    id=EntityId(uuid.uuid4()), player_id=seeded["player"].id, from_team_id=None,
+                    to_team_id=seeded["home"].id, effective_date=T0, transfer_type="Loan",
+                )
+            )
+            await session.commit()
+
+    asyncio.run(_seed())
+    player_id = str(seeded["player"].id)
+    response = client.get(f"/api/v1/sports/players/{player_id}/transfers", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert len(data) == 1
+    assert data[0]["transfer_type"] == "Loan"
 
 
 def test_team_fixtures_recent(client, auth_headers, seeded):
@@ -579,6 +731,42 @@ def test_list_sport_fixtures_search_matches_team_name(client, auth_headers, seed
     response = client.get("/api/v1/sports/football/fixtures", params={"search": "nonexistent-team"}, headers=auth_headers)
     assert response.json()["data"] == []
     assert response.json()["meta"]["total"] == 0
+
+
+@pytest_asyncio.fixture
+async def second_season_fixture(db_session_factory, seeded):
+    """A separate, older season with its own fixture under the same competition — gives
+    `season_id` filtering two distinct seasons to discriminate between, mirroring how a real
+    competition (e.g. Premier League) has one fixture row per season across many years."""
+    async with db_session_factory() as session:
+        season = await SqlAlchemySeasonRepository(session=session).upsert(
+            Season(
+                id=SeasonId(uuid.uuid4()), competition_id=seeded["competition"].id, label="2022/23",
+                date_range=DateRange(start=T0 - timedelta(days=700), end=T0 - timedelta(days=340)),
+                status=SeasonStatus.COMPLETED,
+            )
+        )
+        fixture = await SqlAlchemyFixtureRepository(session=session).upsert(
+            Fixture(
+                id=FixtureId(uuid.uuid4()), season_id=season.id,
+                home_team_id=seeded["home"].id, away_team_id=seeded["away"].id,
+                venue_id=seeded["venue"].id, scheduled_at=T0 - timedelta(days=680),
+                status=FixtureStatus.COMPLETED, home_score=1, away_score=0,
+            )
+        )
+        await session.commit()
+        return {"season": season, "fixture": fixture}
+
+
+def test_list_sport_fixtures_filters_by_season_id(client, auth_headers, seeded, second_season_fixture):
+    response = client.get(
+        "/api/v1/sports/football/fixtures",
+        params={"season_id": str(second_season_fixture["season"].id)},
+        headers=auth_headers,
+    )
+    data = response.json()["data"]
+    assert len(data) == 1
+    assert data[0]["id"] == str(second_season_fixture["fixture"].id)
 
 
 def test_list_sport_fixtures_pagination_meta(client, auth_headers, seeded, extra_fixtures):

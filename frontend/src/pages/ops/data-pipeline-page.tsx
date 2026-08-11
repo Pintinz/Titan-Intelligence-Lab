@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Workflow, Globe2, RefreshCw, Play, FlagTriangleRight, CalendarRange, Trophy, BarChart3, Copy } from 'lucide-react'
+import { Workflow, Globe2, RefreshCw, Play, FlagTriangleRight, CalendarRange, Trophy, BarChart3, Copy, HeartPulse, ArrowLeftRight, UserCog, ListChecks } from 'lucide-react'
 import { adminPlatformApi } from '@/lib/api/admin-platform'
 import { sportsApi, SPORT_OPTIONS, type SportCode } from '@/lib/api/sports'
 import { useRealtimeInvalidate } from '@/lib/hooks/use-realtime-invalidate'
@@ -20,6 +20,7 @@ function SportPipeline({ sportCode, sportLabel }: { sportCode: SportCode; sportL
   const [seasonId, setSeasonId] = useState<string | null>(null)
   const [competitionId, setCompetitionId] = useState<string | null>(null)
   const [statisticsFixtureId, setStatisticsFixtureId] = useState('')
+  const [squadTeamId, setSquadTeamId] = useState('')
   const queryClient = useQueryClient()
 
   const fixtureHintQuery = useQuery({
@@ -105,6 +106,42 @@ function SportPipeline({ sportCode, sportLabel }: { sportCode: SportCode; sportL
       invalidateStatus()
     },
     onError: (error) => toast.danger('Could not trigger statistics sync', error instanceof Error ? error.message : undefined),
+  })
+
+  const triggerLineups = useMutation({
+    mutationFn: () => adminPlatformApi.triggerSyncLineups(sportCode, statisticsFixtureId),
+    onSuccess: () => {
+      toast.success('Lineup sync triggered')
+      invalidateStatus()
+    },
+    onError: (error) => toast.danger('Could not trigger lineup sync', error instanceof Error ? error.message : undefined),
+  })
+
+  const triggerInjuries = useMutation({
+    mutationFn: () => adminPlatformApi.triggerSyncInjuries(sportCode, squadTeamId),
+    onSuccess: () => {
+      toast.success('Injury sync triggered')
+      invalidateStatus()
+    },
+    onError: (error) => toast.danger('Could not trigger injury sync', error instanceof Error ? error.message : undefined),
+  })
+
+  const triggerTransfers = useMutation({
+    mutationFn: () => adminPlatformApi.triggerSyncTransfers(sportCode, squadTeamId),
+    onSuccess: () => {
+      toast.success('Transfer sync triggered')
+      invalidateStatus()
+    },
+    onError: (error) => toast.danger('Could not trigger transfer sync', error instanceof Error ? error.message : undefined),
+  })
+
+  const triggerCoachingStaff = useMutation({
+    mutationFn: () => adminPlatformApi.triggerSyncCoachingStaff(sportCode, squadTeamId),
+    onSuccess: () => {
+      toast.success('Coaching staff sync triggered')
+      invalidateStatus()
+    },
+    onError: (error) => toast.danger('Could not trigger coaching staff sync', error instanceof Error ? error.message : undefined),
   })
 
   const bootstrapped = !!seasonId
@@ -287,6 +324,78 @@ function SportPipeline({ sportCode, sportLabel }: { sportCode: SportCode; sportL
           >
             <BarChart3 className="size-3.5" />
             {triggerStatistics.isPending ? 'Triggering…' : 'Sync statistics'}
+          </Button>
+        </div>
+      </div>
+
+      <div className="mt-4 border-t border-border-subtle pt-4">
+        <p className="mb-2 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-text-muted">
+          <ListChecks className="size-3.5" /> Sync lineups
+        </p>
+        <p className="mb-3 text-xs text-text-secondary">
+          Per-fixture — pulls the confirmed (or latest available) starting lineups and formation for
+          one already-synced fixture. Reuses the fixture ID above.
+        </p>
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={() => triggerLineups.mutate()}
+          disabled={!statisticsFixtureId || triggerLineups.isPending}
+          className="gap-1"
+        >
+          <ListChecks className="size-3.5" />
+          {triggerLineups.isPending ? 'Triggering…' : 'Sync lineups'}
+        </Button>
+      </div>
+
+      <div className="mt-4 border-t border-border-subtle pt-4">
+        <p className="mb-2 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-text-muted">
+          <HeartPulse className="size-3.5" /> Sync squad intelligence
+        </p>
+        <p className="mb-3 text-xs text-text-secondary">
+          Per-team, not per-competition — pulls current injuries, confirmed transfers, and the
+          current head coach for one already-synced team, identified by our own persisted team id.
+        </p>
+        <div className="flex flex-wrap items-end gap-2">
+          <div>
+            <Label htmlFor={`squad-team-${sportCode}`}>Team ID</Label>
+            <Input
+              id={`squad-team-${sportCode}`}
+              placeholder="e.g. 4d193afe-6faf-4b63-9630-c6fa31c4d6aa"
+              value={squadTeamId}
+              onChange={(e) => setSquadTeamId(e.target.value)}
+              className="mt-1.5 w-72"
+            />
+          </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => triggerInjuries.mutate()}
+            disabled={!squadTeamId || triggerInjuries.isPending}
+            className="gap-1"
+          >
+            <HeartPulse className="size-3.5" />
+            {triggerInjuries.isPending ? 'Triggering…' : 'Sync injuries'}
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => triggerTransfers.mutate()}
+            disabled={!squadTeamId || triggerTransfers.isPending}
+            className="gap-1"
+          >
+            <ArrowLeftRight className="size-3.5" />
+            {triggerTransfers.isPending ? 'Triggering…' : 'Sync transfers'}
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => triggerCoachingStaff.mutate()}
+            disabled={!squadTeamId || triggerCoachingStaff.isPending}
+            className="gap-1"
+          >
+            <UserCog className="size-3.5" />
+            {triggerCoachingStaff.isPending ? 'Triggering…' : 'Sync coaching staff'}
           </Button>
         </div>
       </div>

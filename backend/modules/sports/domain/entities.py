@@ -136,10 +136,19 @@ class Player:
 
 @dataclass
 class CoachingStaffMember:
+    """Time-aware: ``valid_to is None`` means still in the role. A departure never overwrites
+    the row in place — reconciliation closes it (sets ``valid_to``) and creates a new one for a
+    successor, so team history is never lost (docs/roadmap.md Milestone 5 Entity Expansion
+    Matrix note: gets VersionedMixin/provider tracking once its ingestion is wired)."""
+
     id: EntityId
     team_id: TeamId | None
     person_name: str
     role: str
+    valid_from: datetime | None = None
+    valid_to: datetime | None = None
+    version: int = 1
+    provider_refs: tuple[ProviderRef, ...] = field(default_factory=tuple)
 
 
 @dataclass
@@ -163,6 +172,7 @@ class Fixture:
     provider_refs: tuple[ProviderRef, ...] = field(default_factory=tuple)
     home_score: int | None = None
     away_score: int | None = None
+    period_scores: dict | None = None
 
     def transition_to(self, target: FixtureStatus) -> "Fixture":
         if not is_valid_fixture_transition(self.status, target):
@@ -179,6 +189,7 @@ class Fixture:
             provider_refs=self.provider_refs,
             home_score=self.home_score,
             away_score=self.away_score,
+            period_scores=self.period_scores,
         )
 
 
@@ -266,12 +277,20 @@ class Lineup:
 
 @dataclass
 class Injury:
+    """``status`` and ``reason`` carry the provider's own raw text (e.g. API-Football's
+    ``player.type``/``player.reason`` — "Missing Fixture"/"Hamstring") rather than a normalized
+    enum with no real backing states; ``expected_return`` stays ``None`` unless a provider
+    genuinely reports one — never inferred."""
+
     id: EntityId
     player_id: PlayerId
     reported_at: datetime
     status: str
+    reason: str | None = None
     expected_return: datetime | None = None
     source_ref: ProviderRef | None = None
+    version: int = 1
+    provider_refs: tuple[ProviderRef, ...] = field(default_factory=tuple)
 
 
 @dataclass
@@ -285,11 +304,19 @@ class Suspension:
 
 @dataclass
 class Transfer:
+    """A confirmed transfer record only — ``transfer_type`` is the provider's raw fee/type text
+    (e.g. "Loan", "Free", "€25.5M"); there is no rumour/negotiating/medical staging here
+    because no connected provider reports pre-confirmation transfer stages (see
+    modules/intelligence's NewsEventType.TRANSFER for that signal instead)."""
+
     id: EntityId
     player_id: PlayerId
     from_team_id: TeamId | None
     to_team_id: TeamId | None
     effective_date: datetime
+    transfer_type: str | None = None
+    version: int = 1
+    provider_refs: tuple[ProviderRef, ...] = field(default_factory=tuple)
 
 
 @dataclass

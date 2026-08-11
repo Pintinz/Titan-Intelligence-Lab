@@ -13,9 +13,11 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from modules.sports.domain.entities import (
+    CoachingStaffMember,
     Competition,
     Country,
     Fixture,
+    Injury,
     Lineup,
     Match,
     Player,
@@ -24,11 +26,13 @@ from modules.sports.domain.entities import (
     Standing,
     Team,
     TeamStatistics,
+    Transfer,
     Venue,
 )
 from modules.sports.domain.value_objects import (
     CompetitionId,
     CountryId,
+    EntityId,
     FixtureId,
     LineupId,
     MatchId,
@@ -41,9 +45,11 @@ from modules.sports.domain.value_objects import (
 )
 from modules.sports.infrastructure.persistence import mappers
 from modules.sports.infrastructure.persistence.models import (
+    CoachingStaffModel,
     CompetitionModel,
     CountryModel,
     FixtureModel,
+    InjuryModel,
     LineupModel,
     MatchModel,
     PlayerModel,
@@ -52,6 +58,7 @@ from modules.sports.infrastructure.persistence.models import (
     StandingModel,
     TeamModel,
     TeamStatisticsModel,
+    TransferModel,
     VenueModel,
 )
 
@@ -368,3 +375,114 @@ class SqlAlchemyLineupRepository:
         self.session.add(model)
         await self.session.flush()
         return mappers.lineup_to_domain(model)
+
+
+@dataclass
+class SqlAlchemyInjuryRepository:
+    session: AsyncSession
+
+    async def get(self, injury_id: EntityId) -> Injury | None:
+        model = await self.session.get(InjuryModel, injury_id.value)
+        return mappers.injury_to_domain(model) if model else None
+
+    async def list_by_player(self, player_id: PlayerId) -> list[Injury]:
+        stmt = select(InjuryModel).where(InjuryModel.player_id == player_id.value).order_by(InjuryModel.reported_at.desc())
+        result = await self.session.execute(stmt)
+        return [mappers.injury_to_domain(row) for row in result.scalars().all()]
+
+    async def list_current_by_team(self, team_id: TeamId) -> list[Injury]:
+        """Every injury reported for a player currently on this team — not scoped to a status,
+        since the provider's own `status` text already distinguishes ongoing vs resolved cases
+        and TitanIQ never overwrites/removes a real reported injury (docs/roadmap.md Milestone 5
+        provider-attribution rule: reconciliation only creates/updates, never deletes)."""
+        stmt = (
+            select(InjuryModel)
+            .join(PlayerModel, PlayerModel.id == InjuryModel.player_id)
+            .where(PlayerModel.team_id == team_id.value)
+            .order_by(InjuryModel.reported_at.desc())
+        )
+        result = await self.session.execute(stmt)
+        return [mappers.injury_to_domain(row) for row in result.scalars().all()]
+
+    async def upsert(self, injury: Injury) -> Injury:
+        existing = await self.session.get(InjuryModel, injury.id.value)
+        model = mappers.injury_to_model(injury, existing)
+        self.session.add(model)
+        await self.session.flush()
+        return mappers.injury_to_domain(model)
+
+
+@dataclass
+class SqlAlchemyTransferRepository:
+    session: AsyncSession
+
+    async def get(self, transfer_id: EntityId) -> Transfer | None:
+        model = await self.session.get(TransferModel, transfer_id.value)
+        return mappers.transfer_to_domain(model) if model else None
+
+    async def list_by_player(self, player_id: PlayerId) -> list[Transfer]:
+        stmt = (
+            select(TransferModel)
+            .where(TransferModel.player_id == player_id.value)
+            .order_by(TransferModel.effective_date.desc())
+        )
+        result = await self.session.execute(stmt)
+        return [mappers.transfer_to_domain(row) for row in result.scalars().all()]
+
+    async def list_by_team(self, team_id: TeamId) -> list[Transfer]:
+        """Both incoming and outgoing transfers for this team, most recent first."""
+        stmt = (
+            select(TransferModel)
+            .where(or_(TransferModel.from_team_id == team_id.value, TransferModel.to_team_id == team_id.value))
+            .order_by(TransferModel.effective_date.desc())
+        )
+        result = await self.session.execute(stmt)
+        return [mappers.transfer_to_domain(row) for row in result.scalars().all()]
+
+    async def upsert(self, transfer: Transfer) -> Transfer:
+        existing = await self.session.get(TransferModel, transfer.id.value)
+        model = mappers.transfer_to_model(transfer, existing)
+        self.session.add(model)
+        await self.session.flush()
+        return mappers.transfer_to_domain(model)
+
+
+@dataclass
+class SqlAlchemyCoachingStaffRepository:
+    session: AsyncSession
+
+    async def get(self, staff_id: EntityId) -> CoachingStaffMember | None:
+        model = await self.session.get(CoachingStaffModel, staff_id.value)
+        return mappers.coaching_staff_to_domain(model) if model else None
+
+    async def get_current_by_team(self, team_id: TeamId, role: str = "head_coach") -> CoachingStaffMember | None:
+        stmt = (
+            select(CoachingStaffModel)
+            .where(
+                CoachingStaffModel.team_id == team_id.value,
+                CoachingStaffModel.role == role,
+                CoachingStaffModel.valid_to.is_(None),
+            )
+            .order_by(CoachingStaffModel.valid_from.desc())
+        )
+        model = (await self.session.execute(stmt)).scalars().first()
+        return mappers.coaching_staff_to_domain(model) if model else None
+
+    async def list_by_team(self, team_id: TeamId) -> list[CoachingStaffMember]:
+        """Full history, most recent first — a closed-out (``valid_to`` set) predecessor row is
+        never overwritten, only superseded by a new row (see ``EntityReconciliationService.
+        reconcile_coaching_staff``)."""
+        stmt = (
+            select(CoachingStaffModel)
+            .where(CoachingStaffModel.team_id == team_id.value)
+            .order_by(CoachingStaffModel.valid_from.desc().nulls_last())
+        )
+        result = await self.session.execute(stmt)
+        return [mappers.coaching_staff_to_domain(row) for row in result.scalars().all()]
+
+    async def upsert(self, staff: CoachingStaffMember) -> CoachingStaffMember:
+        existing = await self.session.get(CoachingStaffModel, staff.id.value)
+        model = mappers.coaching_staff_to_model(staff, existing)
+        self.session.add(model)
+        await self.session.flush()
+        return mappers.coaching_staff_to_domain(model)

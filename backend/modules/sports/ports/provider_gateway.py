@@ -25,6 +25,14 @@ class ProviderTeamRecord:
     country: str | None
     venue_name: str | None = None
     logo_url: str | None = None
+    # An exact-identity claim from the provider itself that this team is the same real-world club
+    # as another provider's own team id — e.g. TheSportsDB embeds each team's api-football id
+    # directly (`idAPIfootball`), verified live (2026-08-10). Deterministic, so
+    # EntityReconciliationService.reconcile_team auto-merges into that existing team rather than
+    # creating a duplicate, unlike CrossProviderTeamMappingService's name-fuzzy suggestions (which
+    # stay admin-confirmed since a name match is a guess, not a claim). None for every adapter
+    # that doesn't have this signal — safe default, no behavior change for existing callers.
+    cross_provider_ref: ProviderRef | None = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +55,10 @@ class ProviderFixtureRecord:
     # for a fixture that hasn't been played yet, or whose provider doesn't report goals.
     home_score: int | None = None
     away_score: int | None = None
+    # Period-by-period score breakdown, when the provider reports one (basketball quarters,
+    # baseball innings) — {"kind": "quarter"|"inning", "home": [...], "away": [...]}. None for
+    # football (not fetched) or before the provider has reported any periods.
+    period_scores: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -110,6 +122,41 @@ class ProviderLineupRecord:
     slots: tuple[ProviderLineupSlotRecord, ...]
 
 
+@dataclass(frozen=True)
+class ProviderInjuryRecord:
+    """One player's reported unavailability. ``status``/``reason`` are the provider's own raw
+    text (e.g. API-Football's ``player.type``/``player.reason`` — "Missing Fixture"/"Hamstring")
+    — no normalized enum, since the real states a provider reports don't map cleanly onto one.
+    No expected-return date: no connected provider reports one, so it is never fabricated here."""
+
+    player_ref: ProviderRef
+    team_ref: ProviderRef
+    status: str
+    reason: str | None = None
+    reported_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class ProviderTransferRecord:
+    """A confirmed transfer only. ``transfer_type`` is the provider's raw fee/type text (e.g.
+    "Loan", "Free", "€25.5M") — not parsed into a numeric fee, since providers report it in
+    wildly inconsistent formats. ``from_team_ref``/``to_team_ref`` are ``None`` when the
+    provider itself doesn't report that side (e.g. a free agent signing with no "from" club)."""
+
+    player_ref: ProviderRef
+    from_team_ref: ProviderRef | None
+    to_team_ref: ProviderRef | None
+    effective_date: datetime
+    transfer_type: str | None = None
+
+
+@dataclass(frozen=True)
+class ProviderCoachRecord:
+    team_ref: ProviderRef
+    person_name: str
+    role: str = "head_coach"
+
+
 class SportsDataProviderPort(Protocol):
     provider_key: str
 
@@ -136,6 +183,23 @@ class SportsDataProviderPort(Protocol):
         for it yet (fixture too far out, market not offered, etc.) — a real absence, not an
         error, matching ``fetch_lineups``' "no data source yet" contract for the sports that
         genuinely don't have one."""
+        ...
+
+    async def fetch_injuries(self, team_ref: ProviderRef, season_label: str | None = None) -> list[ProviderInjuryRecord]:
+        """Every player currently reported unavailable for this team. Empty list is the honest,
+        common case (most teams have no reported injuries at any given moment) — never an
+        error."""
+        ...
+
+    async def fetch_transfers(self, team_ref: ProviderRef) -> list[ProviderTransferRecord]:
+        """Confirmed transfers involving this team, in and out. See
+        ``ProviderTransferRecord``'s own docstring for why there is no rumour/negotiating
+        staging here."""
+        ...
+
+    async def fetch_coach(self, team_ref: ProviderRef) -> ProviderCoachRecord | None:
+        """This team's current head coach/manager, or ``None`` if the provider has no record for
+        it — never fabricated."""
         ...
 
 

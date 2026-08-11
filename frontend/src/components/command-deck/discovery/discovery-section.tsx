@@ -118,7 +118,7 @@ export function DiscoverySection({
                 aiAvailable={aiAvailable}
                 following={watchlist.isFollowing('fixture', fixture.id)}
                 onToggleFollow={() => watchlist.toggle('fixture', fixture.id)}
-                href={`/app/${sportSlug}/matches/${fixture.id}`}
+                href={status === 'completed' ? `/app/${sportSlug}/matches/${fixture.id}/review` : `/app/${sportSlug}/matches/${fixture.id}`}
               />
             )
           })}

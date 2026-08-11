@@ -86,6 +86,13 @@ class SyncOrchestrator:
     cache: SyncCachePort | None = None
     odds_feature_writers: dict[str, FootballOddsFeatureWriter] = field(default_factory=dict)
     fixture_source_preferences: CompetitionFixtureSourceRepositoryPort | None = None
+    # Provider keys registered in `fixture_source_preferences` whose completed-fixture data is
+    # supplementary, not authoritative — e.g. TheSportsDB. `sync_completed_fixtures` never lets
+    # these overwrite a score another provider already recorded (see that method's docstring and
+    # `EntityReconciliationService.reconcile_fixture`'s `preserve_existing_score`). Empty by
+    # default so football-data.org (and any future fixture-schedule provider) keeps its existing
+    # "fetched score always wins" behavior unless explicitly opted out of that trust level here.
+    supplementary_provider_keys: frozenset[str] = field(default_factory=frozenset)
 
     async def _get_reconciled_sport(self, sport_code: str):
         sport = await self.sports.get_by_code(SportCode(sport_code))
@@ -344,6 +351,13 @@ class SyncOrchestrator:
                 season_label, now, low_priority=low_priority,
             )
 
+        # Supplementary sources (opted in via CompetitionFixtureSourcePreference but not treated
+        # as authoritative — e.g. TheSportsDB) never overwrite a score another provider already
+        # recorded; see EntityReconciliationService.reconcile_fixture's `preserve_existing_score`.
+        # football-data.org is deliberately excluded — its existing "fetched score always wins"
+        # behavior is unchanged, matching this method's own established precedent.
+        preserve_existing_score = preference.preferred_provider_key in self.supplementary_provider_keys
+
         async def process_one(record):
             result = self.validator.validate_fixture(record, now)
             if not result.is_valid:
@@ -351,6 +365,7 @@ class SyncOrchestrator:
             try:
                 _, created = await self.reconciler.reconcile_fixture(
                     record, season_id, now, sport_code=sport_code, match_by_teams_and_date=True, allow_skip_live=True,
+                    preserve_existing_score=preserve_existing_score,
                 )
             except ReconciliationDependencyError:
                 return RecordOutcome(rejected=True, issue_category="relationship")
@@ -521,5 +536,109 @@ class SyncOrchestrator:
 
         return await self._run_sync(
             sport_code, EntityKind.PLAYER, team_ref.external_id, trigger, now,
+            fetch=fetch, process_one=process_one, force=force,
+        )
+
+    async def sync_lineups(
+        self, sport_code: str, fixture_ref: ProviderRef, fixture_id: str, now: datetime, *,
+        trigger=SyncTrigger.SCHEDULED, low_priority: bool = True, force: bool = False,
+    ) -> SyncRun | None:
+        """Per-fixture, same shape as sync_team_statistics_for_fixture — `fetch_lineups`/
+        `validate_lineup`/`reconcile_lineup` were already real and fully built (docs/roadmap.md
+        Milestone 5) but had no orchestration calling them, so the lineups table stayed empty.
+        `reconcile_lineup` needs a `MatchId`, resolved the same way sync_team_statistics_for_fixture
+        does. Records with unresolved player slots are still saved (reconcile_lineup skips just
+        those slots), never rejected wholesale for one missing player."""
+        async def fetch():
+            return await self.router.fetch_lineups(sport_code, fixture_ref, now, low_priority=low_priority)
+
+        async def process_one(record):
+            result = self.validator.validate_lineup(record)
+            if not result.is_valid:
+                return RecordOutcome(rejected=True, issue_category="invalid")
+            match = await self.reconciler.get_or_create_match(FixtureId(UUID(fixture_id)), now)
+            try:
+                _, created, _unresolved = await self.reconciler.reconcile_lineup(record, match.id, now)
+            except ReconciliationDependencyError:
+                return RecordOutcome(rejected=True, issue_category="relationship")
+            return RecordOutcome(created=created, updated=not created)
+
+        return await self._run_sync(
+            sport_code, EntityKind.LINEUP, fixture_ref.external_id, trigger, now,
+            fetch=fetch, process_one=process_one, force=force,
+        )
+
+    async def sync_injuries(
+        self, sport_code: str, team_ref: ProviderRef, now: datetime, *,
+        trigger=SyncTrigger.SCHEDULED, low_priority: bool = True, force: bool = False,
+        season_label: str | None = None,
+    ) -> SyncRun | None:
+        """Per-team, same shape as sync_players. A team with no reported injuries returns zero
+        records — a real `SyncRun` with `records_fetched=0` still gets written (that's the
+        honest, common result), not treated as a failure."""
+        async def fetch():
+            return await self.router.fetch_injuries(sport_code, team_ref, now, low_priority=low_priority, season_label=season_label)
+
+        async def process_one(record):
+            result = self.validator.validate_injury(record)
+            if not result.is_valid:
+                return RecordOutcome(rejected=True, issue_category="invalid")
+            try:
+                _, created = await self.reconciler.reconcile_injury(record, now)
+            except ReconciliationDependencyError:
+                return RecordOutcome(rejected=True, issue_category="relationship")
+            return RecordOutcome(created=created, updated=not created)
+
+        return await self._run_sync(
+            sport_code, EntityKind.INJURY, team_ref.external_id, trigger, now,
+            fetch=fetch, process_one=process_one, force=force,
+        )
+
+    async def sync_transfers(
+        self, sport_code: str, team_ref: ProviderRef, now: datetime, *,
+        trigger=SyncTrigger.SCHEDULED, low_priority: bool = True, force: bool = False,
+    ) -> SyncRun | None:
+        """Per-team, same shape as sync_players."""
+        async def fetch():
+            return await self.router.fetch_transfers(sport_code, team_ref, now, low_priority=low_priority)
+
+        async def process_one(record):
+            result = self.validator.validate_transfer(record)
+            if not result.is_valid:
+                return RecordOutcome(rejected=True, issue_category="invalid")
+            try:
+                await self.reconciler.reconcile_transfer(record, now)
+            except ReconciliationDependencyError:
+                return RecordOutcome(rejected=True, issue_category="relationship")
+            return RecordOutcome(created=True)
+
+        return await self._run_sync(
+            sport_code, EntityKind.TRANSFER, team_ref.external_id, trigger, now,
+            fetch=fetch, process_one=process_one, force=force,
+        )
+
+    async def sync_coaching_staff(
+        self, sport_code: str, team_ref: ProviderRef, now: datetime, *,
+        trigger=SyncTrigger.SCHEDULED, low_priority: bool = True, force: bool = False,
+    ) -> SyncRun | None:
+        """Per-team. `fetch_coach` returns at most one record (the current head coach) or
+        ``None`` if the provider has no record for this team — an empty fetch, same honest-zero
+        posture as sync_injuries."""
+        async def fetch():
+            record = await self.router.fetch_coach(sport_code, team_ref, now, low_priority=low_priority)
+            return [record] if record is not None else []
+
+        async def process_one(record):
+            result = self.validator.validate_coach(record)
+            if not result.is_valid:
+                return RecordOutcome(rejected=True, issue_category="invalid")
+            try:
+                _, created = await self.reconciler.reconcile_coaching_staff(record, now)
+            except ReconciliationDependencyError:
+                return RecordOutcome(rejected=True, issue_category="relationship")
+            return RecordOutcome(created=created, updated=not created)
+
+        return await self._run_sync(
+            sport_code, EntityKind.COACHING_STAFF, team_ref.external_id, trigger, now,
             fetch=fetch, process_one=process_one, force=force,
         )

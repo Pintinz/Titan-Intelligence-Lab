@@ -22,14 +22,17 @@ import httpx
 from modules.sports.domain.value_objects import ProviderRef
 from modules.sports.infrastructure.providers.api_sports_adapter import ApiKeyGetter, ProviderRequestError
 from modules.sports.ports.provider_gateway import (
+    ProviderCoachRecord,
     ProviderCountryRecord,
     ProviderFixtureRecord,
+    ProviderInjuryRecord,
     ProviderLineupRecord,
     ProviderOddsRecord,
     ProviderPlayerRecord,
     ProviderStandingRecord,
     ProviderTeamRecord,
     ProviderTeamStatisticsRecord,
+    ProviderTransferRecord,
 )
 
 # football-data.org's not-yet-played match statuses (docs.football-data.org/general/v4/match.html)
@@ -206,4 +209,16 @@ class FootballDataOrgAdapter:
 
     async def fetch_odds(self, fixture_ref: ProviderRef) -> ProviderOddsRecord | None:
         """Odds stay api-football's job by design (see module docstring)."""
+        return None
+
+    async def fetch_injuries(self, team_ref: ProviderRef, season_label: str | None = None) -> list[ProviderInjuryRecord]:
+        """Injuries stay api-football's job by design (see module docstring)."""
+        return []
+
+    async def fetch_transfers(self, team_ref: ProviderRef) -> list[ProviderTransferRecord]:
+        """Transfers stay api-football's job by design (see module docstring)."""
+        return []
+
+    async def fetch_coach(self, team_ref: ProviderRef) -> ProviderCoachRecord | None:
+        """Coaching staff stays api-football's job by design (see module docstring)."""
         return None

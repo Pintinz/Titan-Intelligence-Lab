@@ -73,6 +73,18 @@ def _apply_auth(
     # outcome for e.g. a public webhook receiver health path.
 
 
+def _resolve_request_url(base_url: str, auth_type: str | None, credential: str | None) -> str:
+    """Audit fix (2026-08-10): TheSportsDB (and providers like it) embed the API key as a URL
+    *path segment* rather than a header/query param — verified live, `.../json/{key}/all_sports.php`
+    is the real convention, and none of the other auth_types can express that. ``api_key_path``
+    substitutes a ``{key}`` placeholder in `base_url` with the credential; a `base_url` with no
+    placeholder is returned unchanged (falls through to the generic unauthenticated-request case
+    below, same as an unrecognized auth_type)."""
+    if auth_type == "api_key_path" and credential and "{key}" in base_url:
+        return base_url.replace("{key}", credential)
+    return base_url
+
+
 async def test_connection(
     *,
     base_url: str | None,
@@ -93,12 +105,13 @@ async def test_connection(
 
     request_kwargs: dict = {}
     _apply_auth(request_kwargs, auth_type, credential, username, header_name)
+    request_url = _resolve_request_url(base_url, auth_type, credential)
 
     owns_client = client is None
     http_client = client or httpx.AsyncClient(timeout=timeout_seconds)
     started = perf_counter()
     try:
-        response = await http_client.get(base_url, **request_kwargs)
+        response = await http_client.get(request_url, **request_kwargs)
         latency_ms = (perf_counter() - started) * 1000
         try:
             raw_body = response.json()

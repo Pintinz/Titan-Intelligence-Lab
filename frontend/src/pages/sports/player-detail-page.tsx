@@ -1,5 +1,5 @@
 import { useParams, Link } from 'react-router-dom'
-import { useQueries, useQuery } from '@tanstack/react-query'
+import { useQueries, useQuery, type UseQueryResult } from '@tanstack/react-query'
 import { ArrowLeft, Radio, Gauge, Waypoints, ClipboardList, ChevronRight } from 'lucide-react'
 import { sportsApi } from '@/lib/api/sports'
 import { graphApi } from '@/lib/api/graph'
@@ -10,7 +10,7 @@ import { ErrorState } from '@/components/ui/error-state'
 import { CDPanel, CDLabel } from '@/components/command-deck/primitives/panel'
 import { CD_DOMAIN_COLOR_VAR, domainTint, type DomainKey } from '@/components/command-deck/primitives/domain'
 import { MatchSnapshotCard } from '@/components/command-deck/match-snapshot-card'
-import type { FixtureSummaryDto, FixtureTeamStatisticsDto, KgContextDto, KgNodeDto } from '@/lib/api/types'
+import type { FixtureSummaryDto, FixtureTeamStatisticsDto, InjuryDto, KgContextDto, KgNodeDto, TransferDto } from '@/lib/api/types'
 
 type Domain = Extract<DomainKey, 'football' | 'basketball' | 'baseball' | 'table-tennis'>
 
@@ -65,6 +65,16 @@ export default function PlayerDetailPage() {
   const kgNodeQuery = useQuery({
     queryKey: ['graph', 'entity', 'player', playerId],
     queryFn: () => graphApi.getEntity('player', playerId!),
+    enabled: !!playerId,
+  })
+  const injuriesQuery = useQuery({
+    queryKey: ['sports', 'player', playerId, 'injuries'],
+    queryFn: () => sportsApi.playerInjuries(playerId!),
+    enabled: !!playerId,
+  })
+  const transfersQuery = useQuery({
+    queryKey: ['sports', 'player', playerId, 'transfers'],
+    queryFn: () => sportsApi.playerTransfers(playerId!),
     enabled: !!playerId,
   })
   const kgContextQuery = useQuery({
@@ -178,7 +188,7 @@ export default function PlayerDetailPage() {
 
       <MatchImpactSection state="NO_APPEARANCE_DATA" data={null} playerName={player.name} />
 
-      <PlayerRecordsPanel />
+      <PlayerRecordsPanel injuriesQuery={injuriesQuery} transfersQuery={transfersQuery} />
 
       <KnowledgeGraphSection nodeQuery={kgNodeQuery} contextQuery={kgContextQuery} playerName={player.name} />
     </div>
@@ -421,16 +431,21 @@ function MatchImpactSplitCard({ label, split }: { label: string; split: MatchImp
   )
 }
 
-/** Availability, career/transfer history, and player-level predictions all trace to backend
- * tables or contracts that either don't exist or exist with zero API exposure (confirmed by
- * direct audit — Injury/Transfer tables have no repository, no player-scoped market is seeded
- * anywhere). One compact panel rather than three separate empty cards. */
-function PlayerRecordsPanel() {
-  const rows: Array<{ label: string; copy: string }> = [
-    { label: 'Availability', copy: 'Availability data is not currently recorded for this player.' },
-    { label: 'Career history', copy: 'Verified transfer history is not currently available.' },
-    { label: 'Player predictions', copy: 'Player-level prediction markets are not currently available.' },
-  ]
+/** Availability and career/transfer history now trace to the real squad-intelligence pipeline
+ * (Injury/Transfer repositories + API-Football sync). Player-level predictions are still a real
+ * gap — no player-scoped market is seeded anywhere — so that row stays an honest "not currently
+ * available" rather than being faked to match the other two. */
+function PlayerRecordsPanel({
+  injuriesQuery,
+  transfersQuery,
+}: {
+  injuriesQuery: UseQueryResult<InjuryDto[]>
+  transfersQuery: UseQueryResult<TransferDto[]>
+}) {
+  const injuries = injuriesQuery.data ?? []
+  const transfers = transfersQuery.data ?? []
+  const currentInjury = injuries[0] ?? null
+
   return (
     <CDPanel>
       <div className="flex items-center gap-2">
@@ -438,19 +453,48 @@ function PlayerRecordsPanel() {
         <CDLabel>Player records</CDLabel>
       </div>
       <div className="mt-3 divide-y" style={{ borderColor: 'var(--cd-border-hairline)' }}>
-        {rows.map((row) => (
-          <div key={row.label} className="flex flex-col gap-1 py-3 first:pt-3 sm:flex-row sm:items-baseline sm:gap-4">
-            <p
-              className="w-36 shrink-0 font-[var(--cd-font-telemetry)] text-[10.5px] font-semibold uppercase tracking-[0.06em]"
-              style={{ color: 'var(--cd-text-muted)' }}
-            >
-              {row.label}
-            </p>
-            <p className="font-[var(--cd-font-body)] text-[13px]" style={{ color: 'var(--cd-text-secondary)' }}>
-              {row.copy}
-            </p>
+        <div className="flex flex-col gap-1 py-3 first:pt-3 sm:flex-row sm:items-baseline sm:gap-4">
+          <p className="w-36 shrink-0 font-[var(--cd-font-telemetry)] text-[10.5px] font-semibold uppercase tracking-[0.06em]" style={{ color: 'var(--cd-text-muted)' }}>
+            Availability
+          </p>
+          <p className="font-[var(--cd-font-body)] text-[13px]" style={{ color: 'var(--cd-text-secondary)' }}>
+            {injuriesQuery.isPending && 'Checking availability…'}
+            {!injuriesQuery.isPending && !currentInjury && 'No reported injuries — available.'}
+            {!injuriesQuery.isPending && currentInjury && (
+              <>
+                {currentInjury.status}
+                {currentInjury.reason ? ` — ${currentInjury.reason}` : ''}
+              </>
+            )}
+          </p>
+        </div>
+        <div className="flex flex-col gap-1 py-3 sm:flex-row sm:items-baseline sm:gap-4">
+          <p className="w-36 shrink-0 font-[var(--cd-font-telemetry)] text-[10.5px] font-semibold uppercase tracking-[0.06em]" style={{ color: 'var(--cd-text-muted)' }}>
+            Career history
+          </p>
+          <div className="font-[var(--cd-font-body)] text-[13px]" style={{ color: 'var(--cd-text-secondary)' }}>
+            {transfersQuery.isPending && 'Loading transfer history…'}
+            {!transfersQuery.isPending && transfers.length === 0 && 'No confirmed transfers on record.'}
+            {!transfersQuery.isPending && transfers.length > 0 && (
+              <ul className="space-y-1">
+                {transfers.slice(0, 5).map((t) => (
+                  <li key={t.id}>
+                    {t.from_team_name ?? 'Free agent'} → {t.to_team_name ?? 'Unknown club'}
+                    {t.transfer_type ? ` (${t.transfer_type})` : ''} — {new Date(t.effective_date).toLocaleDateString(undefined, { month: 'short', year: 'numeric' })}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
-        ))}
+        </div>
+        <div className="flex flex-col gap-1 py-3 sm:flex-row sm:items-baseline sm:gap-4">
+          <p className="w-36 shrink-0 font-[var(--cd-font-telemetry)] text-[10.5px] font-semibold uppercase tracking-[0.06em]" style={{ color: 'var(--cd-text-muted)' }}>
+            Player predictions
+          </p>
+          <p className="font-[var(--cd-font-body)] text-[13px]" style={{ color: 'var(--cd-text-secondary)' }}>
+            Player-level prediction markets are not currently available.
+          </p>
+        </div>
       </div>
     </CDPanel>
   )

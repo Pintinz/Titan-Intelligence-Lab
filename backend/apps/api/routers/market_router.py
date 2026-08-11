@@ -5,6 +5,12 @@
 registries "Feature Registry"/"Markets" name in Part 5, scoped to the Prediction Intelligence
 Platform's own market/mapping resources (the generic Feature *Definition* registry already has
 its own routes in apps/api/main.py from Milestone 4).
+
+Every lifecycle mutation (register/submit/approve/reject/promote/deprecate/archive/remove, and
+feature-to-market mapping) requires `Role.ADMINISTRATOR` — this is the platform's live market
+catalog, not a sandbox any authenticated user should be able to write to. Reads (`list_markets`,
+`get_market`, `list_market_features`) stay `get_current_user`-only since the Prediction
+Laboratory and other authenticated surfaces legitimately need to browse the catalog.
 """
 
 from __future__ import annotations
@@ -15,9 +21,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.api.auth_deps import get_current_user
+from apps.api.auth_deps import get_current_user, require_role
 from apps.api.composition import build_feature_market_mapping_service, build_market_registry_service, get_session
 from modules.identity.domain.entities import User
+from modules.identity.domain.value_objects import Role
 from modules.predictions.application.feature_market_mapping_service import (
     FeatureNotApprovedError,
     MappingAlreadyExistsError,
@@ -134,7 +141,9 @@ class MapFeatureBody(BaseModel):
 
 @router.post("")
 async def register_market(
-    body: RegisterMarketBody, session: AsyncSession = Depends(get_session), _user: User = Depends(get_current_user)
+    body: RegisterMarketBody,
+    session: AsyncSession = Depends(get_session),
+    _user: User = Depends(require_role(Role.ADMINISTRATOR)),
 ):
     service = build_market_registry_service(session)
     try:
@@ -199,7 +208,9 @@ def _handle_market_lifecycle_errors(exc: Exception):
 
 @router.post("/{market_key}/submit")
 async def submit_market_for_review(
-    market_key: str, session: AsyncSession = Depends(get_session), _user: User = Depends(get_current_user)
+    market_key: str,
+    session: AsyncSession = Depends(get_session),
+    _user: User = Depends(require_role(Role.ADMINISTRATOR)),
 ):
     service = build_market_registry_service(session)
     try:
@@ -214,7 +225,7 @@ async def approve_market(
     market_key: str,
     body: ReviewMarketBody,
     session: AsyncSession = Depends(get_session),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_role(Role.ADMINISTRATOR)),
 ):
     service = build_market_registry_service(session)
     try:
@@ -229,7 +240,7 @@ async def reject_market(
     market_key: str,
     body: ReviewMarketBody,
     session: AsyncSession = Depends(get_session),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_role(Role.ADMINISTRATOR)),
 ):
     service = build_market_registry_service(session)
     try:
@@ -241,7 +252,9 @@ async def reject_market(
 
 @router.post("/{market_key}/promote")
 async def promote_market_to_production(
-    market_key: str, session: AsyncSession = Depends(get_session), _user: User = Depends(get_current_user)
+    market_key: str,
+    session: AsyncSession = Depends(get_session),
+    _user: User = Depends(require_role(Role.ADMINISTRATOR)),
 ):
     service = build_market_registry_service(session)
     try:
@@ -253,7 +266,9 @@ async def promote_market_to_production(
 
 @router.post("/{market_key}/deprecate")
 async def deprecate_market(
-    market_key: str, session: AsyncSession = Depends(get_session), _user: User = Depends(get_current_user)
+    market_key: str,
+    session: AsyncSession = Depends(get_session),
+    _user: User = Depends(require_role(Role.ADMINISTRATOR)),
 ):
     service = build_market_registry_service(session)
     try:
@@ -265,7 +280,9 @@ async def deprecate_market(
 
 @router.post("/{market_key}/archive")
 async def archive_market(
-    market_key: str, session: AsyncSession = Depends(get_session), _user: User = Depends(get_current_user)
+    market_key: str,
+    session: AsyncSession = Depends(get_session),
+    _user: User = Depends(require_role(Role.ADMINISTRATOR)),
 ):
     service = build_market_registry_service(session)
     try:
@@ -277,7 +294,9 @@ async def archive_market(
 
 @router.post("/{market_key}/remove")
 async def remove_market(
-    market_key: str, session: AsyncSession = Depends(get_session), _user: User = Depends(get_current_user)
+    market_key: str,
+    session: AsyncSession = Depends(get_session),
+    _user: User = Depends(require_role(Role.ADMINISTRATOR)),
 ):
     service = build_market_registry_service(session)
     try:
@@ -307,7 +326,7 @@ async def map_feature_to_market(
     market_key: str,
     body: MapFeatureBody,
     session: AsyncSession = Depends(get_session),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_role(Role.ADMINISTRATOR)),
 ):
     service = build_feature_market_mapping_service(session)
     try:

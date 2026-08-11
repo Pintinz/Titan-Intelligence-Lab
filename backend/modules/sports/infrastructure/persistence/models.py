@@ -120,13 +120,15 @@ class PlayerModel(TimestampMixin, VersionedMixin, Base):
     position: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
-class CoachingStaffModel(TimestampMixin, Base):
+class CoachingStaffModel(TimestampMixin, VersionedMixin, Base):
     __tablename__ = "coaching_staff"
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id"), index=True)
     person_name: Mapped[str] = mapped_column(String(200))
     role: Mapped[str] = mapped_column(String(64))
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 
 class OfficialModel(TimestampMixin, Base):
@@ -150,6 +152,10 @@ class FixtureModel(TimestampMixin, VersionedMixin, Base):
     status: Mapped[str] = mapped_column(String(32), default="scheduled", index=True)
     home_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     away_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Sport-specific period-by-period score breakdown (quarters for basketball, innings for
+    # baseball) — {"kind": "quarter"|"inning", "home": [...], "away": [...]}. None when the
+    # sport's provider doesn't report period scores (football) or hasn't been synced yet.
+    period_scores: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class MatchModel(TimestampMixin, Base):
@@ -216,13 +222,14 @@ class LineupModel(TimestampMixin, VersionedMixin, Base):
     slots: Mapped[list] = mapped_column(JSON, default=list)
 
 
-class InjuryModel(TimestampMixin, Base):
+class InjuryModel(TimestampMixin, VersionedMixin, Base):
     __tablename__ = "injuries"
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     player_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("players.id"), index=True)
     reported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(64))
+    reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
     expected_return: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     source_ref: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
@@ -237,14 +244,15 @@ class SuspensionModel(TimestampMixin, Base):
     end_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
-class TransferModel(TimestampMixin, Base):
+class TransferModel(TimestampMixin, VersionedMixin, Base):
     __tablename__ = "transfers"
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     player_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("players.id"), index=True)
-    from_team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id"), nullable=True)
-    to_team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id"), nullable=True)
+    from_team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id"), nullable=True, index=True)
+    to_team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id"), nullable=True, index=True)
     effective_date: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    transfer_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class RankingModel(TimestampMixin, Base):

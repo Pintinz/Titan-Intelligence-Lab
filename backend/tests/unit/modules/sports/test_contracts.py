@@ -73,7 +73,7 @@ def test_normalize_provider_fixture_status_recognizes_finished_codes(raw):
     assert normalize_provider_fixture_status(raw) is FixtureStatus.COMPLETED
 
 
-@pytest.mark.parametrize("raw", ["PST", "SUSP", "INT"])
+@pytest.mark.parametrize("raw", ["PST", "POST", "SUSP", "INT"])
 def test_normalize_provider_fixture_status_recognizes_postponed_codes(raw):
     assert normalize_provider_fixture_status(raw) is FixtureStatus.POSTPONED
 

@@ -2,12 +2,17 @@ import { Link } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { ConfidenceTelemetry } from '@/components/domain/confidence-telemetry'
 import { LiveDot } from '@/components/ui/live-dot'
-import { IllustrativeTag } from './section-primitives'
-import { FEATURED_MATCHES } from './sample-data'
+import { humanizeFactorKey } from '@/components/infinity/evidence-explorer'
+import { predictionValueLabel } from '@/lib/predictions/value-label'
+import type { PublicFeaturedIntelligenceDto } from '@/lib/api/types'
 
-const heroMatch = FEATURED_MATCHES[0]
-
-export function HeroSection() {
+/**
+ * The hero's "Intelligence Core" — a real currently-published pick when one exists, or an honest
+ * neutral platform-state visualization when it doesn't (shape brief §8: never fabricate a match to
+ * fill the space). `pick` is the highest-confidence entry from `featured-intelligence`, or `null`
+ * while loading / if none is currently published.
+ */
+export function HeroSection({ loading, pick }: { loading: boolean; pick: PublicFeaturedIntelligenceDto | null }) {
   return (
     <div className="relative overflow-hidden border-b border-border-subtle">
       <div
@@ -34,30 +39,66 @@ export function HeroSection() {
               <Link to="/signup">Start free</Link>
             </Button>
             <Button asChild variant="secondary" size="lg">
-              <Link to="/methodology">See the methodology</Link>
+              <Link to="/methodology">Explore the methodology</Link>
             </Button>
           </div>
         </div>
 
         <div className="relative">
           <div className="rounded-lg border border-border-default bg-bg-elevated/80 p-5 shadow-[var(--shadow-elevation-3)] backdrop-blur-sm">
-            <div className="flex items-center justify-between">
-              <span className="font-telemetry text-xs uppercase tracking-wider text-text-muted">
-                {heroMatch.sportLabel} · {heroMatch.fixture.competition_name}
-              </span>
-              <IllustrativeTag />
-            </div>
-            <p className="mt-3 font-display text-lg font-semibold text-text-primary">
-              {heroMatch.fixture.home_team.short_name} vs {heroMatch.fixture.away_team.short_name}
-            </p>
-            <div className="mt-4 flex items-center justify-between rounded-md bg-bg-primary/60 px-3 py-2.5">
-              <div>
-                <p className="text-xs text-text-muted">{heroMatch.market}</p>
-                <p className="font-telemetry text-base font-medium text-text-primary">{heroMatch.pick}</p>
+            {loading ? (
+              <div className="animate-pulse space-y-4">
+                <div className="h-3 w-32 rounded bg-bg-secondary" />
+                <div className="h-5 w-48 rounded bg-bg-secondary" />
+                <div className="h-14 rounded-md bg-bg-secondary" />
               </div>
-              <ConfidenceTelemetry confidence={heroMatch.confidence.composite} />
-            </div>
-            <p className="mt-4 text-sm text-text-secondary">{heroMatch.whyItMatters}</p>
+            ) : pick ? (
+              <>
+                <div className="flex items-center justify-between">
+                  <span className="font-telemetry text-xs uppercase tracking-wider text-text-muted">
+                    {pick.sport_code} · {pick.competition_name ?? 'Intelligence'}
+                  </span>
+                  {pick.status === 'live' && (
+                    <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-live">
+                      <LiveDot /> Live
+                    </span>
+                  )}
+                </div>
+                <p className="mt-3 font-display text-lg font-semibold text-text-primary">
+                  {pick.home_team?.short_name ?? pick.home_team?.name} vs{' '}
+                  {pick.away_team?.short_name ?? pick.away_team?.name}
+                </p>
+                <div className="mt-4 flex items-center justify-between rounded-md bg-bg-primary/60 px-3 py-2.5">
+                  <div>
+                    <p className="text-xs text-text-muted">{pick.market_name}</p>
+                    <p className="font-telemetry text-base font-medium text-text-primary">
+                      {predictionValueLabel(pick.value, pick.home_team ?? undefined, pick.away_team ?? undefined)}
+                    </p>
+                  </div>
+                  <ConfidenceTelemetry confidence={pick.confidence_composite} />
+                </div>
+                {pick.evidence_highlights.supporting.length > 0 && (
+                  <p className="mt-4 text-sm text-text-secondary">
+                    Backed by {pick.evidence_highlights.supporting.map(humanizeFactorKey).join(', ')}.
+                  </p>
+                )}
+              </>
+            ) : (
+              <>
+                <div className="flex items-center justify-between">
+                  <span className="font-telemetry text-xs uppercase tracking-wider text-text-muted">
+                    Intelligence Engine
+                  </span>
+                </div>
+                <p className="mt-3 font-display text-lg font-semibold text-text-primary">
+                  Awaiting published intelligence
+                </p>
+                <p className="mt-3 text-sm text-text-secondary">
+                  The engine publishes a prediction only once it clears its confidence threshold —
+                  nothing ships without evidence behind it.
+                </p>
+              </>
+            )}
           </div>
         </div>
       </div>

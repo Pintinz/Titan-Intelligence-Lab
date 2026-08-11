@@ -4,7 +4,7 @@ import type { ComponentType } from 'react'
 export interface WorkspaceCommand {
   id: string
   label: string
-  icon: ComponentType<{ className?: string; 'aria-hidden'?: boolean }>
+  icon: ComponentType<{ className?: string; 'aria-hidden'?: boolean | 'true' | 'false' }>
   run: () => void
 }
 

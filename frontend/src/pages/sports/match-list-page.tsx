@@ -256,12 +256,13 @@ function SearchResults({
     <div className="grid gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
       {items.map((fixture) => {
         const { homeScore, awayScore } = fixtureScores(fixture.final_state)
+        const status = fixture.status.toLowerCase() === 'completed' ? 'completed' : fixture.status.toLowerCase() === 'live' ? 'live' : 'upcoming'
         return (
           <DiscoveryMatchCard
             key={fixture.id}
             competition={fixture.competition_name}
             competitionLogoUrl={fixture.competition_logo_url}
-            status={fixture.status.toLowerCase() === 'completed' ? 'completed' : fixture.status.toLowerCase() === 'live' ? 'live' : 'upcoming'}
+            status={status}
             kickoffLabel={new Date(fixture.scheduled_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
             venue={fixture.venue_name}
             homeTeam={fixture.home_team.name}
@@ -273,7 +274,7 @@ function SearchResults({
             aiAvailable={aiAvailable}
             following={following('fixture', fixture.id)}
             onToggleFollow={() => onToggleFollow('fixture', fixture.id)}
-            href={`/app/${sportSlug}/matches/${fixture.id}`}
+            href={status === 'completed' ? `/app/${sportSlug}/matches/${fixture.id}/review` : `/app/${sportSlug}/matches/${fixture.id}`}
           />
         )
       })}

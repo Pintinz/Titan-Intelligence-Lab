@@ -11,9 +11,11 @@ from datetime import datetime
 from typing import Protocol
 
 from modules.sports.domain.entities import (
+    CoachingStaffMember,
     Competition,
     Country,
     Fixture,
+    Injury,
     Lineup,
     Match,
     Player,
@@ -22,11 +24,13 @@ from modules.sports.domain.entities import (
     Standing,
     Team,
     TeamStatistics,
+    Transfer,
     Venue,
 )
 from modules.sports.domain.value_objects import (
     CompetitionId,
     CountryId,
+    EntityId,
     FixtureId,
     LineupId,
     MatchId,
@@ -143,3 +147,24 @@ class LineupRepositoryPort(Protocol):
     async def get_for_match_team(self, match_id: MatchId, team_id: TeamId) -> Lineup | None: ...
     async def list_by_match(self, match_id: MatchId) -> list[Lineup]: ...
     async def upsert(self, lineup: Lineup) -> Lineup: ...
+
+
+class InjuryRepositoryPort(Protocol):
+    async def get(self, injury_id: EntityId) -> Injury | None: ...
+    async def list_by_player(self, player_id: PlayerId) -> list[Injury]: ...
+    async def list_current_by_team(self, team_id: TeamId) -> list[Injury]: ...
+    async def upsert(self, injury: Injury) -> Injury: ...
+
+
+class TransferRepositoryPort(Protocol):
+    async def get(self, transfer_id: EntityId) -> Transfer | None: ...
+    async def list_by_player(self, player_id: PlayerId) -> list[Transfer]: ...
+    async def list_by_team(self, team_id: TeamId) -> list[Transfer]: ...
+    async def upsert(self, transfer: Transfer) -> Transfer: ...
+
+
+class CoachingStaffRepositoryPort(Protocol):
+    async def get(self, staff_id: EntityId) -> CoachingStaffMember | None: ...
+    async def get_current_by_team(self, team_id: TeamId, role: str = "head_coach") -> CoachingStaffMember | None: ...
+    async def list_by_team(self, team_id: TeamId) -> list[CoachingStaffMember]: ...
+    async def upsert(self, staff: CoachingStaffMember) -> CoachingStaffMember: ...

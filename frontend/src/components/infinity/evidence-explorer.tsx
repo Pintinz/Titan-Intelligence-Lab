@@ -39,6 +39,20 @@ function riskLevel(composite: number): { label: RiskLevel; tone: string } {
 
 export type TeamRef = { name: string; logoUrl?: string | null }
 
+/** Real backend codes no consumer of a raw prediction value/outcome key should ever expose as-is
+ * — the generic binary predictor shape (`positive`/`negative`) plus the real labels the
+ * generation-time mapper (`outcome_label_mapper.py`) upgrades those to once a market has a real
+ * evaluation resolver. Shared by `resolveVerdict` (winning value) and `resolveOutcomeLabel`
+ * (every distribution key) so the two never drift on how the same code reads. */
+const GENERIC_VALUE_LABELS: Record<string, string> = {
+  YES: 'Yes',
+  NO: 'No',
+  OVER: 'Over',
+  UNDER: 'Under',
+  positive: 'Yes',
+  negative: 'No',
+}
+
 /** `WeightedOrdinalPredictor` emits the real, final value for every `HOME_DRAW_AWAY` market as
  * one of these three literals directly (`modules/predictions/infrastructure/predictors/
  * weighted_scoring.py`) — correct as backend output, but a generic code rather than something a
@@ -52,17 +66,20 @@ export function resolveVerdict(
   if (value === 'HOME_WIN' && homeTeam) return { text: homeTeam.name, team: homeTeam }
   if (value === 'AWAY_WIN' && awayTeam) return { text: awayTeam.name, team: awayTeam }
   if (value === 'DRAW') return { text: 'Draw' }
-  return { text: String(value) }
+  const stringValue = String(value)
+  if (stringValue in GENERIC_VALUE_LABELS) return { text: GENERIC_VALUE_LABELS[stringValue] }
+  return { text: stringValue }
 }
 
-/** Same team/draw resolution `resolveVerdict` applies to the winning `value`, applied to every
- * key in `probability_distribution` so "Alternative Outcomes" reads like the verdict does rather
- * than showing raw backend codes for the outcomes that didn't win. */
+/** Same team/draw/generic-code resolution `resolveVerdict` applies to the winning `value`,
+ * applied to every key in `probability_distribution` so "Alternative Outcomes" reads like the
+ * verdict does rather than showing raw backend codes for the outcomes that didn't win. */
 export function resolveOutcomeLabel(key: string, homeTeam?: TeamRef, awayTeam?: TeamRef): string {
   if (key === 'HOME_WIN' && homeTeam) return homeTeam.name
   if (key === 'AWAY_WIN' && awayTeam) return awayTeam.name
   if (key === 'DRAW') return 'Draw'
   if (key === 'OTHER') return 'Other scoreline'
+  if (key in GENERIC_VALUE_LABELS) return GENERIC_VALUE_LABELS[key]
   return key
 }
 

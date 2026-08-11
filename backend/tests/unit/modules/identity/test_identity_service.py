@@ -9,6 +9,9 @@ from modules.identity.application.identity_service import (
     AccountLockedError,
     IdentityService,
     InvalidCredentialsError,
+    NotSessionOwnerError,
+    NotTokenOwnerError,
+    RoleEscalationError,
 )
 from modules.identity.domain.value_objects import (
     AuditAction,
@@ -177,7 +180,12 @@ async def test_pat_lifecycle(service):
 
     token, raw = await service.create_personal_access_token(user.id, "ci-token", ["read"], now())
     authenticated = await service.authenticate_with_token(raw, now())
-    assert authenticated is not None and authenticated.id == user.id
+    assert authenticated is not None
+    resolved_token, authenticated_user = authenticated
+    assert authenticated_user.id == user.id
+    assert resolved_token.id == token.id
+    assert resolved_token.has_scope("read")
+    assert not resolved_token.has_scope("write")
 
     await service.revoke_personal_access_token(token.id, now(), actor=user.id)
     assert await service.authenticate_with_token(raw, now()) is None
@@ -191,11 +199,34 @@ async def test_pat_expiry_is_enforced(service):
     assert await service.authenticate_with_token(raw, t + timedelta(seconds=5)) is None
 
 
+async def test_cannot_revoke_another_users_personal_access_token(service):
+    owner = await service.register(Email("owner-pat@example.com"), "pw", now())
+    attacker = await service.register(Email("attacker-pat@example.com"), "pw", now())
+    token, raw = await service.create_personal_access_token(owner.id, "owner-token", ["*"], now())
+
+    with pytest.raises(NotTokenOwnerError):
+        await service.revoke_personal_access_token(token.id, now(), actor=attacker.id)
+
+    assert await service.authenticate_with_token(raw, now()) is not None
+
+
+async def test_cannot_revoke_another_users_session(service):
+    await service.register(Email("owner-session@example.com"), "pw", now())
+    result = await service.authenticate(Email("owner-session@example.com"), "pw", now())
+    attacker = await service.register(Email("attacker-session@example.com"), "pw", now())
+
+    with pytest.raises(NotSessionOwnerError):
+        await service.revoke_session(result.session.id, now(), actor=attacker.id)
+
+    active = await service.list_active_sessions(result.user.id)
+    assert len(active) == 1
+
+
 async def test_change_role_emits_audit_entry(service, audit_log_repo):
     user = await service.register(Email("kate@example.com"), "pw", now())
     actor = UserId(uuid4())
 
-    updated = await service.change_role(user.id, Role.ANALYST, now(), actor)
+    updated = await service.change_role(user.id, Role.ANALYST, now(), actor, Role.ADMINISTRATOR)
 
     assert updated.role is Role.ANALYST
     role_changes = [e for e in audit_log_repo.entries if e.action is AuditAction.ROLE_CHANGED]
@@ -205,4 +236,28 @@ async def test_change_role_emits_audit_entry(service, audit_log_repo):
 
 async def test_change_role_unknown_user_raises(service):
     with pytest.raises(ValueError):
-        await service.change_role(UserId(uuid4()), Role.PREMIUM, now(), UserId(uuid4()))
+        await service.change_role(UserId(uuid4()), Role.PREMIUM, now(), UserId(uuid4()), Role.ADMINISTRATOR)
+
+
+async def test_change_role_rejects_self_change(service):
+    user = await service.register(Email("liam@example.com"), "pw", now())
+
+    with pytest.raises(RoleEscalationError):
+        await service.change_role(user.id, Role.ADMINISTRATOR, now(), user.id, Role.ADMINISTRATOR)
+
+
+async def test_change_role_rejects_grant_above_actor_role(service):
+    user = await service.register(Email("maya@example.com"), "pw", now())
+    actor = UserId(uuid4())
+
+    with pytest.raises(RoleEscalationError):
+        await service.change_role(user.id, Role.SUPER_ADMINISTRATOR, now(), actor, Role.ADMINISTRATOR)
+
+
+async def test_change_role_allows_grant_at_or_below_actor_role(service):
+    user = await service.register(Email("noah@example.com"), "pw", now())
+    actor = UserId(uuid4())
+
+    updated = await service.change_role(user.id, Role.ADMINISTRATOR, now(), actor, Role.ADMINISTRATOR)
+
+    assert updated.role is Role.ADMINISTRATOR

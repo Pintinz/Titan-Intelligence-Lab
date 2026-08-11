@@ -117,6 +117,21 @@ export default function TeamDetailPage() {
     queryFn: () => sportsApi.teamStatistics(teamId!, 20),
     enabled: !!teamId,
   })
+  const injuriesQuery = useQuery({
+    queryKey: ['sports', 'team', teamId, 'injuries'],
+    queryFn: () => sportsApi.teamInjuries(teamId!),
+    enabled: !!teamId,
+  })
+  const transfersQuery = useQuery({
+    queryKey: ['sports', 'team', teamId, 'transfers'],
+    queryFn: () => sportsApi.teamTransfers(teamId!),
+    enabled: !!teamId,
+  })
+  const coachingStaffQuery = useQuery({
+    queryKey: ['sports', 'team', teamId, 'coaching-staff'],
+    queryFn: () => sportsApi.teamCoachingStaff(teamId!),
+    enabled: !!teamId,
+  })
   const marketsQuery = useQuery({
     queryKey: ['markets', sport?.code, 'production'],
     queryFn: () => marketsApi.list({ sport_code: sport!.code, status: 'production' }),
@@ -465,12 +480,81 @@ export default function TeamDetailPage() {
               ))}
             </div>
           )}
-          <div className="mt-4">
-            <InfinityEmptyState
-              icon={Lock}
-              title="Synchronizing formation & fitness intelligence"
-              description="Starting XI, bench, injuries, suspensions, and player ratings aren't wired up yet — TitanIQ will surface them here once lineup and fitness data is under coverage."
-            />
+          <div className="mt-6 grid gap-4 lg:grid-cols-3">
+            {/* Manager */}
+            <div className="rounded-infinity-md border border-infinity-border-default bg-infinity-ground-1 p-4">
+              <div className="mb-3 flex items-center gap-1.5">
+                <UserCog className="size-3.5 text-infinity-text-muted" />
+                <InfinityLabel>Manager</InfinityLabel>
+              </div>
+              {coachingStaffQuery.isPending && <InfinitySkeleton className="h-12" />}
+              {coachingStaffQuery.data && (() => {
+                const staff = coachingStaffQuery.data.data
+                const current = staff.find((c) => c.id === coachingStaffQuery.data!.meta.current_coach_id)
+                if (!current) {
+                  return <p className="font-infinity-body text-[13px] text-infinity-text-muted">No verified manager on record.</p>
+                }
+                return (
+                  <div>
+                    <p className="font-infinity-display text-[15px] font-semibold text-infinity-text-primary">{current.person_name}</p>
+                    {current.valid_from && (
+                      <p className="mt-0.5 font-infinity-body text-[12px] text-infinity-text-muted">
+                        In charge since {new Date(current.valid_from).toLocaleDateString(undefined, { month: 'short', year: 'numeric' })}
+                      </p>
+                    )}
+                  </div>
+                )
+              })()}
+            </div>
+
+            {/* Injuries */}
+            <div className="rounded-infinity-md border border-infinity-border-default bg-infinity-ground-1 p-4">
+              <div className="mb-3 flex items-center gap-1.5">
+                <HeartPulse className="size-3.5 text-infinity-text-muted" />
+                <InfinityLabel>Injuries</InfinityLabel>
+              </div>
+              {injuriesQuery.isPending && <InfinitySkeleton className="h-12" />}
+              {injuriesQuery.data && injuriesQuery.data.length === 0 && (
+                <p className="font-infinity-body text-[13px] text-infinity-text-muted">No reported injuries.</p>
+              )}
+              {injuriesQuery.data && injuriesQuery.data.length > 0 && (
+                <ul className="space-y-2">
+                  {injuriesQuery.data.slice(0, 6).map((injury) => (
+                    <li key={injury.id} className="flex items-center justify-between gap-2">
+                      <span className="font-infinity-body text-[13px] text-infinity-text-primary">{injury.player_name ?? 'Unknown player'}</span>
+                      <InfinityBadge tone="var(--infinity-danger)">{injury.reason ?? injury.status}</InfinityBadge>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            {/* Transfers */}
+            <div className="rounded-infinity-md border border-infinity-border-default bg-infinity-ground-1 p-4">
+              <div className="mb-3 flex items-center gap-1.5">
+                <ArrowLeftRight className="size-3.5 text-infinity-text-muted" />
+                <InfinityLabel>Recent transfers</InfinityLabel>
+              </div>
+              {transfersQuery.isPending && <InfinitySkeleton className="h-12" />}
+              {transfersQuery.data && transfersQuery.data.length === 0 && (
+                <p className="font-infinity-body text-[13px] text-infinity-text-muted">No confirmed transfers on record.</p>
+              )}
+              {transfersQuery.data && transfersQuery.data.length > 0 && (
+                <ul className="space-y-2">
+                  {transfersQuery.data.slice(0, 6).map((transfer) => {
+                    const incoming = transfer.to_team_id === teamId
+                    return (
+                      <li key={transfer.id} className="flex items-center justify-between gap-2">
+                        <span className="font-infinity-body text-[13px] text-infinity-text-primary">{transfer.player_name ?? 'Unknown player'}</span>
+                        <InfinityBadge tone={incoming ? 'var(--infinity-success)' : 'var(--infinity-text-muted)'}>
+                          {incoming ? 'In' : 'Out'} · {transfer.transfer_type ?? '—'}
+                        </InfinityBadge>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+            </div>
           </div>
         </div>
 

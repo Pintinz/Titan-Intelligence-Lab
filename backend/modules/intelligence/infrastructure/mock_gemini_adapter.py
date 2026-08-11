@@ -63,7 +63,13 @@ class MockGeminiAdapter:
                 events.append(
                     ExtractedEvent(
                         event_type=event_type,
-                        summary=f"Mock-extracted {event_type} event from source text.",
+                        # Real (if simple) rule-based classification over the real article text —
+                        # worded as a plain statement like every sibling method here (summarize,
+                        # interpret_sentiment, classify_topics), never self-labeled "mock": that
+                        # wording was a backend implementation detail leaking into user-facing
+                        # copy wherever a NewsEvent's summary is displayed (e.g. the public
+                        # landing page's News Intelligence cards).
+                        summary=f"A {event_type.replace('_', ' ')} event was identified in this article.",
                         entities=entities,
                         confidence=confidence,
                     )

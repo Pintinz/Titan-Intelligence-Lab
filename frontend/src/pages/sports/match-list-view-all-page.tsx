@@ -51,6 +51,7 @@ export default function MatchListViewAllPage({ scope }: { scope: MatchesScope })
   const watchlist = useWatchlist()
   const [search, setSearch] = useState('')
   const [competitionId, setCompetitionId] = useState<string>('')
+  const [seasonId, setSeasonId] = useState<string>('')
   const [followingOnly, setFollowingOnly] = useState(false)
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE)
 
@@ -60,14 +61,21 @@ export default function MatchListViewAllPage({ scope }: { scope: MatchesScope })
     enabled: !!sport,
   })
 
+  const seasonsQuery = useQuery({
+    queryKey: ['sports', 'competitions', competitionId, 'seasons'],
+    queryFn: () => sportsApi.competitionSeasons(competitionId),
+    enabled: scope === 'completed' && !!competitionId,
+  })
+
   const baseOpts: FixtureQueryOpts = useMemo(
     () => ({
       ...dateOptsFor(scope),
       ...(scope === 'completed' ? { status: 'completed' as const } : {}),
       ...(competitionId ? { competition_id: competitionId } : {}),
+      ...(scope === 'completed' && seasonId ? { season_id: seasonId } : {}),
       ...(search.trim() ? { search: search.trim() } : {}),
     }),
-    [scope, competitionId, search],
+    [scope, competitionId, seasonId, search],
   )
 
   const query = useQuery({
@@ -75,6 +83,8 @@ export default function MatchListViewAllPage({ scope }: { scope: MatchesScope })
     queryFn: () => sportsApi.listFixturesPaged(sport!.code, { ...baseOpts, limit: visibleCount, offset: 0 }),
     enabled: !!sport,
   })
+
+  const seasons = seasonsQuery.data ?? []
 
   if (!sport) return null
 
@@ -117,6 +127,7 @@ export default function MatchListViewAllPage({ scope }: { scope: MatchesScope })
           value={competitionId}
           onChange={(e) => {
             setCompetitionId(e.target.value)
+            setSeasonId('')
             setVisibleCount(PAGE_SIZE)
           }}
           className="h-9 rounded-infinity-sm border border-infinity-border-default bg-infinity-ground-0 px-3 font-infinity-body text-[13px] text-infinity-text-primary focus:border-infinity-signal focus:outline-none focus:ring-1 focus:ring-infinity-signal"
@@ -128,6 +139,23 @@ export default function MatchListViewAllPage({ scope }: { scope: MatchesScope })
             </option>
           ))}
         </select>
+        {scope === 'completed' && competitionId && seasons.length > 0 && (
+          <select
+            value={seasonId}
+            onChange={(e) => {
+              setSeasonId(e.target.value)
+              setVisibleCount(PAGE_SIZE)
+            }}
+            className="h-9 rounded-infinity-sm border border-infinity-border-default bg-infinity-ground-0 px-3 font-infinity-body text-[13px] text-infinity-text-primary focus:border-infinity-signal focus:outline-none focus:ring-1 focus:ring-infinity-signal"
+          >
+            <option value="">Every season</option>
+            {seasons.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.label} season
+              </option>
+            ))}
+          </select>
+        )}
         <button
           type="button"
           onClick={() => setFollowingOnly((v) => !v)}
@@ -166,13 +194,14 @@ export default function MatchListViewAllPage({ scope }: { scope: MatchesScope })
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {items.map((fixture) => {
               const { homeScore, awayScore } = fixtureScores(fixture.final_state)
+              const status = fixtureCardStatus(fixture.status)
               return (
                 <InfinityMatchCard
                   key={fixture.id}
                   sport={domain}
                   competition={fixture.competition_name}
                   competitionLogoUrl={fixture.competition_logo_url}
-                  status={fixtureCardStatus(fixture.status)}
+                  status={status}
                   kickoff={new Date(fixture.scheduled_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
                   venue={fixture.venue_name}
                   homeTeam={fixture.home_team.name}
@@ -183,7 +212,7 @@ export default function MatchListViewAllPage({ scope }: { scope: MatchesScope })
                   awayLogoUrl={fixture.away_team.logo_url}
                   following={watchlist.isFollowing('fixture', fixture.id)}
                   onToggleFollow={() => watchlist.toggle('fixture', fixture.id)}
-                  href={`/app/${sport.slug}/matches/${fixture.id}`}
+                  href={status === 'completed' ? `/app/${sport.slug}/matches/${fixture.id}/review` : `/app/${sport.slug}/matches/${fixture.id}`}
                 />
               )
             })}

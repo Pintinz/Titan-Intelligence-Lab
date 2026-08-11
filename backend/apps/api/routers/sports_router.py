@@ -25,7 +25,7 @@ from apps.api.auth_deps import get_current_user
 from apps.api.composition import build_monitoring_service, get_session
 from modules.identity.domain.entities import User
 from modules.ingestion.domain.value_objects import SyncStatus
-from modules.sports.domain.entities import Competition, Fixture, Player, Season, Team
+from modules.sports.domain.entities import CoachingStaffMember, Competition, Fixture, Injury, Player, Season, Team, Transfer
 from modules.sports.domain.value_objects import (
     CompetitionId,
     FixtureId,
@@ -36,8 +36,10 @@ from modules.sports.domain.value_objects import (
     TeamId,
 )
 from modules.sports.infrastructure.persistence.repositories import (
+    SqlAlchemyCoachingStaffRepository,
     SqlAlchemyCompetitionRepository,
     SqlAlchemyFixtureRepository,
+    SqlAlchemyInjuryRepository,
     SqlAlchemyMatchRepository,
     SqlAlchemyPlayerRepository,
     SqlAlchemySeasonRepository,
@@ -45,6 +47,7 @@ from modules.sports.infrastructure.persistence.repositories import (
     SqlAlchemyStandingRepository,
     SqlAlchemyTeamRepository,
     SqlAlchemyTeamStatisticsRepository,
+    SqlAlchemyTransferRepository,
     SqlAlchemyVenueRepository,
 )
 
@@ -130,6 +133,15 @@ def _pick_current_season(seasons: list[Season]) -> Season | None:
     return max(seasons, key=lambda s: s.date_range.start)
 
 
+def _serialize_season(s: Season) -> dict:
+    return {
+        "id": str(s.id),
+        "label": s.label,
+        "start_date": s.date_range.start.isoformat() if s.date_range and s.date_range.start else None,
+        "status": s.status.value,
+    }
+
+
 def _serialize_competition(c: Competition) -> dict:
     return {
         "id": str(c.id),
@@ -166,6 +178,45 @@ def _serialize_player_summary(p: Player, team_name: str | None) -> dict:
     }
 
 
+def _serialize_injury(injury: Injury, player_name: str | None) -> dict:
+    return {
+        "id": str(injury.id),
+        "player_id": str(injury.player_id),
+        "player_name": player_name,
+        "status": injury.status,
+        "reason": injury.reason,
+        "reported_at": injury.reported_at.isoformat(),
+        "expected_return": injury.expected_return.isoformat() if injury.expected_return else None,
+    }
+
+
+def _serialize_transfer(
+    transfer: Transfer, player_name: str | None, from_team_name: str | None, to_team_name: str | None
+) -> dict:
+    return {
+        "id": str(transfer.id),
+        "player_id": str(transfer.player_id),
+        "player_name": player_name,
+        "from_team_id": str(transfer.from_team_id) if transfer.from_team_id else None,
+        "from_team_name": from_team_name,
+        "to_team_id": str(transfer.to_team_id) if transfer.to_team_id else None,
+        "to_team_name": to_team_name,
+        "effective_date": transfer.effective_date.isoformat(),
+        "transfer_type": transfer.transfer_type,
+    }
+
+
+def _serialize_coach(coach: CoachingStaffMember) -> dict:
+    return {
+        "id": str(coach.id),
+        "team_id": str(coach.team_id) if coach.team_id else None,
+        "person_name": coach.person_name,
+        "role": coach.role,
+        "valid_from": coach.valid_from.isoformat() if coach.valid_from else None,
+        "valid_to": coach.valid_to.isoformat() if coach.valid_to else None,
+    }
+
+
 async def _serialize_fixture(session: AsyncSession, fixture: Fixture, competition: Competition | None) -> dict:
     teams = SqlAlchemyTeamRepository(session=session)
     venues = SqlAlchemyVenueRepository(session=session)
@@ -196,6 +247,7 @@ async def _serialize_fixture(session: AsyncSession, fixture: Fixture, competitio
         "final_state": (
             {"home": home_score, "away": away_score} if home_score is not None or away_score is not None else None
         ),
+        "period_scores": fixture.period_scores,
     }
 
 
@@ -285,6 +337,22 @@ async def get_competition_fixtures(
     return envelope(data, meta={"count": len(data), "season_id": str(season.id)})
 
 
+@router.get("/competitions/{competition_id}/seasons")
+async def list_competition_seasons(
+    competition_id: str, session: AsyncSession = Depends(get_session), _user: User = Depends(get_current_user)
+):
+    """Every season TitanIQ has a record for under this competition, most recent first — lets a
+    caller (e.g. the Completed Matches browser) jump straight to a specific season's fixtures via
+    `list_sport_fixtures(season_id=...)` instead of paging through newer seasons first."""
+    cid = CompetitionId(_parse_uuid(competition_id, "competition_id"))
+    competition = await SqlAlchemyCompetitionRepository(session=session).get(cid)
+    if competition is None:
+        raise HTTPException(status_code=404, detail="competition not found")
+    seasons = await SqlAlchemySeasonRepository(session=session).list_by_competition(cid)
+    data = [_serialize_season(s) for s in sorted(seasons, key=lambda s: s.date_range.start, reverse=True)]
+    return envelope(data, meta={"count": len(data)})
+
+
 # -- Teams --------------------------------------------------------------------------------------
 
 
@@ -322,6 +390,61 @@ async def get_team_players(team_id: str, session: AsyncSession = Depends(get_ses
     return envelope(data, meta={"count": len(data)})
 
 
+@router.get("/teams/{team_id}/injuries")
+async def get_team_injuries(team_id: str, session: AsyncSession = Depends(get_session), _user: User = Depends(get_current_user)):
+    """Every player on this team's roster with a currently-reported injury — an empty list is
+    the honest, common case (most teams have no reported injuries at any given moment), never
+    an error. See ``Injury``'s own docstring for why no expected-return date is fabricated."""
+    tid = TeamId(_parse_uuid(team_id, "team_id"))
+    team = await SqlAlchemyTeamRepository(session=session).get(tid)
+    if team is None:
+        raise HTTPException(status_code=404, detail="team not found")
+    players_repo = SqlAlchemyPlayerRepository(session=session)
+    injuries = await SqlAlchemyInjuryRepository(session=session).list_current_by_team(tid)
+    data = []
+    for injury in injuries:
+        player = await players_repo.get(injury.player_id)
+        data.append(_serialize_injury(injury, player.name if player else None))
+    return envelope(data, meta={"count": len(data)})
+
+
+@router.get("/teams/{team_id}/transfers")
+async def get_team_transfers(team_id: str, session: AsyncSession = Depends(get_session), _user: User = Depends(get_current_user)):
+    """Confirmed transfers in and out of this team, most recent first — see ``Transfer``'s own
+    docstring for why there is no rumour/negotiating staging here."""
+    tid = TeamId(_parse_uuid(team_id, "team_id"))
+    team = await SqlAlchemyTeamRepository(session=session).get(tid)
+    if team is None:
+        raise HTTPException(status_code=404, detail="team not found")
+    players_repo = SqlAlchemyPlayerRepository(session=session)
+    teams_repo = SqlAlchemyTeamRepository(session=session)
+    transfers = await SqlAlchemyTransferRepository(session=session).list_by_team(tid)
+    data = []
+    for transfer in transfers:
+        player = await players_repo.get(transfer.player_id)
+        from_team = await teams_repo.get(transfer.from_team_id) if transfer.from_team_id else None
+        to_team = await teams_repo.get(transfer.to_team_id) if transfer.to_team_id else None
+        data.append(_serialize_transfer(
+            transfer, player.name if player else None,
+            from_team.name if from_team else None, to_team.name if to_team else None,
+        ))
+    return envelope(data, meta={"count": len(data)})
+
+
+@router.get("/teams/{team_id}/coaching-staff")
+async def get_team_coaching_staff(team_id: str, session: AsyncSession = Depends(get_session), _user: User = Depends(get_current_user)):
+    """Current head coach/manager plus full history, most recent first — a closed-out
+    (``valid_to`` set) predecessor is never overwritten, only superseded by a new row."""
+    tid = TeamId(_parse_uuid(team_id, "team_id"))
+    team = await SqlAlchemyTeamRepository(session=session).get(tid)
+    if team is None:
+        raise HTTPException(status_code=404, detail="team not found")
+    staff = await SqlAlchemyCoachingStaffRepository(session=session).list_by_team(tid)
+    data = [_serialize_coach(s) for s in staff]
+    current = next((s for s in staff if s.valid_to is None), None)
+    return envelope(data, meta={"count": len(data), "current_coach_id": str(current.id) if current else None})
+
+
 @router.get("/teams/{team_id}/fixtures")
 async def get_team_fixtures(
     team_id: str,
@@ -351,15 +474,19 @@ async def get_team_fixtures(
     return envelope(data, meta={"count": len(data)})
 
 
-_TEAM_STATISTIC_KEYS = (
-    "possession_pct",
-    "shots_total",
-    "shots_on_target",
-    "corners",
-    "fouls",
-    "cards_yellow",
-    "cards_red",
-)
+# Per-sport `TeamStatistics.stat_set` key vocabularies — each adapter (api_sports_adapter.py)
+# persists a different shape, so this endpoint can't average one fixed key set across sports
+# (audit fix 2026-08-10: this previously silently ignored every basketball/baseball key).
+_TEAM_STATISTIC_KEYS_BY_SPORT: dict[str, tuple[str, ...]] = {
+    "football": ("possession_pct", "shots_total", "shots_on_target", "corners", "fouls", "cards_yellow", "cards_red"),
+    "basketball": (
+        "points", "field_goals_made", "field_goals_attempted", "three_pointers_made", "three_pointers_attempted",
+        "free_throws_made", "free_throws_attempted", "rebounds_total", "rebounds_offensive", "rebounds_defensive",
+        "assists", "steals", "blocks", "turnovers", "personal_fouls",
+    ),
+    "baseball": ("runs", "hits", "errors"),
+}
+_DEFAULT_TEAM_STATISTIC_KEYS = _TEAM_STATISTIC_KEYS_BY_SPORT["football"]
 
 
 @router.get("/teams/{team_id}/statistics")
@@ -370,28 +497,32 @@ async def get_team_statistics(
     _user: User = Depends(get_current_user),
 ):
     """Averages real per-match `TeamStatistics.stat_set` rows (`list_recent_by_team`, already
-    populated by the API-Football stat sync — see composition.py) over the team's most recent
+    populated by each sport's stat sync — see composition.py) over the team's most recent
     matches. Never fabricated: a key with zero recorded samples across the window comes back
     `null`, and `sample_size` always reports how many matches actually had *any* stats recorded,
-    so the frontend can show honest coverage instead of implying a full-season average."""
+    so the frontend can show honest coverage instead of implying a full-season average. Which
+    keys get averaged is sport-aware (`_TEAM_STATISTIC_KEYS_BY_SPORT`), since basketball/baseball
+    `stat_set` rows use entirely different field names than football's."""
     tid = TeamId(_parse_uuid(team_id, "team_id"))
     team = await SqlAlchemyTeamRepository(session=session).get(tid)
     if team is None:
         raise HTTPException(status_code=404, detail="team not found")
+    sport = await SqlAlchemySportRepository(session=session).get(team.sport_id)
+    stat_keys = _TEAM_STATISTIC_KEYS_BY_SPORT.get(sport.code.value if sport else "", _DEFAULT_TEAM_STATISTIC_KEYS)
 
     rows = await SqlAlchemyTeamStatisticsRepository(session=session).list_recent_by_team(tid, _now(), limit=limit)
 
-    sums: dict[str, float] = {key: 0.0 for key in _TEAM_STATISTIC_KEYS}
-    counts: dict[str, int] = {key: 0 for key in _TEAM_STATISTIC_KEYS}
+    sums: dict[str, float] = {key: 0.0 for key in stat_keys}
+    counts: dict[str, int] = {key: 0 for key in stat_keys}
     for row in rows:
-        for key in _TEAM_STATISTIC_KEYS:
+        for key in stat_keys:
             value = row.stat_set.get(key)
             if value is None:
                 continue
             sums[key] += float(value)
             counts[key] += 1
 
-    averages = {key: (sums[key] / counts[key] if counts[key] > 0 else None) for key in _TEAM_STATISTIC_KEYS}
+    averages = {key: (sums[key] / counts[key] if counts[key] > 0 else None) for key in stat_keys}
     return envelope({"sample_size": len(rows), **averages})
 
 
@@ -424,6 +555,35 @@ async def get_player(player_id: str, session: AsyncSession = Depends(get_session
     team = await SqlAlchemyTeamRepository(session=session).get(player.team_id) if player.team_id else None
     sport = await SqlAlchemySportRepository(session=session).get(player.sport_id)
     return envelope({**_serialize_player_summary(player, team.name if team else None), "sport_code": sport.code.value if sport else None})
+
+
+@router.get("/players/{player_id}/injuries")
+async def get_player_injuries(player_id: str, session: AsyncSession = Depends(get_session), _user: User = Depends(get_current_user)):
+    pid = PlayerId(_parse_uuid(player_id, "player_id"))
+    player = await SqlAlchemyPlayerRepository(session=session).get(pid)
+    if player is None:
+        raise HTTPException(status_code=404, detail="player not found")
+    injuries = await SqlAlchemyInjuryRepository(session=session).list_by_player(pid)
+    data = [_serialize_injury(injury, player.name) for injury in injuries]
+    return envelope(data, meta={"count": len(data)})
+
+
+@router.get("/players/{player_id}/transfers")
+async def get_player_transfers(player_id: str, session: AsyncSession = Depends(get_session), _user: User = Depends(get_current_user)):
+    pid = PlayerId(_parse_uuid(player_id, "player_id"))
+    player = await SqlAlchemyPlayerRepository(session=session).get(pid)
+    if player is None:
+        raise HTTPException(status_code=404, detail="player not found")
+    teams_repo = SqlAlchemyTeamRepository(session=session)
+    transfers = await SqlAlchemyTransferRepository(session=session).list_by_player(pid)
+    data = []
+    for transfer in transfers:
+        from_team = await teams_repo.get(transfer.from_team_id) if transfer.from_team_id else None
+        to_team = await teams_repo.get(transfer.to_team_id) if transfer.to_team_id else None
+        data.append(_serialize_transfer(
+            transfer, player.name, from_team.name if from_team else None, to_team.name if to_team else None,
+        ))
+    return envelope(data, meta={"count": len(data)})
 
 
 # -- Fixtures (cross-competition browse + single lookup) ----------------------------------------
@@ -463,6 +623,7 @@ async def get_fixture_statistics(
 async def list_sport_fixtures(
     sport_code: str,
     competition_id: str | None = Query(default=None),
+    season_id: str | None = Query(default=None, description="Restrict to one season, e.g. picked from list_competition_seasons"),
     status: str | None = Query(default=None, description="scheduled | live | completed | postponed | cancelled"),
     date_from: str | None = Query(default=None, description="Inclusive, YYYY-MM-DD"),
     date_to: str | None = Query(default=None, description="Inclusive, YYYY-MM-DD"),
@@ -501,6 +662,10 @@ async def list_sport_fixtures(
         for season in seasons:
             fixtures = await fixtures_repo.list_by_season(season.id)
             all_fixtures.extend((f, competition) for f in fixtures)
+
+    if season_id is not None:
+        parsed_season_id = _parse_uuid(season_id, "season_id")
+        all_fixtures = [(f, c) for f, c in all_fixtures if f.season_id.value == parsed_season_id]
 
     parsed_status = _parse_fixture_status(status) if status is not None else None
     if parsed_status is not None:

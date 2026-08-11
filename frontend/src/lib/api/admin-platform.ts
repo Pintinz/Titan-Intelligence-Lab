@@ -166,6 +166,17 @@ export const adminPlatformApi = {
   ) => api.post<Record<string, unknown> | null>(`/api/v1/admin/sync/${sportCode}/standings/${competitionRef}/${seasonLabel}`, input),
   triggerSyncStatistics: (sportCode: string, fixtureId: string, force = false) =>
     api.post<Record<string, unknown> | null>(`/api/v1/admin/sync/${sportCode}/statistics/${fixtureId}`, { force }),
+  triggerSyncLineups: (sportCode: string, fixtureId: string, force = false) =>
+    api.post<Record<string, unknown> | null>(`/api/v1/admin/sync/${sportCode}/lineups/${fixtureId}`, { force }),
+  triggerSyncInjuries: (sportCode: string, teamId: string, opts: { force?: boolean; seasonLabel?: string } = {}) =>
+    api.post<Record<string, unknown> | null>(`/api/v1/admin/sync/${sportCode}/injuries/${teamId}`, {
+      force: opts.force ?? false,
+      season_label: opts.seasonLabel ?? null,
+    }),
+  triggerSyncTransfers: (sportCode: string, teamId: string, force = false) =>
+    api.post<Record<string, unknown> | null>(`/api/v1/admin/sync/${sportCode}/transfers/${teamId}`, { force }),
+  triggerSyncCoachingStaff: (sportCode: string, teamId: string, force = false) =>
+    api.post<Record<string, unknown> | null>(`/api/v1/admin/sync/${sportCode}/coaching-staff/${teamId}`, { force }),
   syncStatus: (opts: { sport_code?: string; entity_kind?: string; limit?: number } = {}) =>
     api.get<unknown[]>('/api/v1/admin/sync/status', opts),
   syncStats: (opts: { sport_code?: string; entity_kind?: string; limit?: number } = {}) =>

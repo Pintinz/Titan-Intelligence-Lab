@@ -11,7 +11,11 @@ infrastructure live as of Milestone 6 (see [supabase.md](supabase.md), [rls.md](
   the production credential store; FastAPI never stores or verifies passwords for real users.
   A parallel bcrypt-based path (`IdentityService.register`/`authenticate`) exists purely for the
   fast offline test suite and non-Supabase dev — see [authentication.md](authentication.md) and
-  docs/decisions.md ADR-025 for the full rationale.
+  docs/decisions.md ADR-025 for the full rationale. As of the Enterprise Security & Compliance
+  milestone (2026-08), `/auth/register` and `/auth/login` are gated behind
+  `TITANIQ_ENABLE_OFFLINE_AUTH` (default **off**) — this path has no email-verification
+  enforcement, so a production deployment must explicitly opt in rather than have it silently
+  reachable (`apps/api/routers/identity_router.py`).
 - **AuthZ**: An 8-level RBAC ladder (Guest → Free → Rewarded → Premium → Moderator → Analyst →
   Administrator → Super Administrator, `modules.identity.domain.value_objects.Role`) checked at
   the API layer via `apps.api.auth_deps.require_role`, *and* enforced independently at the
@@ -46,13 +50,35 @@ only (SQLAlchemy ORM/Core — no raw string interpolation into SQL) · XSS prote
 default escaping preserved, no unaudited `dangerouslySetInnerHTML`) · rate limiting per user
 tier (see [api_specification.md](api_specification.md) §4).
 
+- **Rate limiting**: `apps/api/rate_limit.py`, fixed-window counters backed by the same Redis
+  instance the feature store already requires (no new dependency). `/auth/register` (5/hour by
+  IP), `/auth/login` (10/min by IP), `/predictions/generate` (30/min by authenticated user). Fails
+  open on a Redis outage rather than blocking real traffic on a cache being down.
+- **Response headers**: `apps/api/main.py`'s `security_headers` middleware sets
+  `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+  `Referrer-Policy: strict-origin-when-cross-origin`, `Strict-Transport-Security`, and a strict
+  `Content-Security-Policy: default-src 'none'` on every response except FastAPI's own
+  `/docs`/`/redoc` pages (which need their CDN-hosted Swagger UI assets to render).
+- **Personal Access Token scopes**: `PersonalAccessToken.has_scope` is now actually enforced
+  (`apps.api.auth_deps.require_scope`) rather than declared-but-unchecked — a token's scope only
+  restricts the PAT/API-automation path; a Supabase-JWT-authenticated request is never
+  scope-limited. Self-service tokens created via `POST /users/me/tokens` now always carry an
+  expiry (default 90 days, caller-adjustable up to a 365-day cap) instead of living forever.
+
 ## 4. Auditability & Monitoring
 
 Immutable, append-only audit trail (`identity.audit_log_entries` — no repository update/delete
 method exists for it by design) records every identity/tenancy/billing security-relevant
 action: registration, login success/failure, role changes, account lock/unlock, session
-revocation, PAT creation/revocation, org/membership changes, subscription changes. Distinct from
-`ingestion.timeline_events` (M5), which audits data-sync activity, not security actions.
+revocation, PAT creation/revocation, org/membership changes, subscription changes, and — as of
+the Enterprise Security & Compliance milestone — **permission denials**
+(`AuditAction.PERMISSION_DENIED`, emitted by `apps.api.auth_deps.require_role` whenever a
+caller's role is below what a route requires; the audit write is committed independently of the
+request's own transaction so it survives the 403 that follows it). Distinct from
+`ingestion.timeline_events` (M5), which audits data-sync activity, not security actions. Coverage
+is not yet fully unified across every subsystem (`predictions.prediction_audits` remains a
+separate, structurally-incompatible free-text-actor table; no API endpoint yet exposes the raw
+identity audit trail itself) — tracked as a follow-up, not fabricated as done.
 
 Session Intelligence (`identity.sessions` — device/browser/IP tracking, concurrent-session
 listing, heuristic new-IP risk scoring) and Security Intelligence (`identity.security_events`,
@@ -99,3 +125,17 @@ dashboard configuration (Google/GitHub live, Apple/Microsoft interface-ready) re
 step — see [deployment.md](deployment.md) §Auth Provider Setup. Formal security review +
 backup/DR drill: Milestone 20 gate, and before any milestone that first exposes real payment
 data.
+
+## 9. Enterprise Security & Compliance Milestone (2026-08)
+
+A grounded architecture audit against the real codebase (not assumed from this document) found
+several CRITICAL/HIGH findings that this narrative predated — full findings, attack scenarios,
+and remediation status: [docs/security/phase1-audit-report.md](security/phase1-audit-report.md).
+Remediated this pass: unrestricted self-service billing subscribe (C-1), role self/over-escalation
+(C-2), missing admin gating on market/prediction mutation endpoints (C-3), PAT/session
+revocation IDOR (H-1/H-2), rate limiting (H-3), offline-auth production gate (H-4), PAT scope
+enforcement + default expiry (H-6/H-8), webhook org-membership IDOR (H-7), registration email
+enumeration (M-4), permission-denial audit trail (M-2), tenancy member-list IDOR (M-8), login
+IP/user-agent capture (M-7), security response headers (M-1), and RLS coverage for
+watchlist/alerts (M-6). See [SECURITY_CHECKLIST.md](../SECURITY_CHECKLIST.md) for the itemized
+status of every finding, including what remains open and why.

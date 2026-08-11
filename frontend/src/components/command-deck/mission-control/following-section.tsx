@@ -99,8 +99,9 @@ function TileShell({ kind, sportSlug, href, children }: { kind: keyof typeof TYP
 function FollowedFixtureTile({ fixture }: { fixture: FixtureSummaryDto }) {
   const sportSlug = (fixture.sport_code ?? 'football').replace('_', '-')
   const status = fixtureCardStatus(fixture.status)
+  const href = status === 'completed' ? `/app/${sportSlug}/matches/${fixture.id}/review` : `/app/${sportSlug}/matches/${fixture.id}`
   return (
-    <TileShell kind="fixture" sportSlug={sportSlug} href={`/app/${sportSlug}/matches/${fixture.id}`}>
+    <TileShell kind="fixture" sportSlug={sportSlug} href={href}>
       <p className="truncate font-[var(--cd-font-body)] text-[13px] font-medium" style={{ color: 'var(--cd-text-primary)' }}>
         {fixture.home_team?.name ?? 'TBD'} vs {fixture.away_team?.name ?? 'TBD'}
       </p>

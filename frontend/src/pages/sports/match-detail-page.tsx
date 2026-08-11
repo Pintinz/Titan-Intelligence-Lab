@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useMutation, useQueries, useQuery } from '@tanstack/react-query'
-import { ArrowLeft, Radio } from 'lucide-react'
+import { ArrowLeft, HeartPulse, Radio } from 'lucide-react'
 import { sportsApi } from '@/lib/api/sports'
 import { marketsApi } from '@/lib/api/markets'
 import { predictionsApi } from '@/lib/api/predictions'
@@ -18,7 +18,7 @@ import { AIMatchSnapshot } from '@/components/command-deck/ai-snapshot'
 import { PredictionLaboratory } from '@/components/command-deck/prediction-laboratory'
 import { GeneratedIntelligencePanel } from '@/components/command-deck/generated-intelligence'
 import { MatchSnapshotCard } from '@/components/command-deck/match-snapshot-card'
-import type { FixtureSummaryDto } from '@/lib/api/types'
+import type { FixtureSummaryDto, InjuryDto } from '@/lib/api/types'
 
 function isLiveStatus(status: string) {
   return status.toLowerCase() === 'live' || status.toLowerCase() === 'in_play'
@@ -75,6 +75,16 @@ export default function MatchDetailPage() {
   const awayFixturesQuery = useQuery({
     queryKey: ['sports', 'team-fixtures', fixture?.away_team.id],
     queryFn: () => sportsApi.teamFixtures(fixture!.away_team.id, 5),
+    enabled: !!fixture,
+  })
+  const homeInjuriesQuery = useQuery({
+    queryKey: ['sports', 'team', fixture?.home_team.id, 'injuries'],
+    queryFn: () => sportsApi.teamInjuries(fixture!.home_team.id),
+    enabled: !!fixture,
+  })
+  const awayInjuriesQuery = useQuery({
+    queryKey: ['sports', 'team', fixture?.away_team.id, 'injuries'],
+    queryFn: () => sportsApi.teamInjuries(fixture!.away_team.id),
     enabled: !!fixture,
   })
 
@@ -242,7 +252,46 @@ export default function MatchDetailPage() {
             />
           </div>
         </div>
+
+        {/* Team news (injuries) — both sides, real reported status only */}
+        <div className="command-deck">
+          <div className="mb-4 flex items-center gap-2">
+            <HeartPulse className="size-4" style={{ color: 'var(--cd-text-muted)' }} aria-hidden="true" />
+            <p className="font-[var(--cd-font-display)] text-[16px] font-semibold" style={{ color: 'var(--cd-text-primary)' }}>Team news</p>
+          </div>
+          <div className="grid gap-6 lg:grid-cols-2">
+            <TeamNewsColumn teamName={fixture.home_team.name} query={homeInjuriesQuery} />
+            <TeamNewsColumn teamName={fixture.away_team.name} query={awayInjuriesQuery} />
+          </div>
+        </div>
       </div>
+    </div>
+  )
+}
+
+function TeamNewsColumn({ teamName, query }: { teamName: string; query: { isPending: boolean; data: InjuryDto[] | undefined } }) {
+  const injuries = query.data ?? []
+  return (
+    <div className="rounded-[var(--cd-radius-lg)] border p-4" style={{ borderColor: 'var(--cd-border-hairline)', backgroundColor: 'var(--cd-surface-1)' }}>
+      <p className="mb-3 font-[var(--cd-font-telemetry)] text-[10.5px] font-semibold uppercase tracking-[0.06em]" style={{ color: 'var(--cd-text-muted)' }}>
+        {teamName}
+      </p>
+      {query.isPending && <InfinitySkeleton className="h-12" />}
+      {!query.isPending && injuries.length === 0 && (
+        <p className="font-[var(--cd-font-body)] text-[13px]" style={{ color: 'var(--cd-text-secondary)' }}>
+          No reported injuries.
+        </p>
+      )}
+      {!query.isPending && injuries.length > 0 && (
+        <ul className="space-y-1.5">
+          {injuries.slice(0, 6).map((injury) => (
+            <li key={injury.id} className="flex items-center justify-between gap-2 font-[var(--cd-font-body)] text-[13px]" style={{ color: 'var(--cd-text-secondary)' }}>
+              <span>{injury.player_name ?? 'Unknown player'}</span>
+              <span style={{ color: 'var(--cd-danger)' }}>{injury.reason ?? injury.status}</span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }

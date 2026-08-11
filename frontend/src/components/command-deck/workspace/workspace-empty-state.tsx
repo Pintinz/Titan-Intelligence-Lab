@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { CalendarSearch, Users, Trophy, Sparkles, Waypoints, ArrowUp } from 'lucide-react'
 import { CD_DOMAIN_COLOR_VAR } from '../primitives/domain'
@@ -18,19 +19,24 @@ const QUICK_LINKS = [
  *
  * The composer-styled search box here is the same `query`/`onQueryChange` state the Hero's search
  * owns — a second entry point into real search, not a decorative or inert echo of the composer.
- * Quick links are real existing routes (Live/Teams/Competitions/AI Picks/the standalone Knowledge
- * Graph explorer), never fabricated destinations.
+ * `searchResults` is that same search's results/"No matches" panel, rendered right under this box
+ * — the results used to only render up near the Hero's own (often scrolled-out-of-view) search
+ * bar, so typing here looked like it did nothing even though a real search ran and returned real
+ * (or zero) matches. Quick links are real existing routes (Live/Teams/Competitions/AI Picks/the
+ * standalone Knowledge Graph explorer), never fabricated destinations.
  */
 export function WorkspaceEmptyState({
   query,
   onQueryChange,
   onRestoreSession,
   hasSavedSession,
+  searchResults,
 }: {
   query: string
   onQueryChange: (value: string) => void
   onRestoreSession: () => void
   hasSavedSession: boolean
+  searchResults?: ReactNode
 }) {
   return (
     <div className="flex flex-col items-center gap-6 rounded-[var(--cd-radius-2xl)] border px-6 py-14 text-center" style={{ borderColor: 'var(--cd-border-default)', backgroundColor: 'var(--cd-surface-1)' }}>
@@ -79,6 +85,8 @@ export function WorkspaceEmptyState({
           </span>
         </div>
       </div>
+
+      {searchResults && <div className="w-full max-w-md text-left">{searchResults}</div>}
 
       <div className="flex flex-wrap items-center justify-center gap-2">
         {QUICK_LINKS.map((link) => (

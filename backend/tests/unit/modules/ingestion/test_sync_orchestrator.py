@@ -35,9 +35,11 @@ from modules.sports.domain.entities import Team
 from modules.sports.domain.value_objects import FixtureId, ProviderRef, SeasonId, SportCode, TeamId
 from modules.sports.infrastructure.persistence.models import Base as SportsBase
 from modules.sports.infrastructure.persistence.repositories import (
+    SqlAlchemyCoachingStaffRepository,
     SqlAlchemyCompetitionRepository,
     SqlAlchemyCountryRepository,
     SqlAlchemyFixtureRepository,
+    SqlAlchemyInjuryRepository,
     SqlAlchemyMatchRepository,
     SqlAlchemyLineupRepository,
     SqlAlchemyPlayerRepository,
@@ -46,16 +48,22 @@ from modules.sports.infrastructure.persistence.repositories import (
     SqlAlchemyStandingRepository,
     SqlAlchemyTeamRepository,
     SqlAlchemyTeamStatisticsRepository,
+    SqlAlchemyTransferRepository,
     SqlAlchemyVenueRepository,
 )
 from modules.sports.ports.provider_gateway import (
+    ProviderCoachRecord,
     ProviderCountryRecord,
     ProviderFixtureRecord,
+    ProviderInjuryRecord,
+    ProviderLineupRecord,
+    ProviderLineupSlotRecord,
     ProviderOddsRecord,
     ProviderPlayerRecord,
     ProviderStandingRecord,
     ProviderTeamRecord,
     ProviderTeamStatisticsRecord,
+    ProviderTransferRecord,
 )
 
 T0 = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
@@ -77,6 +85,10 @@ class FakeRouter:
     completed_fixtures_to_return: list = field(default_factory=list)
     standings_alt_calls: list = field(default_factory=list)
     standings_alt_to_return: list = field(default_factory=list)
+    lineups_to_return: list = field(default_factory=list)
+    injuries_to_return: list = field(default_factory=list)
+    transfers_to_return: list = field(default_factory=list)
+    coach_to_return: object = None
     raise_on_fetch: Exception | None = None
 
     async def fetch_teams(self, sport_code, competition_ref, now, *, low_priority=False, season_label=None):
@@ -132,6 +144,26 @@ class FakeRouter:
         if self.raise_on_fetch:
             raise self.raise_on_fetch
         return self.standings_alt_to_return
+
+    async def fetch_lineups(self, sport_code, fixture_ref, now, *, low_priority=True):
+        if self.raise_on_fetch:
+            raise self.raise_on_fetch
+        return self.lineups_to_return
+
+    async def fetch_injuries(self, sport_code, team_ref, now, *, low_priority=True, season_label=None):
+        if self.raise_on_fetch:
+            raise self.raise_on_fetch
+        return self.injuries_to_return
+
+    async def fetch_transfers(self, sport_code, team_ref, now, *, low_priority=True):
+        if self.raise_on_fetch:
+            raise self.raise_on_fetch
+        return self.transfers_to_return
+
+    async def fetch_coach(self, sport_code, team_ref, now, *, low_priority=True):
+        if self.raise_on_fetch:
+            raise self.raise_on_fetch
+        return self.coach_to_return
 
 
 @dataclass
@@ -208,6 +240,9 @@ def orchestrator_with_odds_writer(session, router, lock, odds_writer):
         team_statistics=SqlAlchemyTeamStatisticsRepository(session=session),
         lineups=SqlAlchemyLineupRepository(session=session),
         standings=SqlAlchemyStandingRepository(session=session),
+        injuries=SqlAlchemyInjuryRepository(session=session),
+        transfers=SqlAlchemyTransferRepository(session=session),
+        coaching_staff=SqlAlchemyCoachingStaffRepository(session=session),
         ref_index=SqlAlchemyProviderRefIndexRepository(session=session),
         kg=kg,
         timeline=SqlAlchemyTimelineEventRepository(session=session),
@@ -247,6 +282,9 @@ def orchestrator(session, router, lock):
         team_statistics=SqlAlchemyTeamStatisticsRepository(session=session),
         lineups=SqlAlchemyLineupRepository(session=session),
         standings=SqlAlchemyStandingRepository(session=session),
+        injuries=SqlAlchemyInjuryRepository(session=session),
+        transfers=SqlAlchemyTransferRepository(session=session),
+        coaching_staff=SqlAlchemyCoachingStaffRepository(session=session),
         ref_index=SqlAlchemyProviderRefIndexRepository(session=session),
         kg=kg,
         timeline=SqlAlchemyTimelineEventRepository(session=session),
@@ -308,6 +346,9 @@ def orchestrator_with_fixture_source(session, router, lock, fixture_source_prefe
         team_statistics=SqlAlchemyTeamStatisticsRepository(session=session),
         lineups=SqlAlchemyLineupRepository(session=session),
         standings=SqlAlchemyStandingRepository(session=session),
+        injuries=SqlAlchemyInjuryRepository(session=session),
+        transfers=SqlAlchemyTransferRepository(session=session),
+        coaching_staff=SqlAlchemyCoachingStaffRepository(session=session),
         ref_index=SqlAlchemyProviderRefIndexRepository(session=session),
         kg=kg,
         timeline=SqlAlchemyTimelineEventRepository(session=session),
@@ -997,3 +1038,131 @@ async def test_sync_players_re_run_updates_existing_roster_instead_of_duplicatin
     assert run.records_updated == 1
     players = await orchestrator.reconciler.players.list_by_sport(team.sport_id, limit=10)
     assert len(players) == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_lineups_creates_match_and_lineup(orchestrator, session, router):
+    team = await _seed_team(orchestrator, session)
+    fixture_ref = ProviderRef("mock", "fx-lineup")
+    router.players_to_return = [
+        ProviderPlayerRecord(external_ref=ProviderRef("mock", "p1"), team_ref=ProviderRef("mock", "t1"), name="Bruno Fernandes", date_of_birth=None, position="Midfielder"),
+    ]
+    await orchestrator.sync_players("football", ProviderRef("mock", "t1"), T0)
+    await session.commit()
+
+    router.lineups_to_return = [
+        ProviderLineupRecord(
+            fixture_ref=fixture_ref, team_ref=ProviderRef("mock", "t1"), formation="4-3-3",
+            slots=(ProviderLineupSlotRecord(player_ref=ProviderRef("mock", "p1"), role="starter", position="MF", shirt_number=8),),
+        ),
+    ]
+
+    fixture_id = str(uuid4())
+    run = await orchestrator.sync_lineups("football", fixture_ref, fixture_id, T0)
+    await session.commit()
+
+    assert run.status is SyncStatus.SUCCEEDED
+    assert run.records_created == 1
+    match = await orchestrator.reconciler.matches.get_by_fixture(FixtureId(uuid.UUID(fixture_id)))
+    lineup = await orchestrator.reconciler.lineups.get_for_match_team(match.id, team.id)
+    assert lineup is not None
+    assert lineup.formation == "4-3-3"
+    assert len(lineup.slots) == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_lineups_rejects_empty_record(orchestrator, session, router):
+    await _seed_team(orchestrator, session)
+    fixture_ref = ProviderRef("mock", "fx-lineup-empty")
+    router.lineups_to_return = [
+        ProviderLineupRecord(fixture_ref=fixture_ref, team_ref=ProviderRef("mock", "t1"), formation=None, slots=()),
+    ]
+
+    run = await orchestrator.sync_lineups("football", fixture_ref, str(uuid4()), T0)
+
+    assert run.status is SyncStatus.PARTIAL
+    assert run.records_rejected == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_injuries_requires_reconciled_team(orchestrator, router):
+    """Squad-intelligence syncs reject a record whose team hasn't been reconciled yet, same
+    "relationship" rejection posture as sync_team_statistics_for_fixture."""
+    team_ref = ProviderRef("mock", "unknown-team")
+    router.injuries_to_return = [
+        ProviderInjuryRecord(player_ref=ProviderRef("mock", "p1"), team_ref=team_ref, status="Missing Fixture", reason="Hamstring"),
+    ]
+
+    run = await orchestrator.sync_injuries("football", team_ref, T0)
+
+    assert run.status is SyncStatus.PARTIAL
+    assert run.records_rejected == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_injuries_creates_real_records(orchestrator, session, router):
+    await _seed_team(orchestrator, session)
+    team_ref = ProviderRef("mock", "t1")
+    router.players_to_return = [
+        ProviderPlayerRecord(external_ref=ProviderRef("mock", "p1"), team_ref=team_ref, name="Bruno Fernandes", date_of_birth=None, position="Midfielder"),
+    ]
+    await orchestrator.sync_players("football", team_ref, T0)
+    await session.commit()
+
+    router.injuries_to_return = [
+        ProviderInjuryRecord(player_ref=ProviderRef("mock", "p1"), team_ref=team_ref, status="Missing Fixture", reason="Hamstring"),
+    ]
+    run = await orchestrator.sync_injuries("football", team_ref, T0)
+    await session.commit()
+
+    assert run.status is SyncStatus.SUCCEEDED
+    assert run.records_created == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_transfers_creates_real_records(orchestrator, session, router):
+    await _seed_team(orchestrator, session)
+    team_ref = ProviderRef("mock", "t1")
+    router.players_to_return = [
+        ProviderPlayerRecord(external_ref=ProviderRef("mock", "p1"), team_ref=team_ref, name="Bruno Fernandes", date_of_birth=None, position="Midfielder"),
+    ]
+    await orchestrator.sync_players("football", team_ref, T0)
+    await session.commit()
+
+    router.transfers_to_return = [
+        ProviderTransferRecord(
+            player_ref=ProviderRef("mock", "p1"), from_team_ref=None, to_team_ref=team_ref,
+            effective_date=T0, transfer_type="Free",
+        ),
+    ]
+    run = await orchestrator.sync_transfers("football", team_ref, T0)
+    await session.commit()
+
+    assert run.status is SyncStatus.SUCCEEDED
+    assert run.records_created == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_coaching_staff_creates_real_record(orchestrator, session, router):
+    await _seed_team(orchestrator, session)
+    team_ref = ProviderRef("mock", "t1")
+    router.coach_to_return = ProviderCoachRecord(team_ref=team_ref, person_name="Mikel Arteta")
+
+    run = await orchestrator.sync_coaching_staff("football", team_ref, T0)
+    await session.commit()
+
+    assert run.status is SyncStatus.SUCCEEDED
+    assert run.records_fetched == 1
+    assert run.records_created == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_coaching_staff_honest_zero_when_provider_has_no_record(orchestrator, session, router):
+    await _seed_team(orchestrator, session)
+    team_ref = ProviderRef("mock", "t1")
+    router.coach_to_return = None
+
+    run = await orchestrator.sync_coaching_staff("football", team_ref, T0)
+
+    assert run.status is SyncStatus.SUCCEEDED
+    assert run.records_fetched == 0

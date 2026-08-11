@@ -289,7 +289,13 @@ def basketball_adapter():
             return _json_response({"response": [{"id": 1, "name": "Hawks", "country": {"name": "USA"}}]})
         if path == "/games":
             return _json_response({
-                "response": [{"id": 200, "date": "2026-08-01T20:00:00+00:00", "teams": {"home": {"id": 1}, "away": {"id": 2}}}]
+                "response": [{
+                    "id": 200, "date": "2026-08-01T20:00:00+00:00", "teams": {"home": {"id": 1}, "away": {"id": 2}},
+                    "scores": {
+                        "home": {"quarter_1": 28, "quarter_2": 17, "quarter_3": 20, "quarter_4": 21, "over_time": None, "total": 86},
+                        "away": {"quarter_1": 36, "quarter_2": 32, "quarter_3": 28, "quarter_4": 27, "over_time": None, "total": 123},
+                    },
+                }]
             })
         if path == "/players":
             return _json_response({"response": [{"id": 10, "name": "Jordan Reyes", "position": "guard", "birth": {"date": "1997-03-01"}}]})
@@ -298,10 +304,40 @@ def basketball_adapter():
                 "response": [{"team": {"id": 1}, "position": 1, "games": {"win": {"total": 40}, "lose": {"total": 10}}}]
             })
         if path == "/games/statistics/teams":
+            # Real shape verified live against v1.basketball.api-sports.io (2026-08-10): flat
+            # per-team entries, no "statistics" wrapper, no raw "points" field.
             return _json_response({
-                "response": [{"team": {"id": 1}, "statistics": [{"points": 102, "field_goals_made": 38, "field_goals_attempted": 80, "rebounds": 45, "turnovers": 12}]}]
+                "response": [
+                    {
+                        "game": {"id": 200}, "team": {"id": 1},
+                        "field_goals": {"total": 42, "attempts": 95, "percentage": 44},
+                        "threepoint_goals": {"total": 11, "attempts": 35, "percentage": 31},
+                        "freethrows_goals": {"total": 16, "attempts": 22, "percentage": 72},
+                        "rebounds": {"total": 56, "offence": 11, "defense": 45},
+                        "assists": 28, "steals": 7, "blocks": 12, "turnovers": 16, "personal_fouls": 20,
+                    }
+                ]
             })
         raise AssertionError(f"unexpected path {path}")
+
+    return ApiBasketballAdapter(get_api_key=_get_key, client=_client_for(handler))
+
+
+@pytest.fixture
+def basketball_adapter_scheduled():
+    """A not-yet-tipped-off fixture — provider reports the same score keys, all null."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/games":
+            return _json_response({
+                "response": [{
+                    "id": 201, "date": "2026-08-05T20:00:00+00:00", "teams": {"home": {"id": 1}, "away": {"id": 2}},
+                    "scores": {
+                        "home": {"quarter_1": None, "quarter_2": None, "quarter_3": None, "quarter_4": None, "over_time": None, "total": None},
+                        "away": {"quarter_1": None, "quarter_2": None, "quarter_3": None, "quarter_4": None, "over_time": None, "total": None},
+                    },
+                }]
+            })
+        raise AssertionError(f"unexpected path {request.url.path}")
 
     return ApiBasketballAdapter(get_api_key=_get_key, client=_client_for(handler))
 
@@ -319,6 +355,18 @@ async def test_basketball_fetch_fixtures(basketball_adapter):
     fixtures = await basketball_adapter.fetch_fixtures("12", "2026", NOW)
 
     assert fixtures[0].home_team_ref.external_id == "1"
+    assert fixtures[0].home_score == 86
+    assert fixtures[0].away_score == 123
+    assert fixtures[0].period_scores == {
+        "kind": "quarter", "home": [28, 17, 20, 21], "away": [36, 32, 28, 27],
+    }
+
+
+@pytest.mark.asyncio
+async def test_basketball_fetch_fixtures_no_period_scores_before_tipoff(basketball_adapter_scheduled):
+    fixtures = await basketball_adapter_scheduled.fetch_fixtures("12", "2026", NOW)
+
+    assert fixtures[0].period_scores is None
 
 
 @pytest.mark.asyncio
@@ -342,7 +390,14 @@ async def test_basketball_fetch_standings(basketball_adapter):
 async def test_basketball_fetch_team_statistics(basketball_adapter):
     stats = await basketball_adapter.fetch_team_statistics(ProviderRef("api_basketball", "200"))
 
-    assert stats[0].stat_set["points"] == 102
+    # points = 2*(field_goals.total - threes.total) + 3*threes.total + free_throws.total
+    #        = 2*(42-11) + 3*11 + 16 = 62 + 33 + 16 = 111
+    assert stats[0].stat_set["points"] == 111
+    assert stats[0].stat_set["field_goals_made"] == 42
+    assert stats[0].stat_set["three_pointers_made"] == 11
+    assert stats[0].stat_set["free_throws_made"] == 16
+    assert stats[0].stat_set["rebounds_total"] == 56
+    assert stats[0].stat_set["assists"] == 28
 
 
 @pytest.mark.asyncio
@@ -366,19 +421,35 @@ def baseball_adapter():
         path = request.url.path
         if path == "/teams":
             return _json_response({"response": [{"id": 5, "name": "Pioneers", "country": {"name": "USA"}}]})
+        if path == "/games" and request.url.params.get("id") == "300":
+            # Real shape verified live (2026-08-10): API-Baseball has no per-game
+            # team-statistics endpoint — the box score lives in this resource's own
+            # "scores" block, which fetch_team_statistics now reads directly.
+            return _json_response({
+                "response": [{
+                    "id": 300, "date": "2026-08-01T23:00:00+00:00",
+                    "teams": {"home": {"id": 5}, "away": {"id": 6}},
+                    "scores": {
+                        "home": {"hits": 9, "errors": 1, "total": 4},
+                        "away": {"hits": 6, "errors": 0, "total": 2},
+                    },
+                }]
+            })
         if path == "/games":
             return _json_response({
-                "response": [{"id": 300, "date": "2026-08-01T23:00:00+00:00", "teams": {"home": {"id": 5}, "away": {"id": 6}}}]
+                "response": [{
+                    "id": 300, "date": "2026-08-01T23:00:00+00:00", "teams": {"home": {"id": 5}, "away": {"id": 6}},
+                    "scores": {
+                        "home": {"hits": 9, "errors": 1, "total": 4, "innings": {"1": 3, "2": 0, "3": 1, "4": 0, "5": 0, "6": 0, "7": None, "8": None, "9": None, "extra": None}},
+                        "away": {"hits": 6, "errors": 0, "total": 2, "innings": {"1": 0, "2": 1, "3": 0, "4": 1, "5": 0, "6": 0, "7": None, "8": None, "9": None, "extra": None}},
+                    },
+                }]
             })
         if path == "/players":
             return _json_response({"response": [{"id": 20, "name": "Casey Novak", "position": "pitcher", "birth": {"date": "1996-02-01"}}]})
         if path == "/standings":
             return _json_response({
                 "response": [{"team": {"id": 5}, "position": 2, "games": {"win": {"total": 55}, "lose": {"total": 45}}}]
-            })
-        if path == "/games/statistics/teams":
-            return _json_response({
-                "response": [{"team": {"id": 5}, "statistics": [{"runs": 4, "hits": 9, "errors": 1, "left_on_base": 6}]}]
             })
         raise AssertionError(f"unexpected path {path}")
 
@@ -397,6 +468,13 @@ async def test_baseball_fetch_fixtures(baseball_adapter):
     fixtures = await baseball_adapter.fetch_fixtures("1", "2026", NOW)
 
     assert fixtures[0].away_team_ref.external_id == "6"
+    assert fixtures[0].home_score == 4
+    assert fixtures[0].away_score == 2
+    assert fixtures[0].period_scores == {
+        "kind": "inning",
+        "home": [3, 0, 1, 0, 0, 0, None, None, None],
+        "away": [0, 1, 0, 1, 0, 0, None, None, None],
+    }
 
 
 @pytest.mark.asyncio
@@ -419,7 +497,9 @@ async def test_baseball_fetch_standings(baseball_adapter):
 async def test_baseball_fetch_team_statistics(baseball_adapter):
     stats = await baseball_adapter.fetch_team_statistics(ProviderRef("api_baseball", "300"))
 
-    assert stats[0].stat_set == {"runs": 4, "hits": 9, "errors": 1, "left_on_base": 6}
+    by_team = {s.team_ref.external_id: s.stat_set for s in stats}
+    assert by_team["5"] == {"runs": 4, "hits": 9, "errors": 1}
+    assert by_team["6"] == {"runs": 2, "hits": 6, "errors": 0}
 
 
 @pytest.mark.asyncio

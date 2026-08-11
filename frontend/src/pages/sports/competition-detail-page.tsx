@@ -126,13 +126,14 @@ export default function CompetitionDetailPage() {
   function cardFor(fixture: FixtureSummaryDto) {
     const { homeScore, awayScore } = fixtureScores(fixture.final_state)
     const sportSlug = fixture.sport_code ?? sport!.slug
+    const status = fixtureCardStatus(fixture.status)
     return (
       <DiscoveryMatchCard
         key={fixture.id}
         competition={competition.name}
         competitionLogoUrl={competition.logo_url}
-        status={fixtureCardStatus(fixture.status)}
-        kickoffLabel={fixtureCardStatus(fixture.status) === 'completed' ? undefined : KICKOFF_TIME.format(new Date(fixture.scheduled_at))}
+        status={status}
+        kickoffLabel={status === 'completed' ? undefined : KICKOFF_TIME.format(new Date(fixture.scheduled_at))}
         venue={fixture.venue_name}
         homeTeam={fixture.home_team.name}
         awayTeam={fixture.away_team.name}
@@ -141,7 +142,7 @@ export default function CompetitionDetailPage() {
         homeLogoUrl={fixture.home_team.logo_url}
         awayLogoUrl={fixture.away_team.logo_url}
         aiAvailable={aiReady}
-        href={`/app/${sportSlug}/matches/${fixture.id}`}
+        href={status === 'completed' ? `/app/${sportSlug}/matches/${fixture.id}/review` : `/app/${sportSlug}/matches/${fixture.id}`}
       />
     )
   }

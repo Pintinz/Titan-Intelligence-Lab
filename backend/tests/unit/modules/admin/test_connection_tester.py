@@ -145,6 +145,40 @@ async def test_api_key_header_defaults_to_x_api_key():
 
 
 @pytest.mark.asyncio
+async def test_api_key_path_auth_substitutes_key_placeholder_in_url():
+    """TheSportsDB (and providers like it) embed the API key as a URL path segment rather than a
+    header/query param — verified live against the real provider (2026-08-10)."""
+    captured = {}
+
+    def handler(request):
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"sports": []})
+
+    await run_connection_test(
+        base_url="https://api.example.com/json/{key}/all_sports.php", auth_type="api_key_path",
+        credential="secret-value", client=_client_for(handler),
+    )
+
+    assert captured["url"] == "https://api.example.com/json/secret-value/all_sports.php"
+
+
+@pytest.mark.asyncio
+async def test_api_key_path_auth_without_placeholder_leaves_url_unchanged():
+    captured = {}
+
+    def handler(request):
+        captured["url"] = str(request.url)
+        return httpx.Response(200)
+
+    await run_connection_test(
+        base_url="https://api.example.com/ping", auth_type="api_key_path",
+        credential="secret-value", client=_client_for(handler),
+    )
+
+    assert captured["url"] == "https://api.example.com/ping"
+
+
+@pytest.mark.asyncio
 async def test_api_key_header_uses_custom_header_name_when_configured():
     """API-Football (and other providers) expect their key on a specific, non-default header
     name — a provider configured with `auth_header_name` must send the key there, not on the

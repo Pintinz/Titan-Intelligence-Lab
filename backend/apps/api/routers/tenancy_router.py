@@ -123,7 +123,10 @@ async def list_members(
     organization_id: str, session: AsyncSession = Depends(get_session), user: User = Depends(get_current_user)
 ):
     service = build_tenancy_service(session)
-    members = await service.list_members(OrganizationId(_parse_uuid(organization_id)))
+    try:
+        members = await service.list_members(OrganizationId(_parse_uuid(organization_id)), user.id)
+    except NotAuthorizedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from None
     return envelope([_serialize_membership(m) for m in members])
 
 

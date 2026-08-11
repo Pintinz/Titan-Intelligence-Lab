@@ -99,6 +99,7 @@ class AuditAction(str, Enum):
     PROVIDER_CREDENTIAL_ADDED = "provider_credential_added"
     PROVIDER_CREDENTIAL_ROTATED = "provider_credential_rotated"
     PROVIDER_IMPORTED_FROM_ENV = "provider_imported_from_env"
+    PERMISSION_DENIED = "permission_denied"
 
 
 class SecurityEventType(str, Enum):

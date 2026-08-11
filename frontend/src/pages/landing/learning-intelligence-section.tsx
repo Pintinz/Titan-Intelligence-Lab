@@ -1,6 +1,16 @@
 import { ArrowRight } from 'lucide-react'
 import { Section, SectionHeading } from './section-primitives'
-import { LEARNING_STEPS } from './sample-data'
+
+// Real retraining-loop stages (ChallengerEvaluationService, CalibrationFittingService,
+// ScheduledRetrainingOrchestrator) — process description, not a data feed to fetch.
+const LEARNING_STEPS = [
+  { title: 'Prediction Validation', detail: 'Every settled market is compared against the official result.' },
+  { title: 'Model Evaluation', detail: 'Champion and challenger models are scored on the same outcome.' },
+  { title: 'Learning Report', detail: 'Error signal is attributed back to specific features and markets.' },
+  { title: 'Knowledge Graph Update', detail: 'New relationships and context are written back into the graph.' },
+  { title: 'Confidence Recalibration', detail: 'Probability calibration is re-fit against the latest outcomes.' },
+  { title: 'Retraining Queue', detail: 'Markets crossing a drift threshold are queued for retraining.' },
+]
 
 export function LearningIntelligenceSection() {
   return (

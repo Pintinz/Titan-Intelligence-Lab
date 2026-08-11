@@ -31,7 +31,10 @@ def is_valid_fixture_transition(current: FixtureStatus, target: FixtureStatus) -
 # without silently dropping a live match back to "scheduled".
 _FINISHED_CODES = {"FT", "AET", "PEN", "FT_PEN", "AOT", "FINISHED", "FINAL", "GAME OVER", "AWD", "WO"}
 _SCHEDULED_CODES = {"NS", "TBD", "SCHEDULED", "TIMED"}
-_POSTPONED_CODES = {"PST", "SUSP", "INT"}
+# Audit fix (2026-08-10): API-Baseball reports postponed games as "POST", not "PST" — verified
+# live against 4 real spring-training MLB fixtures stuck at LIVE forever because this set only
+# had API-Football's code. Kept both since API-Football genuinely uses "PST".
+_POSTPONED_CODES = {"PST", "POST", "SUSP", "INT"}
 _CANCELLED_CODES = {"CANC", "CANCELLED", "ABD"}
 
 

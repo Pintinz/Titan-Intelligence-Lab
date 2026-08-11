@@ -53,13 +53,14 @@ export default function SportHubPage() {
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {data.map((fixture) => {
             const { homeScore, awayScore } = fixtureScores(fixture.final_state)
+            const status = fixtureCardStatus(fixture.status)
             return (
               <InfinityMatchCard
                 key={fixture.id}
                 sport={sport.slug as Extract<DomainKey, 'football' | 'basketball' | 'baseball' | 'table-tennis'>}
                 competition={fixture.competition_name}
                 competitionLogoUrl={fixture.competition_logo_url}
-                status={fixtureCardStatus(fixture.status)}
+                status={status}
                 kickoff={new Date(fixture.scheduled_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
                 venue={fixture.venue_name}
                 homeTeam={fixture.home_team.name}
@@ -70,7 +71,7 @@ export default function SportHubPage() {
                 awayLogoUrl={fixture.away_team.logo_url}
                 following={watchlist.isFollowing('fixture', fixture.id)}
                 onToggleFollow={() => watchlist.toggle('fixture', fixture.id)}
-                href={`/app/${sport.slug}/matches/${fixture.id}`}
+                href={status === 'completed' ? `/app/${sport.slug}/matches/${fixture.id}/review` : `/app/${sport.slug}/matches/${fixture.id}`}
               />
             )
           })}

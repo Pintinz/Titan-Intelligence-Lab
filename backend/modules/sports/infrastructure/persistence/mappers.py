@@ -10,9 +10,11 @@ from __future__ import annotations
 import uuid
 
 from modules.sports.domain.entities import (
+    CoachingStaffMember,
     Competition,
     Country,
     Fixture,
+    Injury,
     Lineup,
     LineupSlot,
     Match,
@@ -22,6 +24,7 @@ from modules.sports.domain.entities import (
     Standing,
     Team,
     TeamStatistics,
+    Transfer,
     Venue,
 )
 from modules.sports.domain.value_objects import (
@@ -45,9 +48,11 @@ from modules.sports.domain.value_objects import (
     VenueId,
 )
 from modules.sports.infrastructure.persistence.models import (
+    CoachingStaffModel,
     CompetitionModel,
     CountryModel,
     FixtureModel,
+    InjuryModel,
     LineupModel,
     MatchModel,
     PlayerModel,
@@ -56,6 +61,7 @@ from modules.sports.infrastructure.persistence.models import (
     StandingModel,
     TeamModel,
     TeamStatisticsModel,
+    TransferModel,
     VenueModel,
 )
 
@@ -250,6 +256,7 @@ def fixture_to_domain(model: FixtureModel) -> Fixture:
         provider_refs=_provider_refs_from_dict(model.provider_ref),
         home_score=model.home_score,
         away_score=model.away_score,
+        period_scores=model.period_scores,
     )
 
 
@@ -265,6 +272,7 @@ def fixture_to_model(entity: Fixture, model: FixtureModel | None = None) -> Fixt
     model.provider_ref = _provider_refs_to_dict(entity.provider_refs)
     model.home_score = entity.home_score
     model.away_score = entity.away_score
+    model.period_scores = entity.period_scores
     return model
 
 
@@ -373,6 +381,84 @@ def lineup_to_model(entity: Lineup, model: LineupModel | None = None) -> LineupM
     model.team_id = entity.team_id.value
     model.formation = entity.formation
     model.slots = [_lineup_slot_to_dict(s) for s in entity.slots]
+    model.version = entity.version
+    model.provider_ref = _provider_refs_to_dict(entity.provider_refs)
+    return model
+
+
+def injury_to_domain(model: InjuryModel) -> Injury:
+    return Injury(
+        id=EntityId(model.id),
+        player_id=PlayerId(model.player_id),
+        reported_at=model.reported_at,
+        status=model.status,
+        reason=model.reason,
+        expected_return=model.expected_return,
+        source_ref=None,
+        version=model.version,
+        provider_refs=_provider_refs_from_dict(model.provider_ref),
+    )
+
+
+def injury_to_model(entity: Injury, model: InjuryModel | None = None) -> InjuryModel:
+    model = model or InjuryModel(id=entity.id.value)
+    model.player_id = entity.player_id.value
+    model.reported_at = entity.reported_at
+    model.status = entity.status
+    model.reason = entity.reason
+    model.expected_return = entity.expected_return
+    model.version = entity.version
+    model.provider_ref = _provider_refs_to_dict(entity.provider_refs)
+    return model
+
+
+def transfer_to_domain(model: TransferModel) -> Transfer:
+    return Transfer(
+        id=EntityId(model.id),
+        player_id=PlayerId(model.player_id),
+        from_team_id=TeamId(model.from_team_id) if model.from_team_id else None,
+        to_team_id=TeamId(model.to_team_id) if model.to_team_id else None,
+        effective_date=model.effective_date,
+        transfer_type=model.transfer_type,
+        version=model.version,
+        provider_refs=_provider_refs_from_dict(model.provider_ref),
+    )
+
+
+def transfer_to_model(entity: Transfer, model: TransferModel | None = None) -> TransferModel:
+    model = model or TransferModel(id=entity.id.value)
+    model.player_id = entity.player_id.value
+    model.from_team_id = entity.from_team_id.value if entity.from_team_id else None
+    model.to_team_id = entity.to_team_id.value if entity.to_team_id else None
+    model.effective_date = entity.effective_date
+    model.transfer_type = entity.transfer_type
+    model.version = entity.version
+    model.provider_ref = _provider_refs_to_dict(entity.provider_refs)
+    return model
+
+
+def coaching_staff_to_domain(model: CoachingStaffModel) -> CoachingStaffMember:
+    return CoachingStaffMember(
+        id=EntityId(model.id),
+        team_id=TeamId(model.team_id) if model.team_id else None,
+        person_name=model.person_name,
+        role=model.role,
+        valid_from=model.valid_from,
+        valid_to=model.valid_to,
+        version=model.version,
+        provider_refs=_provider_refs_from_dict(model.provider_ref),
+    )
+
+
+def coaching_staff_to_model(
+    entity: CoachingStaffMember, model: CoachingStaffModel | None = None
+) -> CoachingStaffModel:
+    model = model or CoachingStaffModel(id=entity.id.value)
+    model.team_id = entity.team_id.value if entity.team_id else None
+    model.person_name = entity.person_name
+    model.role = entity.role
+    model.valid_from = entity.valid_from
+    model.valid_to = entity.valid_to
     model.version = entity.version
     model.provider_ref = _provider_refs_to_dict(entity.provider_refs)
     return model

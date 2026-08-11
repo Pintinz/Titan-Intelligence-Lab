@@ -229,9 +229,11 @@ from modules.alerts.application.alert_service import AlertService
 from modules.alerts.infrastructure.persistence.repositories import SqlAlchemyAlertEventRepository
 from modules.sports.infrastructure.persistence.database import build_engine, build_session_factory
 from modules.sports.infrastructure.persistence.repositories import (
+    SqlAlchemyCoachingStaffRepository,
     SqlAlchemyCompetitionRepository,
     SqlAlchemyCountryRepository,
     SqlAlchemyFixtureRepository,
+    SqlAlchemyInjuryRepository,
     SqlAlchemyLineupRepository,
     SqlAlchemyMatchRepository,
     SqlAlchemyPlayerRepository,
@@ -240,6 +242,7 @@ from modules.sports.infrastructure.persistence.repositories import (
     SqlAlchemyStandingRepository,
     SqlAlchemyTeamRepository,
     SqlAlchemyTeamStatisticsRepository,
+    SqlAlchemyTransferRepository,
     SqlAlchemyVenueRepository,
 )
 from modules.sports.infrastructure.providers.api_sports_adapter import (
@@ -248,6 +251,7 @@ from modules.sports.infrastructure.providers.api_sports_adapter import (
     ApiFootballAdapter,
 )
 from modules.sports.infrastructure.providers.football_data_org_adapter import FootballDataOrgAdapter
+from modules.sports.infrastructure.providers.thesportsdb_adapter import TheSportsDbAdapter
 from modules.sports.infrastructure.providers.mock_provider import MockSportsDataProvider
 from modules.sports.infrastructure.providers.provider_router import SportsProviderRouter
 
@@ -423,6 +427,9 @@ def build_entity_reconciliation_service(session: AsyncSession) -> EntityReconcil
         team_statistics=SqlAlchemyTeamStatisticsRepository(session=session),
         lineups=SqlAlchemyLineupRepository(session=session),
         standings=SqlAlchemyStandingRepository(session=session),
+        injuries=SqlAlchemyInjuryRepository(session=session),
+        transfers=SqlAlchemyTransferRepository(session=session),
+        coaching_staff=SqlAlchemyCoachingStaffRepository(session=session),
         ref_index=SqlAlchemyProviderRefIndexRepository(session=session),
         kg=build_kg_population_service(session),
         timeline=SqlAlchemyTimelineEventRepository(session=session),
@@ -472,6 +479,12 @@ def get_football_data_org_adapter(session: AsyncSession) -> FootballDataOrgAdapt
     return build_football_data_org_adapter(session)
 
 
+THESPORTSDB_PROVIDER_KEY = "thesportsdb"
+
+def build_thesportsdb_adapter(session: AsyncSession) -> TheSportsDbAdapter:
+    admin_service = build_provider_management_service(session)
+    return TheSportsDbAdapter(get_api_key=_make_api_key_getter(admin_service, THESPORTSDB_PROVIDER_KEY))
+
 def build_competition_fixture_source_repository(session: AsyncSession) -> SqlAlchemyCompetitionFixtureSourceRepository:
     return SqlAlchemyCompetitionFixtureSourceRepository(session=session)
 
@@ -495,6 +508,7 @@ def build_sports_provider_router(session: AsyncSession) -> SportsProviderRouter:
     }
     fixture_schedule_adapters = {
         FOOTBALL_DATA_ORG_PROVIDER_KEY: build_football_data_org_adapter(session),
+        THESPORTSDB_PROVIDER_KEY: build_thesportsdb_adapter(session),
     }
     return SportsProviderRouter(
         admin_service=admin_service, quota_engine=build_quota_intelligence_engine(session),
@@ -527,6 +541,7 @@ def build_sync_orchestrator(session: AsyncSession) -> SyncOrchestrator:
         cache=get_redis_sync_cache(),
         odds_feature_writers={"football": build_football_odds_feature_writer(session)},
         fixture_source_preferences=build_competition_fixture_source_repository(session),
+        supplementary_provider_keys=frozenset({THESPORTSDB_PROVIDER_KEY}),
     )
 
 

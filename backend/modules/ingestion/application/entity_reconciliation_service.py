@@ -31,9 +31,11 @@ from modules.alerts.ports.notifier import AlertNotifierPort
 from modules.knowledge_graph.application.population_service import KnowledgeGraphPopulationService
 from modules.sports.domain.contracts.fixture import is_valid_fixture_transition, normalize_provider_fixture_status
 from modules.sports.domain.entities import (
+    CoachingStaffMember,
     Competition,
     Country,
     Fixture,
+    Injury,
     Lineup,
     LineupSlot,
     Match,
@@ -43,6 +45,7 @@ from modules.sports.domain.entities import (
     Standing,
     Team,
     TeamStatistics,
+    Transfer,
     Venue,
 )
 from modules.sports.domain.value_objects import (
@@ -69,18 +72,23 @@ from modules.watchlist.domain.value_objects import WatchlistEntityType
 from modules.predictions.application.outcome_resolution_service import OutcomeResolutionService
 from modules.predictions.application.windowed_feature_engineering_service import FixtureFormDifferentialCalculator
 from modules.sports.ports.provider_gateway import (
+    ProviderCoachRecord,
     ProviderCountryRecord,
     ProviderFixtureRecord,
+    ProviderInjuryRecord,
     ProviderLineupRecord,
     ProviderPlayerRecord,
     ProviderStandingRecord,
     ProviderTeamRecord,
     ProviderTeamStatisticsRecord,
+    ProviderTransferRecord,
 )
 from modules.sports.ports.repositories import (
+    CoachingStaffRepositoryPort,
     CompetitionRepositoryPort,
     CountryRepositoryPort,
     FixtureRepositoryPort,
+    InjuryRepositoryPort,
     LineupRepositoryPort,
     MatchRepositoryPort,
     PlayerRepositoryPort,
@@ -89,6 +97,7 @@ from modules.sports.ports.repositories import (
     StandingRepositoryPort,
     TeamRepositoryPort,
     TeamStatisticsRepositoryPort,
+    TransferRepositoryPort,
     VenueRepositoryPort,
 )
 
@@ -129,6 +138,9 @@ class EntityReconciliationService:
     team_statistics: TeamStatisticsRepositoryPort
     lineups: LineupRepositoryPort
     standings: StandingRepositoryPort
+    injuries: InjuryRepositoryPort
+    transfers: TransferRepositoryPort
+    coaching_staff: CoachingStaffRepositoryPort
     ref_index: ProviderRefIndexRepositoryPort
     kg: KnowledgeGraphPopulationService
     timeline: TimelineEventRepositoryPort
@@ -261,6 +273,14 @@ class EntityReconciliationService:
         self, record: ProviderTeamRecord, sport_id: SportId, now: datetime, venue_id: VenueId | None = None
     ) -> tuple[Team, bool]:
         existing_id = await self._resolve(record.external_ref.provider, record.external_ref.external_id, EntityKind.TEAM)
+        if existing_id is None and record.cross_provider_ref is not None:
+            # Deterministic auto-merge: the provider itself claims this is the same club as an
+            # already-reconciled team under a different provider — see ProviderTeamRecord's
+            # `cross_provider_ref` docstring. Only engages the first time this record's own
+            # external_ref is seen; once reconciled it resolves normally like any other team.
+            existing_id = await self._resolve(
+                record.cross_provider_ref.provider, record.cross_provider_ref.external_id, EntityKind.TEAM
+            )
         existing = await self.teams.get(TeamId(_as_uuid(existing_id))) if existing_id else None
         created = existing is None
         entity = Team(
@@ -357,6 +377,7 @@ class EntityReconciliationService:
     async def reconcile_fixture(
         self, record: ProviderFixtureRecord, season_id: SeasonId, now: datetime, venue_id: VenueId | None = None,
         sport_code: str | None = None, match_by_teams_and_date: bool = False, allow_skip_live: bool = False,
+        preserve_existing_score: bool = False,
     ) -> tuple[Fixture, bool]:
         home_id = await self._resolve(record.home_team_ref.provider, record.home_team_ref.external_id, EntityKind.TEAM)
         away_id = await self._resolve(record.away_team_ref.provider, record.away_team_ref.external_id, EntityKind.TEAM)
@@ -372,6 +393,13 @@ class EntityReconciliationService:
             )
         created = existing is None
         status = self._resolve_fixture_status(existing, record.status, allow_skip_live=allow_skip_live)
+        # `preserve_existing_score`: a supplementary (non-authoritative) source's own score never
+        # overwrites one an existing fixture already has — only fills in if genuinely absent.
+        # Default (False) keeps the long-standing "a fetched score always wins" behavior every
+        # existing caller (api-football, football-data.org) already relies on; this is opt-in
+        # per-caller, not a global behavior change (see SyncOrchestrator.sync_completed_fixtures).
+        existing_has_score = existing is not None and existing.home_score is not None and existing.away_score is not None
+        score_locked = preserve_existing_score and existing_has_score
         entity = Fixture(
             id=existing.id if existing else FixtureId(uuid4()), season_id=season_id,
             home_team_id=TeamId(_as_uuid(home_id)), away_team_id=TeamId(_as_uuid(away_id)),
@@ -379,8 +407,9 @@ class EntityReconciliationService:
             status=status,
             version=(existing.version + 1) if existing else 1,
             provider_refs=_merge_ref(existing.provider_refs if existing else (), record.external_ref),
-            home_score=record.home_score if record.home_score is not None else (existing.home_score if existing else None),
-            away_score=record.away_score if record.away_score is not None else (existing.away_score if existing else None),
+            home_score=existing.home_score if score_locked else (record.home_score if record.home_score is not None else (existing.home_score if existing else None)),
+            away_score=existing.away_score if score_locked else (record.away_score if record.away_score is not None else (existing.away_score if existing else None)),
+            period_scores=existing.period_scores if score_locked else (record.period_scores if record.period_scores is not None else (existing.period_scores if existing else None)),
         )
         saved = await self.fixtures.upsert(entity)
         await self._record_ref(record.external_ref.provider, record.external_ref.external_id, EntityKind.FIXTURE, str(saved.id.value))
@@ -536,6 +565,109 @@ class EntityReconciliationService:
         await self.kg.populate_standing(str(team_id.value), str(season_id.value), now, rank=record.rank, points=record.points)
         await self._emit(now, EntityKind.STANDING, str(saved.id.value), created=True)
         return saved
+
+    # -- Injury -------------------------------------------------------------------------------
+
+    async def reconcile_injury(self, record: ProviderInjuryRecord, now: datetime) -> tuple[Injury, bool]:
+        """One row per player, updated in place on each sync (like Lineup/TeamStatistics, not
+        appended like Standing) — the provider's `/injuries` endpoint always reports a player's
+        *current* unavailability, not a historical log, so re-syncing the same player's injury
+        naturally means "here's the latest known status," not a new event. The ref-index key is
+        synthetic (player, not the record itself, since the provider has no persistent injury-
+        record id) so the same player's row is found and updated rather than duplicated."""
+        player_id_str = await self._resolve(record.player_ref.provider, record.player_ref.external_id, EntityKind.PLAYER)
+        if player_id_str is None:
+            raise ReconciliationDependencyError(f"player {record.player_ref.external_id} not yet reconciled")
+        player_id = PlayerId(_as_uuid(player_id_str))
+
+        synthetic_id = f"injury:{record.player_ref.external_id}"
+        existing_id = await self._resolve(record.player_ref.provider, synthetic_id, EntityKind.INJURY)
+        existing = await self.injuries.get(EntityId(_as_uuid(existing_id))) if existing_id else None
+        created = existing is None
+        entity = Injury(
+            id=existing.id if existing else EntityId(uuid4()),
+            player_id=player_id,
+            reported_at=record.reported_at or now,
+            status=record.status,
+            reason=record.reason,
+            expected_return=None,
+            version=(existing.version + 1) if existing else 1,
+            provider_refs=_merge_ref(existing.provider_refs if existing else (), record.player_ref),
+        )
+        saved = await self.injuries.upsert(entity)
+        await self._record_ref(record.player_ref.provider, synthetic_id, EntityKind.INJURY, str(saved.id.value))
+        await self._emit(now, EntityKind.INJURY, str(saved.id.value), created)
+        return saved, created
+
+    # -- Transfer -----------------------------------------------------------------------------
+
+    async def reconcile_transfer(self, record: ProviderTransferRecord, now: datetime) -> Transfer:
+        """Unlike Injury, every distinct transfer is a genuine historical event — the synthetic
+        ref-index key includes the effective date and destination team so re-syncing a player's
+        transfer history is idempotent (same move never duplicates) while two different real
+        moves for the same player both persist."""
+        from_team_id = None
+        if record.from_team_ref is not None:
+            from_team_id_str = await self._resolve(record.from_team_ref.provider, record.from_team_ref.external_id, EntityKind.TEAM)
+            from_team_id = TeamId(_as_uuid(from_team_id_str)) if from_team_id_str else None
+        to_team_id = None
+        if record.to_team_ref is not None:
+            to_team_id_str = await self._resolve(record.to_team_ref.provider, record.to_team_ref.external_id, EntityKind.TEAM)
+            to_team_id = TeamId(_as_uuid(to_team_id_str)) if to_team_id_str else None
+
+        player_id_str = await self._resolve(record.player_ref.provider, record.player_ref.external_id, EntityKind.PLAYER)
+        if player_id_str is None:
+            raise ReconciliationDependencyError(f"player {record.player_ref.external_id} not yet reconciled")
+        player_id = PlayerId(_as_uuid(player_id_str))
+
+        synthetic_id = f"transfer:{record.player_ref.external_id}:{record.effective_date.date().isoformat()}:{to_team_id or from_team_id}"
+        existing_id = await self._resolve(record.player_ref.provider, synthetic_id, EntityKind.TRANSFER)
+        existing = await self.transfers.get(EntityId(_as_uuid(existing_id))) if existing_id else None
+        entity = Transfer(
+            id=existing.id if existing else EntityId(uuid4()),
+            player_id=player_id, from_team_id=from_team_id, to_team_id=to_team_id,
+            effective_date=record.effective_date, transfer_type=record.transfer_type,
+            version=(existing.version + 1) if existing else 1,
+            provider_refs=_merge_ref(existing.provider_refs if existing else (), record.player_ref),
+        )
+        saved = await self.transfers.upsert(entity)
+        await self._record_ref(record.player_ref.provider, synthetic_id, EntityKind.TRANSFER, str(saved.id.value))
+        await self._emit(now, EntityKind.TRANSFER, str(saved.id.value), created=existing is None)
+        return saved
+
+    # -- Coaching staff -------------------------------------------------------------------------
+
+    async def reconcile_coaching_staff(
+        self, record: ProviderCoachRecord, now: datetime
+    ) -> tuple[CoachingStaffMember, bool]:
+        """Time-aware: if the currently-active (``valid_to is None``) coach for this team/role is
+        a *different* person, that row is closed (``valid_to`` set to ``now``) and a new row is
+        created for the incoming person — history is never overwritten. If it's the same person,
+        this is a no-op re-confirmation, not a new row."""
+        team_id_str = await self._resolve(record.team_ref.provider, record.team_ref.external_id, EntityKind.TEAM)
+        if team_id_str is None:
+            raise ReconciliationDependencyError(f"team {record.team_ref.external_id} not yet reconciled")
+        team_id = TeamId(_as_uuid(team_id_str))
+
+        current = await self.coaching_staff.get_current_by_team(team_id, record.role)
+        if current is not None and current.person_name == record.person_name:
+            return current, False
+
+        if current is not None:
+            closed = CoachingStaffMember(
+                id=current.id, team_id=current.team_id, person_name=current.person_name, role=current.role,
+                valid_from=current.valid_from, valid_to=now, version=current.version + 1,
+                provider_refs=current.provider_refs,
+            )
+            await self.coaching_staff.upsert(closed)
+
+        entity = CoachingStaffMember(
+            id=EntityId(uuid4()), team_id=team_id, person_name=record.person_name, role=record.role,
+            valid_from=now, valid_to=None, version=1, provider_refs=(record.team_ref,),
+        )
+        saved = await self.coaching_staff.upsert(entity)
+        await self._emit(now, EntityKind.COACHING_STAFF, str(saved.id.value), created=True)
+        return saved, True
 
 
 class ReconciliationDependencyError(RuntimeError):

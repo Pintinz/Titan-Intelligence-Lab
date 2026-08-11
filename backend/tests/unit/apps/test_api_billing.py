@@ -17,8 +17,9 @@ from modules.billing.infrastructure.persistence.repositories import (
     SqlAlchemySubscriptionRepository,
     SqlAlchemyUsageCounterRepository,
 )
+from modules.identity.domain.value_objects import Email, Role
 from modules.identity.infrastructure.persistence.models import Base as IdentityBase
-from modules.identity.infrastructure.persistence.repositories import SqlAlchemyAuditLogRepository
+from modules.identity.infrastructure.persistence.repositories import SqlAlchemyAuditLogRepository, SqlAlchemyUserRepository
 from modules.identity.infrastructure.security import MockJWTValidator
 
 
@@ -56,6 +57,15 @@ def register_and_login(client, email, password="correct-horse-battery"):
     return login.json()["data"]["access_token"]
 
 
+async def _promote_to_admin(db_session_factory, email: str) -> None:
+    async with db_session_factory() as session:
+        users = SqlAlchemyUserRepository(session=session)
+        user = await users.get_by_email(Email(email))
+        user.role = Role.ADMINISTRATOR
+        await users.upsert(user)
+        await session.commit()
+
+
 def test_non_admin_cannot_create_plan(client):
     token = register_and_login(client, "user@example.com")
 
@@ -64,6 +74,31 @@ def test_non_admin_cannot_create_plan(client):
         json={"key": "premium_monthly", "name": "Premium", "tier": "premium"},
         headers={"Authorization": f"Bearer {token}"},
     )
+
+    assert response.status_code == 403
+
+
+def test_non_admin_cannot_self_subscribe(client):
+    # No payment provider is integrated (see billing_router.py's module docstring) — self-service
+    # subscribe must stay admin-only, or any free user could grant themselves a paid plan for free.
+    token = register_and_login(client, "free-user@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    me = client.get("/api/v1/users/me", headers=headers).json()["data"]
+
+    response = client.post(
+        "/api/v1/billing/subscriptions",
+        json={"subject_type": "user", "subject_id": me["id"], "plan_key": "premium_monthly"},
+        headers=headers,
+    )
+
+    assert response.status_code == 403
+
+
+def test_non_admin_cannot_cancel_subscription(client):
+    token = register_and_login(client, "canceler@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.post("/api/v1/billing/subscriptions/00000000-0000-0000-0000-000000000000/cancel", headers=headers)
 
     assert response.status_code == 403
 
@@ -84,19 +119,23 @@ def test_subscribe_and_check_entitlement(client, db_session_factory):
 
     asyncio.run(seed_plan())
 
-    token = register_and_login(client, "subscriber@example.com")
-    headers = {"Authorization": f"Bearer {token}"}
-    me = client.get("/api/v1/users/me", headers=headers).json()["data"]
+    subscriber_token = register_and_login(client, "subscriber@example.com")
+    subscriber_headers = {"Authorization": f"Bearer {subscriber_token}"}
+    me = client.get("/api/v1/users/me", headers=subscriber_headers).json()["data"]
+
+    admin_token = register_and_login(client, "billing-admin@example.com")
+    asyncio.run(_promote_to_admin(db_session_factory, "billing-admin@example.com"))
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
 
     subscribe = client.post(
         "/api/v1/billing/subscriptions",
         json={"subject_type": "user", "subject_id": me["id"], "plan_key": "premium_monthly"},
-        headers=headers,
+        headers=admin_headers,
     )
     assert subscribe.status_code == 200
 
     entitlement = client.get(
-        f"/api/v1/billing/entitlements/user/{me['id']}/advanced_analytics", headers=headers
+        f"/api/v1/billing/entitlements/user/{me['id']}/advanced_analytics", headers=subscriber_headers
     )
     assert entitlement.json()["data"]["has_feature"] is True
 

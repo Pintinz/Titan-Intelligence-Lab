@@ -14,14 +14,17 @@ from modules.admin.application.provider_management_service import ProviderManage
 from modules.admin.application.quota_intelligence_engine import QuotaIntelligenceEngine
 from modules.sports.domain.value_objects import ProviderRef
 from modules.sports.ports.provider_gateway import (
+    ProviderCoachRecord,
     ProviderCountryRecord,
     ProviderFixtureRecord,
+    ProviderInjuryRecord,
     ProviderLineupRecord,
     ProviderOddsRecord,
     ProviderPlayerRecord,
     ProviderStandingRecord,
     ProviderTeamRecord,
     ProviderTeamStatisticsRecord,
+    ProviderTransferRecord,
     SportsDataProviderPort,
 )
 
@@ -191,6 +194,31 @@ class SportsProviderRouter:
         return await self._execute(
             sport_code, ("odds", sport_code, fixture_ref.provider, fixture_ref.external_id),
             now, low_priority, lambda adapter: adapter.fetch_odds(fixture_ref),
+        )
+
+    async def fetch_injuries(
+        self, sport_code: str, team_ref: ProviderRef, now: datetime, *,
+        low_priority: bool = False, season_label: str | None = None,
+    ) -> list[ProviderInjuryRecord]:
+        return await self._execute(
+            sport_code, ("injuries", sport_code, team_ref.provider, team_ref.external_id, season_label),
+            now, low_priority, lambda adapter: adapter.fetch_injuries(team_ref, season_label),
+        )
+
+    async def fetch_transfers(
+        self, sport_code: str, team_ref: ProviderRef, now: datetime, *, low_priority: bool = False
+    ) -> list[ProviderTransferRecord]:
+        return await self._execute(
+            sport_code, ("transfers", sport_code, team_ref.provider, team_ref.external_id),
+            now, low_priority, lambda adapter: adapter.fetch_transfers(team_ref),
+        )
+
+    async def fetch_coach(
+        self, sport_code: str, team_ref: ProviderRef, now: datetime, *, low_priority: bool = False
+    ) -> ProviderCoachRecord | None:
+        return await self._execute(
+            sport_code, ("coach", sport_code, team_ref.provider, team_ref.external_id),
+            now, low_priority, lambda adapter: adapter.fetch_coach(team_ref),
         )
 
     async def _resolve_fixture_schedule_adapter(self, provider_key: str) -> tuple[SportsDataProviderPort, object]:

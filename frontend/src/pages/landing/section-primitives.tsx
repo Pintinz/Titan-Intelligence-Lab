@@ -41,15 +41,6 @@ export function SectionHeading({
   )
 }
 
-/** Every landing section built from sample data (not live, gated behind auth) wears this. */
-export function IllustrativeTag() {
-  return (
-    <span className="inline-flex items-center gap-1.5 rounded-full border border-border-default px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-text-muted">
-      Illustrative
-    </span>
-  )
-}
-
 export function Hairline({ className }: { className?: string }) {
   return <div className={cn('h-px w-full bg-border-subtle', className)} aria-hidden="true" />
 }

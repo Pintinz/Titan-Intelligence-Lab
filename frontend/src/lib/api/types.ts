@@ -433,6 +433,13 @@ export interface CompetitionSummaryDto {
   logo_url: string | null
 }
 
+export interface SeasonSummaryDto {
+  id: string
+  label: string
+  start_date: string | null
+  status: string
+}
+
 export interface TeamSummaryDto {
   id: string
   sport_code: string
@@ -467,6 +474,10 @@ export interface FixtureSummaryDto {
   scheduled_at: string
   status: string
   final_state: { home: number | null; away: number | null } | null
+  /** Real period-by-period score breakdown — quarters for basketball, innings for baseball.
+   * `null` for football (not fetched by that adapter) or before the provider has reported any
+   * periods for this fixture yet. */
+  period_scores: { kind: 'quarter' | 'inning'; home: Array<number | null>; away: Array<number | null> } | null
 }
 
 export interface StandingRowDto {
@@ -479,16 +490,14 @@ export interface StandingRowDto {
 
 /** Matches `_serialize_team_statistics_summary`-equivalent shape from `get_team_statistics` —
  * every field is a real average over recently recorded matches, or `null` if that stat was never
- * recorded in the sample. `sample_size` is how many matches actually had any stats logged. */
+ * recorded in the sample. `sample_size` is how many matches actually had any stats logged. Which
+ * keys are present is sport-aware on the backend (`_TEAM_STATISTIC_KEYS_BY_SPORT`) — football
+ * carries `possession_pct`/`shots_total`/etc, basketball carries `points`/`rebounds_total`/etc,
+ * baseball carries `runs`/`hits`/`errors` — so this stays a generic index rather than one fixed
+ * football-shaped interface. */
 export interface TeamStatisticsSummaryDto {
   sample_size: number
-  possession_pct: number | null
-  shots_total: number | null
-  shots_on_target: number | null
-  corners: number | null
-  fouls: number | null
-  cards_yellow: number | null
-  cards_red: number | null
+  [statKey: string]: number | null
 }
 
 /** Real per-fixture stat row from `GET /sports/fixtures/{id}/statistics` — one entry per team
@@ -496,18 +505,54 @@ export interface TeamStatisticsSummaryDto {
  * from `TeamStatisticsSummaryDto` above (a rolling-window average): this is the exact recorded
  * numbers for one match, and `stats` carries only the keys that were actually recorded — never
  * padded with nulls for keys nobody synced. Coverage is honestly sparse — most completed
- * fixtures have zero rows here until the stats sync job runs for them. */
+ * fixtures have zero rows here until the stats sync job runs for them. Key vocabulary is
+ * sport-aware (see `api_sports_adapter.py`'s per-sport `stat_set` shapes), so this is a generic
+ * numeric map rather than one fixed football-shaped interface. */
 export interface FixtureTeamStatisticsDto {
   team_id: string
-  stats: Partial<{
-    possession_pct: number
-    shots_total: number
-    shots_on_target: number
-    corners: number
-    fouls: number
-    cards_yellow: number
-    cards_red: number
-  }>
+  stats: Record<string, number>
+}
+
+// -- Squad intelligence (injuries, transfers, coaching staff) -------------------------------------
+
+/** A player's currently-reported unavailability. `status`/`reason` are the provider's own raw
+ * text (e.g. API-Football's "Missing Fixture"/"Hamstring") — never a normalized enum, since the
+ * real states a provider reports don't map onto one. `expected_return` is `null` whenever the
+ * provider doesn't report one — never inferred or fabricated. */
+export interface InjuryDto {
+  id: string
+  player_id: string
+  player_name: string | null
+  status: string
+  reason: string | null
+  reported_at: string
+  expected_return: string | null
+}
+
+/** A confirmed transfer only — `transfer_type` is the provider's raw fee/type text (e.g. "Loan",
+ * "Free", "€25.5M"). No rumour/negotiating staging: that signal lives in the news pipeline
+ * instead, since no connected provider reports pre-confirmation transfer stages. */
+export interface TransferDto {
+  id: string
+  player_id: string
+  player_name: string | null
+  from_team_id: string | null
+  from_team_name: string | null
+  to_team_id: string | null
+  to_team_name: string | null
+  effective_date: string
+  transfer_type: string | null
+}
+
+/** One coaching-staff row — `valid_to: null` means still in the role. History is never
+ * overwritten: a departure closes the row instead of deleting it. */
+export interface CoachingStaffDto {
+  id: string
+  team_id: string | null
+  person_name: string
+  role: string
+  valid_from: string | null
+  valid_to: string | null
 }
 
 // -- Watchlist ----------------------------------------------------------------------------------
@@ -752,4 +797,82 @@ export interface ProviderStatusSummaryDto {
   total_providers: number
   by_status: Record<string, number>
   by_health: Record<string, number>
+}
+
+// -- public (unauthenticated) — backed by public_router.py, the landing page's only real data source
+
+export interface PublicSportSummaryDto {
+  code: string
+  display_name: string
+  competitions: number
+  live_fixtures: number
+  today_fixtures: number
+}
+
+export interface PublicPlatformSummaryDto {
+  sports: PublicSportSummaryDto[]
+  sports_covered: number
+  competitions_tracked: number
+  live_fixtures: number
+  today_fixtures: number
+  completed_fixtures_recent: number
+  /** A sample over the most recent `published_predictions_sample_size` predictions, not a lifetime
+   * total — no repository method exists for an unbounded COUNT(*) (see public_router.py). */
+  published_predictions_sample: number
+  published_predictions_sample_size: number
+  knowledge_graph: { node_count: number; edge_count: number }
+  last_synced_at: string | null
+  generated_at: string
+}
+
+export interface PublicFeaturedIntelligenceDto {
+  prediction_id: string
+  fixture_id: string
+  sport_code: string
+  competition_name: string | null
+  home_team: { name: string; short_name: string; logo_url: string | null } | null
+  away_team: { name: string; short_name: string; logo_url: string | null } | null
+  scheduled_at: string
+  status: string
+  market_name: string
+  market_key: string
+  value: string | number
+  probability: number
+  confidence_composite: number
+  evidence_highlights: { supporting: string[]; contradicting: string[] }
+  generated_at: string | null
+}
+
+export interface PublicNewsIntelligenceItemDto {
+  article_id: string
+  headline: string
+  url: string
+  published_at: string
+  event_summary: string
+  event_type: string
+  impact_score: number
+  impact_confidence: number
+  affected_teams: string[]
+  affected_competitions: string[]
+}
+
+export interface PublicKgPreviewNodeDto {
+  id: string
+  type: string
+  entity_ref: string
+}
+
+/** `entity_ref`/`node_type` only, deliberately not resolved to a display name — no per-node-type
+ * name resolver exists yet (see public_router.py's `knowledge_graph_preview` docstring). */
+export interface PublicKnowledgeGraphPreviewDto {
+  node_count: number
+  edge_count: number
+  nodes_by_type: Record<string, number>
+  edges_by_type: Record<string, number>
+  preview_entity: {
+    node: PublicKgPreviewNodeDto
+    connection_count: number
+    neighbors: PublicKgPreviewNodeDto[]
+    relationships: Array<{ from: string; to: string; type: string }>
+  } | null
 }

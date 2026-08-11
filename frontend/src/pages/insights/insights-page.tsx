@@ -109,6 +109,38 @@ export default function InsightsPage() {
     setQuery('')
   }
 
+  // Rendered both directly under the Hero's own search box (always visible) and — since the
+  // empty-state's "Ask TitanIQ" input drives this exact same query/results state — directly under
+  // that box too, so results/​"No matches" feedback never lands somewhere the user has scrolled
+  // away from.
+  const resultsPanel = searching ? (
+    <div className="grid gap-1.5 rounded-[var(--cd-radius-lg)] border p-3 sm:grid-cols-2" style={{ borderColor: 'var(--cd-border-default)', backgroundColor: 'var(--cd-surface-1)' }}>
+      {entityKind === 'fixture' && fixtureResults.map((f) => (
+        <button key={f.id} type="button" onClick={() => focusFixture(f)} className="truncate rounded-[var(--cd-radius-sm)] px-2 py-1.5 text-left font-[var(--cd-font-body)] text-[12.5px] hover:bg-[var(--cd-surface-2)]" style={{ color: 'var(--cd-text-secondary)' }}>
+          {f.home_team.short_name} vs {f.away_team.short_name}
+        </button>
+      ))}
+      {entityKind === 'team' && teamResults.map((t) => (
+        <button key={t.id} type="button" onClick={() => { workspace.pin({ kind: 'team', id: t.id, label: t.name, logoUrl: t.logo_url }); setQuery('') }} className="truncate rounded-[var(--cd-radius-sm)] px-2 py-1.5 text-left font-[var(--cd-font-body)] text-[12.5px] hover:bg-[var(--cd-surface-2)]" style={{ color: 'var(--cd-text-secondary)' }}>
+          {t.name}
+        </button>
+      ))}
+      {entityKind === 'competition' && competitionResults.map((c) => (
+        <button key={c.id} type="button" onClick={() => { workspace.pin({ kind: 'competition', id: c.id, label: c.name, logoUrl: c.logo_url, meta: c.country ?? undefined }); setQuery('') }} className="truncate rounded-[var(--cd-radius-sm)] px-2 py-1.5 text-left font-[var(--cd-font-body)] text-[12.5px] hover:bg-[var(--cd-surface-2)]" style={{ color: 'var(--cd-text-secondary)' }}>
+          {c.name}
+        </button>
+      ))}
+      {entityKind === 'player' && playerResults.map((p) => (
+        <button key={p.id} type="button" onClick={() => { workspace.pin({ kind: 'player', id: p.id, label: p.name, meta: p.team_name ?? undefined }); setQuery('') }} className="truncate rounded-[var(--cd-radius-sm)] px-2 py-1.5 text-left font-[var(--cd-font-body)] text-[12.5px] hover:bg-[var(--cd-surface-2)]" style={{ color: 'var(--cd-text-secondary)' }}>
+          {p.name}
+        </button>
+      ))}
+      {fixtureResults.length === 0 && teamResults.length === 0 && competitionResults.length === 0 && playerResults.length === 0 && (
+        <p className="col-span-full font-[var(--cd-font-body)] text-[12.5px]" style={{ color: 'var(--cd-text-muted)' }}>No matches for "{query}".</p>
+      )}
+    </div>
+  ) : null
+
   // -- Focused-entity data --------------------------------------------------------------------
   const fixtureDetailQuery = useQuery({
     queryKey: ['sports', 'fixture', focused?.kind === 'fixture' ? focused.id : null],
@@ -228,33 +260,7 @@ export default function InsightsPage() {
         onOpenRecent={() => document.getElementById('investigation-context-rail')?.scrollIntoView({ behavior: 'smooth' })}
       />
 
-      {searching && (
-        <div className="grid gap-1.5 rounded-[var(--cd-radius-lg)] border p-3 sm:grid-cols-2" style={{ borderColor: 'var(--cd-border-default)', backgroundColor: 'var(--cd-surface-1)' }}>
-          {entityKind === 'fixture' && fixtureResults.map((f) => (
-            <button key={f.id} type="button" onClick={() => focusFixture(f)} className="truncate rounded-[var(--cd-radius-sm)] px-2 py-1.5 text-left font-[var(--cd-font-body)] text-[12.5px] hover:bg-[var(--cd-surface-2)]" style={{ color: 'var(--cd-text-secondary)' }}>
-              {f.home_team.short_name} vs {f.away_team.short_name}
-            </button>
-          ))}
-          {entityKind === 'team' && teamResults.map((t) => (
-            <button key={t.id} type="button" onClick={() => { workspace.pin({ kind: 'team', id: t.id, label: t.name, logoUrl: t.logo_url }); setQuery('') }} className="truncate rounded-[var(--cd-radius-sm)] px-2 py-1.5 text-left font-[var(--cd-font-body)] text-[12.5px] hover:bg-[var(--cd-surface-2)]" style={{ color: 'var(--cd-text-secondary)' }}>
-              {t.name}
-            </button>
-          ))}
-          {entityKind === 'competition' && competitionResults.map((c) => (
-            <button key={c.id} type="button" onClick={() => { workspace.pin({ kind: 'competition', id: c.id, label: c.name, logoUrl: c.logo_url, meta: c.country ?? undefined }); setQuery('') }} className="truncate rounded-[var(--cd-radius-sm)] px-2 py-1.5 text-left font-[var(--cd-font-body)] text-[12.5px] hover:bg-[var(--cd-surface-2)]" style={{ color: 'var(--cd-text-secondary)' }}>
-              {c.name}
-            </button>
-          ))}
-          {entityKind === 'player' && playerResults.map((p) => (
-            <button key={p.id} type="button" onClick={() => { workspace.pin({ kind: 'player', id: p.id, label: p.name, meta: p.team_name ?? undefined }); setQuery('') }} className="truncate rounded-[var(--cd-radius-sm)] px-2 py-1.5 text-left font-[var(--cd-font-body)] text-[12.5px] hover:bg-[var(--cd-surface-2)]" style={{ color: 'var(--cd-text-secondary)' }}>
-              {p.name}
-            </button>
-          ))}
-          {fixtureResults.length === 0 && teamResults.length === 0 && competitionResults.length === 0 && playerResults.length === 0 && (
-            <p className="col-span-full font-[var(--cd-font-body)] text-[12.5px]" style={{ color: 'var(--cd-text-muted)' }}>No matches for "{query}".</p>
-          )}
-        </div>
-      )}
+      {resultsPanel}
 
       <div className="grid gap-5 lg:grid-cols-[220px_1fr] xl:grid-cols-[240px_1fr_320px]">
         <div id="investigation-context-rail" className="lg:sticky lg:top-4 lg:self-start">
@@ -278,6 +284,7 @@ export default function InsightsPage() {
               onQueryChange={setQuery}
               onRestoreSession={workspace.restoreSession}
               hasSavedSession={!!workspace.savedSession}
+              searchResults={resultsPanel}
             />
           )}
 

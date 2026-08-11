@@ -69,6 +69,18 @@ class InvalidCredentialsError(Exception):
     pass
 
 
+class RoleEscalationError(Exception):
+    pass
+
+
+class NotSessionOwnerError(Exception):
+    pass
+
+
+class NotTokenOwnerError(Exception):
+    pass
+
+
 @dataclass(frozen=True)
 class LoginResult:
     user: User
@@ -101,7 +113,10 @@ class IdentityService:
     async def register(self, email: Email, password: str, now: datetime) -> User:
         existing = await self.users.get_by_email(email)
         if existing is not None:
-            raise ValueError(f"Account already exists for {email}")
+            # Deliberately does not echo the email back or otherwise confirm which address is
+            # already registered — the router's own login error already avoids the same
+            # enumeration vector by never distinguishing "no such user" from "wrong password".
+            raise ValueError("Unable to complete registration with the supplied details")
 
         user = User(
             id=UserId(uuid4()),
@@ -321,6 +336,11 @@ class IdentityService:
         session = await self.sessions.get(session_id)
         if session is None or not session.is_active:
             return
+        # `actor` is None only for trusted/system-initiated revocation (no caller to check
+        # ownership against); a real caller-supplied actor must own the session — otherwise any
+        # authenticated user could revoke any other user's session by guessing its UUID.
+        if actor is not None and session.user_id != actor:
+            raise NotSessionOwnerError("cannot revoke another user's session")
         session.revoked_at = now
         await self.sessions.upsert(session)
         await self._audit(
@@ -353,11 +373,16 @@ class IdentityService:
         token = await self.tokens.get(token_id)
         if token is None or not token.is_active:
             return
+        if token.user_id != actor:
+            raise NotTokenOwnerError("cannot revoke another user's personal access token")
         token.revoked_at = now
         await self.tokens.upsert(token)
         await self._audit(AuditAction.PAT_REVOKED, now, actor=actor, target_type="pat", target_id=str(token_id))
 
-    async def authenticate_with_token(self, raw_token: str, now: datetime) -> User | None:
+    async def authenticate_with_token(self, raw_token: str, now: datetime) -> tuple[PersonalAccessToken, User] | None:
+        """Returns the resolved token alongside the user (not just the user) so callers — namely
+        ``get_current_user``'s PAT fallback path — can enforce the token's declared ``scopes``
+        (Security Milestone finding H-6: scopes existed but nothing ever checked them)."""
         token = await self.tokens.get_by_hash(self.token_hasher.hash(raw_token))
         if token is None:
             return None
@@ -367,14 +392,26 @@ class IdentityService:
             return None
         token.last_used_at = now
         await self.tokens.upsert(token)
-        return await self.users.get(token.user_id)
+        user = await self.users.get(token.user_id)
+        if user is None:
+            return None
+        return token, user
 
     async def list_personal_access_tokens(self, user_id: UserId) -> list[PersonalAccessToken]:
         return await self.tokens.list_by_user(user_id)
 
     # -- role management ------------------------------------------------------------------------
 
-    async def change_role(self, user_id: UserId, new_role: Role, now: datetime, actor: UserId) -> User:
+    async def change_role(self, user_id: UserId, new_role: Role, now: datetime, actor: UserId, actor_role: Role) -> User:
+        # A caller may never grant a role above their own (an ADMINISTRATOR must not be able to
+        # mint a SUPER_ADMINISTRATOR, itself included) and may never change their own role at all
+        # — self-escalation via a single API call, even to a role the caller already qualifies
+        # to grant others, is never a legitimate action.
+        if user_id == actor:
+            raise RoleEscalationError("cannot change your own role")
+        if new_role.level > actor_role.level:
+            raise RoleEscalationError(f"cannot grant a role above your own ({actor_role.value})")
+
         user = await self.users.get(user_id)
         if user is None:
             raise ValueError(f"No such user: {user_id}")
@@ -391,6 +428,21 @@ class IdentityService:
             metadata={"old_role": old_role.value, "new_role": new_role.value},
         )
         return user
+
+    # -- security telemetry -----------------------------------------------------------------------
+
+    async def record_permission_denied(
+        self, actor: UserId, now: datetime, target_type: str, target_id: str, metadata: dict | None = None
+    ) -> None:
+        """Called from `apps.api.auth_deps.require_role`'s 403 path (Security Milestone finding
+        M-2: a caller repeatedly probing role-gated routes left zero audit trail). Every other
+        `_audit` call site records something that *succeeded*; this is the one exception —
+        recording the attempt itself, not an outcome — since a pattern of denials across many
+        routes is exactly the incident-response signal a permission-denial audit exists for."""
+        await self._audit(
+            AuditAction.PERMISSION_DENIED, now, actor=actor, target_type=target_type, target_id=target_id,
+            metadata=metadata,
+        )
 
     # -- audit ------------------------------------------------------------------------------------
 

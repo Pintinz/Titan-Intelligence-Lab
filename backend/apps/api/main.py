@@ -30,6 +30,7 @@ from apps.api.routers import (
     prediction_admin_router,
     prediction_analytics_router,
     prediction_router,
+    public_router,
     sports_router,
     tenancy_router,
     watchlist_router,
@@ -132,6 +133,33 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+_DOCS_PATHS = {"/docs", "/redoc", "/openapi.json"}
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    """Baseline response headers (Milestone: Enterprise Security & Compliance, Phase 11).
+
+    This is a JSON API with no server-rendered HTML, so a strict `default-src 'none'` CSP costs
+    nothing on every real route — there is no first-party markup/script/style for it to break.
+    The one exception is FastAPI's own auto-generated `/docs`/`/redoc` pages, which load Swagger
+    UI's JS/CSS from a CDN; a blanket CSP would leave those rendering blank, so they're excluded
+    here rather than silently broken. HSTS is safe to send unconditionally: browsers only ever
+    honor `Strict-Transport-Security` on a response actually received over HTTPS, so it's a no-op
+    over the plain-HTTP connections local dev/tests use and takes effect automatically once this
+    sits behind TLS in production, without another change."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    if request.url.path not in _DOCS_PATHS:
+        response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
+
+app.include_router(public_router.router)
 app.include_router(identity_router.router)
 app.include_router(tenancy_router.router)
 app.include_router(billing_router.router)
@@ -1381,6 +1409,64 @@ async def trigger_sync_players(
         raise HTTPException(status_code=404, detail=f"team '{team_id}' not found or has no provider reference") from None
     orchestrator = build_sync_orchestrator(session)
     run = await orchestrator.sync_players(sport_code, team.provider_refs[0], _now(), force=body.force, season_label=body.season_label)
+    return envelope(data=_serialize_sync_run(run))
+
+
+@app.post("/api/v1/admin/sync/{sport_code}/lineups/{fixture_id}")
+async def trigger_sync_lineups(
+    sport_code: str, fixture_id: str, body: TriggerSyncBody, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    """Per-fixture, same shape as trigger_sync_odds/trigger_sync_team_statistics — the reconciler
+    and validator side of this were already real (docs/roadmap.md Milestone 5), only the
+    orchestration to actually call them was missing until now."""
+    fixture = await SqlAlchemyFixtureRepository(session=session).get(FixtureId(uuid.UUID(fixture_id)))
+    if fixture is None or not fixture.provider_refs:
+        raise HTTPException(status_code=404, detail=f"fixture '{fixture_id}' not found or has no provider reference") from None
+    orchestrator = build_sync_orchestrator(session)
+    run = await orchestrator.sync_lineups(sport_code, fixture.provider_refs[0], fixture_id, _now(), force=body.force)
+    return envelope(data=_serialize_sync_run(run))
+
+
+@app.post("/api/v1/admin/sync/{sport_code}/injuries/{team_id}")
+async def trigger_sync_injuries(
+    sport_code: str, team_id: str, body: TriggerSyncBody, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    """Per-team, same shape as trigger_sync_players above."""
+    team = await SqlAlchemyTeamRepository(session=session).get(TeamId(uuid.UUID(team_id)))
+    if team is None or not team.provider_refs:
+        raise HTTPException(status_code=404, detail=f"team '{team_id}' not found or has no provider reference") from None
+    orchestrator = build_sync_orchestrator(session)
+    run = await orchestrator.sync_injuries(sport_code, team.provider_refs[0], _now(), force=body.force, season_label=body.season_label)
+    return envelope(data=_serialize_sync_run(run))
+
+
+@app.post("/api/v1/admin/sync/{sport_code}/transfers/{team_id}")
+async def trigger_sync_transfers(
+    sport_code: str, team_id: str, body: TriggerSyncBody, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    """Per-team, same shape as trigger_sync_players above."""
+    team = await SqlAlchemyTeamRepository(session=session).get(TeamId(uuid.UUID(team_id)))
+    if team is None or not team.provider_refs:
+        raise HTTPException(status_code=404, detail=f"team '{team_id}' not found or has no provider reference") from None
+    orchestrator = build_sync_orchestrator(session)
+    run = await orchestrator.sync_transfers(sport_code, team.provider_refs[0], _now(), force=body.force)
+    return envelope(data=_serialize_sync_run(run))
+
+
+@app.post("/api/v1/admin/sync/{sport_code}/coaching-staff/{team_id}")
+async def trigger_sync_coaching_staff(
+    sport_code: str, team_id: str, body: TriggerSyncBody, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    """Per-team, same shape as trigger_sync_players above."""
+    team = await SqlAlchemyTeamRepository(session=session).get(TeamId(uuid.UUID(team_id)))
+    if team is None or not team.provider_refs:
+        raise HTTPException(status_code=404, detail=f"team '{team_id}' not found or has no provider reference") from None
+    orchestrator = build_sync_orchestrator(session)
+    run = await orchestrator.sync_coaching_staff(sport_code, team.provider_refs[0], _now(), force=body.force)
     return envelope(data=_serialize_sync_run(run))
 
 

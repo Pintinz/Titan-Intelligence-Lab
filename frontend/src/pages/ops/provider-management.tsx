@@ -855,6 +855,17 @@ function CompetitionFixtureSourceSection() {
                 className="mt-1.5 w-56 font-mono text-xs"
               />
             </div>
+          </div>
+          <p className="text-xs text-warning">
+            football-data.org's free tier has no historical-season selector — the buttons below
+            always fetch whatever football-data.org itself considers the competition's current
+            season, regardless of the season label/id above. Those two fields only tag which local
+            season record the results get attached to; they don't control what gets requested.
+            Right around a season boundary (like now), "current" can mean different things to
+            different football-data.org endpoints — the sync results may reflect last season, next
+            season, or a mix, not necessarily the one you typed in.
+          </p>
+          <div className="flex flex-wrap items-end gap-2">
             <Button
               variant="secondary"
               onClick={() => triggerSync.mutate()}

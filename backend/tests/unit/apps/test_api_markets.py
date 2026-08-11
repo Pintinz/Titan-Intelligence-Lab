@@ -21,7 +21,9 @@ from modules.features.domain.value_objects import (
 )
 from modules.features.infrastructure.persistence.models import Base as FeaturesBase
 from modules.features.infrastructure.persistence.repositories import SqlAlchemyFeatureDefinitionRepository
+from modules.identity.domain.value_objects import Email, Role
 from modules.identity.infrastructure.persistence.models import Base as IdentityBase
+from modules.identity.infrastructure.persistence.repositories import SqlAlchemyUserRepository
 from modules.identity.infrastructure.security import MockJWTValidator
 from modules.predictions.infrastructure.persistence.models import Base as PredictionsBase
 
@@ -57,8 +59,21 @@ def client(db_session_factory):
     app.dependency_overrides.clear()
 
 
-def _auth_headers(client, email="market-admin@titaniq.test", password="correct-horse-battery"):
+def _auth_headers(client, db_session_factory, email="market-admin@titaniq.test", password="correct-horse-battery"):
+    # Market lifecycle mutations are ADMINISTRATOR-only (C-3) — promote this test user so the
+    # existing lifecycle tests keep exercising the real mutation flow, not just the 403 gate.
     client.post("/api/v1/auth/register", json={"email": email, "password": password})
+
+    async def _promote():
+        async with db_session_factory() as session:
+            users = SqlAlchemyUserRepository(session=session)
+            user = await users.get_by_email(Email(email))
+            user.role = Role.ADMINISTRATOR
+            await users.upsert(user)
+            await session.commit()
+
+    __import__("asyncio").run(_promote())
+
     login = client.post("/api/v1/auth/login", json={"email": email, "password": password})
     token = login.json()["data"]["access_token"]
     return {"Authorization": f"Bearer {token}"}
@@ -100,8 +115,8 @@ def _register_market(client, headers, market_key="football.router_test_market"):
     )
 
 
-def test_register_and_get_market(client):
-    headers = _auth_headers(client)
+def test_register_and_get_market(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
 
     created = _register_market(client, headers)
     assert created.status_code == 200
@@ -112,8 +127,32 @@ def test_register_and_get_market(client):
     assert fetched.json()["data"]["market_key"] == "football.router_test_market"
 
 
-def test_register_duplicate_market_returns_409(client):
-    headers = _auth_headers(client)
+def test_non_admin_cannot_register_market(client, db_session_factory):
+    client.post("/api/v1/auth/register", json={"email": "free-user@titaniq.test", "password": "correct-horse-battery"})
+    login = client.post("/api/v1/auth/login", json={"email": "free-user@titaniq.test", "password": "correct-horse-battery"})
+    headers = {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
+
+    response = _register_market(client, headers, market_key="football.non_admin_market")
+
+    assert response.status_code == 403
+
+
+def test_non_admin_cannot_promote_market(client, db_session_factory):
+    admin_headers = _auth_headers(client, db_session_factory)
+    market_key = "football.non_admin_promote_market"
+    _register_market(client, admin_headers, market_key=market_key)
+
+    client.post("/api/v1/auth/register", json={"email": "free-user-2@titaniq.test", "password": "correct-horse-battery"})
+    login = client.post("/api/v1/auth/login", json={"email": "free-user-2@titaniq.test", "password": "correct-horse-battery"})
+    free_headers = {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
+
+    response = client.post(f"/api/v1/markets/{market_key}/promote", headers=free_headers)
+
+    assert response.status_code == 403
+
+
+def test_register_duplicate_market_returns_409(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
     _register_market(client, headers)
 
     duplicate = _register_market(client, headers)
@@ -121,16 +160,16 @@ def test_register_duplicate_market_returns_409(client):
     assert duplicate.status_code == 409
 
 
-def test_get_unknown_market_returns_404(client):
-    headers = _auth_headers(client)
+def test_get_unknown_market_returns_404(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
 
     response = client.get("/api/v1/markets/does.not.exist", headers=headers)
 
     assert response.status_code == 404
 
 
-def test_list_markets_filters_by_sport_and_status(client):
-    headers = _auth_headers(client)
+def test_list_markets_filters_by_sport_and_status(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
     _register_market(client, headers, market_key="football.list_a")
     _register_market(client, headers, market_key="football.list_b")
 
@@ -142,7 +181,7 @@ def test_list_markets_filters_by_sport_and_status(client):
 
 
 def test_full_lifecycle_to_production_requires_feature_mapping(client, db_session_factory):
-    headers = _auth_headers(client)
+    headers = _auth_headers(client, db_session_factory)
     market_key = "football.lifecycle_market"
     _register_market(client, headers, market_key=market_key)
     asyncio_run = __import__("asyncio").run
@@ -171,8 +210,8 @@ def test_full_lifecycle_to_production_requires_feature_mapping(client, db_sessio
     assert features.json()["meta"]["count"] == 1
 
 
-def test_map_feature_to_unknown_market_returns_404(client):
-    headers = _auth_headers(client)
+def test_map_feature_to_unknown_market_returns_404(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
 
     response = client.post(
         "/api/v1/markets/does.not.exist/features", json={"feature_key": "x"}, headers=headers
@@ -181,8 +220,8 @@ def test_map_feature_to_unknown_market_returns_404(client):
     assert response.status_code == 404
 
 
-def test_map_unapproved_feature_returns_422(client):
-    headers = _auth_headers(client)
+def test_map_unapproved_feature_returns_422(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
     market_key = "football.unapproved_feature_market"
     _register_market(client, headers, market_key=market_key)
 
@@ -193,8 +232,8 @@ def test_map_unapproved_feature_returns_422(client):
     assert response.status_code == 422
 
 
-def test_reject_market_returns_to_draft(client):
-    headers = _auth_headers(client)
+def test_reject_market_returns_to_draft(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
     market_key = "football.reject_market"
     _register_market(client, headers, market_key=market_key)
     client.post(f"/api/v1/markets/{market_key}/submit", headers=headers)
@@ -208,8 +247,8 @@ def test_reject_market_returns_to_draft(client):
     assert rejected.json()["data"]["rejection_reason"] == "no data"
 
 
-def test_register_market_invalid_market_kind_returns_422(client):
-    headers = _auth_headers(client)
+def test_register_market_invalid_market_kind_returns_422(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
 
     response = client.post(
         "/api/v1/markets",
@@ -227,8 +266,8 @@ def test_register_market_invalid_market_kind_returns_422(client):
     assert response.status_code == 422
 
 
-def test_register_market_invalid_target_type_returns_422(client):
-    headers = _auth_headers(client)
+def test_register_market_invalid_target_type_returns_422(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
 
     response = client.post(
         "/api/v1/markets",
@@ -246,24 +285,24 @@ def test_register_market_invalid_target_type_returns_422(client):
     assert response.status_code == 422
 
 
-def test_list_markets_invalid_status_returns_422(client):
-    headers = _auth_headers(client)
+def test_list_markets_invalid_status_returns_422(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
 
     response = client.get("/api/v1/markets", params={"status": "not-a-real-status"}, headers=headers)
 
     assert response.status_code == 422
 
 
-def test_submit_unknown_market_returns_404(client):
-    headers = _auth_headers(client)
+def test_submit_unknown_market_returns_404(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
 
     response = client.post("/api/v1/markets/does.not.exist/submit", headers=headers)
 
     assert response.status_code == 404
 
 
-def test_submit_from_wrong_state_returns_409(client):
-    headers = _auth_headers(client)
+def test_submit_from_wrong_state_returns_409(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
     market_key = "football.wrong_state_market"
     _register_market(client, headers, market_key=market_key)
     client.post(f"/api/v1/markets/{market_key}/submit", headers=headers)
@@ -273,32 +312,32 @@ def test_submit_from_wrong_state_returns_409(client):
     assert response.status_code == 409
 
 
-def test_approve_unknown_market_returns_404(client):
-    headers = _auth_headers(client)
+def test_approve_unknown_market_returns_404(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
 
     response = client.post("/api/v1/markets/does.not.exist/approve", json={"reviewer": "cto"}, headers=headers)
 
     assert response.status_code == 404
 
 
-def test_reject_unknown_market_returns_404(client):
-    headers = _auth_headers(client)
+def test_reject_unknown_market_returns_404(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
 
     response = client.post("/api/v1/markets/does.not.exist/reject", json={"reviewer": "cto"}, headers=headers)
 
     assert response.status_code == 404
 
 
-def test_promote_unknown_market_returns_404(client):
-    headers = _auth_headers(client)
+def test_promote_unknown_market_returns_404(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
 
     response = client.post("/api/v1/markets/does.not.exist/promote", headers=headers)
 
     assert response.status_code == 404
 
 
-def test_promote_wrong_state_returns_409(client):
-    headers = _auth_headers(client)
+def test_promote_wrong_state_returns_409(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
     market_key = "football.promote_wrong_state_market"
     _register_market(client, headers, market_key=market_key)
 
@@ -307,16 +346,16 @@ def test_promote_wrong_state_returns_409(client):
     assert response.status_code == 409
 
 
-def test_deprecate_unknown_market_returns_404(client):
-    headers = _auth_headers(client)
+def test_deprecate_unknown_market_returns_404(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
 
     response = client.post("/api/v1/markets/does.not.exist/deprecate", headers=headers)
 
     assert response.status_code == 404
 
 
-def test_deprecate_wrong_state_returns_409(client):
-    headers = _auth_headers(client)
+def test_deprecate_wrong_state_returns_409(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
     market_key = "football.deprecate_wrong_state_market"
     _register_market(client, headers, market_key=market_key)
 
@@ -325,24 +364,24 @@ def test_deprecate_wrong_state_returns_409(client):
     assert response.status_code == 409
 
 
-def test_archive_unknown_market_returns_404(client):
-    headers = _auth_headers(client)
+def test_archive_unknown_market_returns_404(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
 
     response = client.post("/api/v1/markets/does.not.exist/archive", headers=headers)
 
     assert response.status_code == 404
 
 
-def test_remove_unknown_market_returns_404(client):
-    headers = _auth_headers(client)
+def test_remove_unknown_market_returns_404(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
 
     response = client.post("/api/v1/markets/does.not.exist/remove", headers=headers)
 
     assert response.status_code == 404
 
 
-def test_list_features_for_unknown_market_returns_404(client):
-    headers = _auth_headers(client)
+def test_list_features_for_unknown_market_returns_404(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
 
     response = client.get("/api/v1/markets/does.not.exist/features", headers=headers)
 
@@ -350,7 +389,7 @@ def test_list_features_for_unknown_market_returns_404(client):
 
 
 def test_full_lifecycle_through_archive_and_remove(client, db_session_factory):
-    headers = _auth_headers(client)
+    headers = _auth_headers(client, db_session_factory)
     market_key = "football.full_lifecycle_market"
     _register_market(client, headers, market_key=market_key)
     asyncio_run = __import__("asyncio").run

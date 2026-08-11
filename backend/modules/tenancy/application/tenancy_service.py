@@ -150,7 +150,10 @@ class TenancyService:
             metadata={"removed": True},
         )
 
-    async def list_members(self, organization_id: OrganizationId) -> list[Membership]:
+    async def list_members(self, organization_id: OrganizationId, actor: UserId) -> list[Membership]:
+        await self._require_role(
+            organization_id, actor, {OrganizationRole.OWNER, OrganizationRole.ADMIN, OrganizationRole.MEMBER}
+        )
         return await self.memberships.list_by_organization(organization_id)
 
     # -- invitations --------------------------------------------------------------------------------

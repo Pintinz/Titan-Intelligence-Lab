@@ -81,12 +81,13 @@ export function CompetitionFixtureTimeline({
                   {group.fixtures.map((fixture) => {
                     const { homeScore, awayScore } = fixtureScores(fixture.final_state)
                     const sportSlug = fixture.sport_code ?? fallbackSportSlug
+                    const status = fixtureCardStatus(fixture.status)
                     return (
                       <DiscoveryMatchCard
                         key={fixture.id}
                         competition={fixture.competition_name}
                         competitionLogoUrl={fixture.competition_logo_url}
-                        status={fixtureCardStatus(fixture.status)}
+                        status={status}
                         kickoffLabel={TIME_FORMAT.format(new Date(fixture.scheduled_at))}
                         venue={fixture.venue_name}
                         homeTeam={fixture.home_team.name}
@@ -96,7 +97,7 @@ export function CompetitionFixtureTimeline({
                         homeLogoUrl={fixture.home_team.logo_url}
                         awayLogoUrl={fixture.away_team.logo_url}
                         aiAvailable={aiReady}
-                        href={`/app/${sportSlug}/matches/${fixture.id}`}
+                        href={status === 'completed' ? `/app/${sportSlug}/matches/${fixture.id}/review` : `/app/${sportSlug}/matches/${fixture.id}`}
                       />
                     )
                   })}

@@ -179,12 +179,13 @@ export default function WatchlistPage() {
                   const fixture = query.data
                   const { homeScore, awayScore } = fixtureScores(fixture.final_state)
                   const sportSlug = sportSlugFor(fixture.sport_code)
+                  const status = fixtureCardStatus(fixture.status)
                   return (
                     <WatchlistMatchCard
                       key={entry.id}
                       competition={fixture.competition_name}
                       competitionLogoUrl={fixture.competition_logo_url}
-                      status={fixtureCardStatus(fixture.status)}
+                      status={status}
                       kickoffLabel={new Date(fixture.scheduled_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
                       venue={fixture.venue_name}
                       homeTeam={fixture.home_team.name}
@@ -197,7 +198,7 @@ export default function WatchlistPage() {
                       topPick={topPickByFixture.get(fixture.id) ?? null}
                       following
                       onToggleFollow={() => watchlist.toggle('fixture', entry.entity_ref)}
-                      href={`/app/${sportSlug}/matches/${fixture.id}`}
+                      href={status === 'completed' ? `/app/${sportSlug}/matches/${fixture.id}/review` : `/app/${sportSlug}/matches/${fixture.id}`}
                     />
                   )
                 })}

@@ -11,34 +11,114 @@ import { CDPanel, CDLabel } from '@/components/command-deck/primitives/panel'
 import { CDConfidenceGauge } from '@/components/command-deck/primitives/gauge'
 import { CDDistributionBar, CDTelemetryValue } from '@/components/command-deck/primitives/telemetry'
 import { ErrorState } from '@/components/ui/error-state'
-import type { FixtureTeamStatisticsDto, MarketReviewDto } from '@/lib/api/types'
+import type { FixtureSummaryDto, FixtureTeamStatisticsDto, MarketReviewDto } from '@/lib/api/types'
 
-type StatKey = keyof NonNullable<FixtureTeamStatisticsDto['stats']>
+type StatKey = string
+
+interface StatGroupDef {
+  title: string
+  neutral: boolean
+  rows: Array<{ key: StatKey; label: string; suffix?: string }>
+}
 
 /** Each group's `neutral` flag governs whether a leading value earns visual emphasis. Discipline
- * stats (fouls, cards) have no "better" side — a higher count is never treated as a win, per
- * TitanIQ's own directive against betting-style winner framing. */
-const STAT_GROUPS: Array<{ title: string; neutral: boolean; rows: Array<{ key: StatKey; label: string; suffix?: string }> }> = [
-  {
-    title: 'Attack',
-    neutral: false,
-    rows: [
-      { key: 'shots_total', label: 'Shots' },
-      { key: 'shots_on_target', label: 'Shots on target' },
-    ],
-  },
-  { title: 'Control', neutral: false, rows: [{ key: 'possession_pct', label: 'Possession', suffix: '%' }] },
-  { title: 'Set pieces', neutral: false, rows: [{ key: 'corners', label: 'Corners' }] },
-  {
-    title: 'Discipline',
-    neutral: true,
-    rows: [
-      { key: 'fouls', label: 'Fouls' },
-      { key: 'cards_yellow', label: 'Yellow cards' },
-      { key: 'cards_red', label: 'Red cards' },
-    ],
-  },
-]
+ * stats (fouls, cards, turnovers, errors) have no "better" side — a higher count is never treated
+ * as a win, per TitanIQ's own directive against betting-style winner framing.
+ *
+ * Sport-specific: each sport's `TeamStatistics.stat_set` carries a different real vocabulary
+ * (see `api_sports_adapter.py`'s per-sport shapes) — football's shots/possession/corners/cards
+ * has no basketball or baseball equivalent, so this is keyed by sport rather than one fixed list.
+ * `field_goal_pct`/`three_point_pct`/`free_throw_pct` are derived client-side in
+ * `deriveShootingPercentages` below, not raw provider fields, since the provider reports
+ * made/attempted counts rather than a percentage.
+ */
+const STAT_GROUPS_BY_SPORT: Record<string, StatGroupDef[]> = {
+  football: [
+    {
+      title: 'Attack',
+      neutral: false,
+      rows: [
+        { key: 'shots_total', label: 'Shots' },
+        { key: 'shots_on_target', label: 'Shots on target' },
+      ],
+    },
+    { title: 'Control', neutral: false, rows: [{ key: 'possession_pct', label: 'Possession', suffix: '%' }] },
+    { title: 'Set pieces', neutral: false, rows: [{ key: 'corners', label: 'Corners' }] },
+    {
+      title: 'Discipline',
+      neutral: true,
+      rows: [
+        { key: 'fouls', label: 'Fouls' },
+        { key: 'cards_yellow', label: 'Yellow cards' },
+        { key: 'cards_red', label: 'Red cards' },
+      ],
+    },
+  ],
+  basketball: [
+    {
+      title: 'Scoring',
+      neutral: false,
+      rows: [
+        { key: 'points', label: 'Points' },
+        { key: 'field_goals_made', label: 'Field goals made' },
+        { key: 'field_goal_pct', label: 'Field goal %', suffix: '%' },
+        { key: 'three_pointers_made', label: '3-pointers made' },
+        { key: 'three_point_pct', label: '3-point %', suffix: '%' },
+        { key: 'free_throws_made', label: 'Free throws made' },
+        { key: 'free_throw_pct', label: 'Free throw %', suffix: '%' },
+      ],
+    },
+    {
+      title: 'Hustle',
+      neutral: false,
+      rows: [
+        { key: 'rebounds_total', label: 'Rebounds' },
+        { key: 'rebounds_offensive', label: 'Offensive rebounds' },
+        { key: 'rebounds_defensive', label: 'Defensive rebounds' },
+        { key: 'assists', label: 'Assists' },
+        { key: 'steals', label: 'Steals' },
+        { key: 'blocks', label: 'Blocks' },
+      ],
+    },
+    {
+      title: 'Discipline',
+      neutral: true,
+      rows: [
+        { key: 'turnovers', label: 'Turnovers' },
+        { key: 'personal_fouls', label: 'Personal fouls' },
+      ],
+    },
+  ],
+  baseball: [
+    {
+      title: 'Box score',
+      neutral: false,
+      rows: [
+        { key: 'runs', label: 'Runs' },
+        { key: 'hits', label: 'Hits' },
+      ],
+    },
+    { title: 'Defense', neutral: true, rows: [{ key: 'errors', label: 'Errors' }] },
+  ],
+}
+
+/** Adds derived shooting-percentage keys (`field_goal_pct` etc) to a basketball stat row so
+ * `STAT_GROUPS_BY_SPORT.basketball` can reference them like any other stat_set key — the
+ * provider reports made/attempted counts, never a percentage, so this is arithmetic on real
+ * recorded numbers, not a fabricated stat. Only added when the attempted count was recorded and
+ * non-zero, so a team with no attempts (rather than zero makes) never shows a misleading 0%. */
+function deriveShootingPercentages(stats: Record<string, number>): Record<string, number> {
+  const pct = (outKey: string, made: string, attempted: string) => {
+    const a = stats[attempted]
+    return a ? { [outKey]: Math.round((stats[made] / a) * 1000) / 10 } : {}
+  }
+  return {
+    ...stats,
+    ...pct('field_goal_pct', 'field_goals_made', 'field_goals_attempted'),
+    ...pct('three_point_pct', 'three_pointers_made', 'three_pointers_attempted'),
+    ...pct('free_throw_pct', 'free_throws_made', 'free_throws_attempted'),
+  }
+}
 
 function joinWithAnd(items: string[]): string {
   if (items.length === 1) return items[0]
@@ -142,10 +222,19 @@ export default function MatchReviewPage() {
         </p>
       </CDPanel>
 
+      {fixture.period_scores && <PeriodScoreTable periodScores={fixture.period_scores} homeTeam={homeTeam} awayTeam={awayTeam} />}
+
       {statsQuery.isPending ? (
         <div className="h-40 animate-pulse rounded-[var(--cd-radius-lg)]" style={{ backgroundColor: 'var(--cd-surface-2)' }} />
       ) : (
-        <MatchStatisticsPanel statsRows={statsQuery.data ?? []} homeTeam={homeTeam} awayTeam={awayTeam} homeTeamId={fixture.home_team.id} awayTeamId={fixture.away_team.id} />
+        <MatchStatisticsPanel
+          statsRows={statsQuery.data ?? []}
+          homeTeam={homeTeam}
+          awayTeam={awayTeam}
+          homeTeamId={fixture.home_team.id}
+          awayTeamId={fixture.away_team.id}
+          sportCode={sport.code}
+        />
       )}
 
       {reviewQuery.isPending && (
@@ -172,6 +261,96 @@ export default function MatchReviewPage() {
         </div>
       )}
     </div>
+  )
+}
+
+/**
+ * PeriodScoreTable — the real period-by-period line score (basketball quarters, baseball
+ * innings), sourced from `Fixture.period_scores` (verified live against each provider's own
+ * `/games` response shape — see `api_sports_adapter.py`). Only renders when the provider has
+ * actually reported periods; a `null` entry (not yet played, or overtime that didn't happen)
+ * prints as an em dash rather than a fabricated 0. Basketball additionally shows a derived
+ * halftime split (Q1 + Q2), real arithmetic on recorded quarters, not a separately-fetched stat.
+ */
+function PeriodScoreTable({
+  periodScores,
+  homeTeam,
+  awayTeam,
+}: {
+  periodScores: NonNullable<FixtureSummaryDto['period_scores']>
+  homeTeam: TeamRef
+  awayTeam: TeamRef
+}) {
+  const { kind, home, away } = periodScores
+  const periodCount = Math.max(home.length, away.length)
+  const regularCount = kind === 'quarter' ? 4 : 9
+  const labels = Array.from({ length: periodCount }, (_, i) =>
+    i < regularCount ? `${i + 1}` : kind === 'quarter' ? 'OT' : 'X'
+  )
+  const sum = (values: Array<number | null>) => values.reduce<number | null>((acc, v) => (v === null ? acc : (acc ?? 0) + v), null)
+  const homeTotal = sum(home)
+  const awayTotal = sum(away)
+
+  const halftime =
+    kind === 'quarter' && home[0] !== null && home[1] !== null && away[0] !== null && away[1] !== null
+      ? { home: home[0] + home[1], away: away[0] + away[1] }
+      : null
+
+  return (
+    <CDPanel>
+      <CDLabel>{kind === 'quarter' ? 'Quarter-by-quarter' : 'Inning-by-inning'}</CDLabel>
+      <div className="mt-4 overflow-x-auto">
+        <table className="w-full min-w-[420px] border-collapse">
+          <thead>
+            <tr>
+              <th className="w-32 pb-2 text-left font-[var(--cd-font-telemetry)] text-[10px] font-medium uppercase tracking-[0.06em]" style={{ color: 'var(--cd-text-muted)' }} />
+              {labels.map((label) => (
+                <th key={label} className="w-10 pb-2 text-center font-[var(--cd-font-telemetry)] text-[10px] font-medium uppercase tracking-[0.06em]" style={{ color: 'var(--cd-text-muted)' }}>
+                  {label}
+                </th>
+              ))}
+              <th className="w-12 pb-2 text-center font-[var(--cd-font-telemetry)] text-[10px] font-semibold uppercase tracking-[0.06em]" style={{ color: 'var(--cd-text-secondary)' }}>
+                Total
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <PeriodScoreRow team={homeTeam} values={home} total={homeTotal} />
+            <PeriodScoreRow team={awayTeam} values={away} total={awayTotal} />
+          </tbody>
+        </table>
+      </div>
+      {halftime && (
+        <p className="mt-3 font-[var(--cd-font-body)] text-[12px]" style={{ color: 'var(--cd-text-muted)' }}>
+          Halftime: {homeTeam.name} {halftime.home} – {halftime.away} {awayTeam.name}
+        </p>
+      )}
+    </CDPanel>
+  )
+}
+
+function PeriodScoreRow({ team, values, total }: { team: TeamRef; values: Array<number | null>; total: number | null }) {
+  return (
+    <tr className="border-t" style={{ borderColor: 'var(--cd-border-hairline)' }}>
+      <td className="py-2">
+        <div className="flex min-w-0 items-center gap-1.5">
+          {team.logoUrl ? (
+            <img src={team.logoUrl} alt="" className="size-4 shrink-0 object-contain" loading="lazy" />
+          ) : null}
+          <span className="truncate font-[var(--cd-font-body)] text-[12.5px] font-medium" style={{ color: 'var(--cd-text-secondary)' }}>
+            {team.name}
+          </span>
+        </div>
+      </td>
+      {values.map((value, i) => (
+        <td key={i} className="py-2 text-center font-[var(--cd-font-tabular)] text-[13px] tabular-nums" style={{ color: 'var(--cd-text-secondary)' }}>
+          {value ?? '—'}
+        </td>
+      ))}
+      <td className="py-2 text-center font-[var(--cd-font-tabular)] text-[14px] font-semibold tabular-nums" style={{ color: 'var(--cd-text-primary)' }}>
+        {total ?? '—'}
+      </td>
+    </tr>
   )
 }
 
@@ -227,17 +406,22 @@ function MatchStatisticsPanel({
   awayTeam,
   homeTeamId,
   awayTeamId,
+  sportCode,
 }: {
   statsRows: FixtureTeamStatisticsDto[]
   homeTeam: TeamRef
   awayTeam: TeamRef
   homeTeamId: string
   awayTeamId: string
+  sportCode: string
 }) {
-  const homeStats = statsRows.find((r) => r.team_id === homeTeamId)?.stats ?? {}
-  const awayStats = statsRows.find((r) => r.team_id === awayTeamId)?.stats ?? {}
+  const rawHomeStats = statsRows.find((r) => r.team_id === homeTeamId)?.stats ?? {}
+  const rawAwayStats = statsRows.find((r) => r.team_id === awayTeamId)?.stats ?? {}
+  const homeStats = sportCode === 'basketball' ? deriveShootingPercentages(rawHomeStats) : rawHomeStats
+  const awayStats = sportCode === 'basketball' ? deriveShootingPercentages(rawAwayStats) : rawAwayStats
+  const statGroups = STAT_GROUPS_BY_SPORT[sportCode] ?? STAT_GROUPS_BY_SPORT.football
 
-  const groups: ResolvedStatGroup[] = STAT_GROUPS.map((group) => ({
+  const groups: ResolvedStatGroup[] = statGroups.map((group) => ({
     title: group.title,
     neutral: group.neutral,
     rows: group.rows

@@ -31,9 +31,11 @@ from modules.knowledge_graph.infrastructure.persistence.repositories import (
 from modules.sports.domain.value_objects import FixtureId, FixtureStatus, MatchId, ProviderRef, SeasonId, SportCode
 from modules.sports.infrastructure.persistence.models import Base as SportsBase
 from modules.sports.infrastructure.persistence.repositories import (
+    SqlAlchemyCoachingStaffRepository,
     SqlAlchemyCompetitionRepository,
     SqlAlchemyCountryRepository,
     SqlAlchemyFixtureRepository,
+    SqlAlchemyInjuryRepository,
     SqlAlchemyMatchRepository,
     SqlAlchemyLineupRepository,
     SqlAlchemyPlayerRepository,
@@ -42,17 +44,21 @@ from modules.sports.infrastructure.persistence.repositories import (
     SqlAlchemyStandingRepository,
     SqlAlchemyTeamRepository,
     SqlAlchemyTeamStatisticsRepository,
+    SqlAlchemyTransferRepository,
     SqlAlchemyVenueRepository,
 )
 from modules.sports.ports.provider_gateway import (
+    ProviderCoachRecord,
     ProviderCountryRecord,
     ProviderFixtureRecord,
+    ProviderInjuryRecord,
     ProviderLineupRecord,
     ProviderLineupSlotRecord,
     ProviderPlayerRecord,
     ProviderStandingRecord,
     ProviderTeamRecord,
     ProviderTeamStatisticsRecord,
+    ProviderTransferRecord,
 )
 from modules.watchlist.domain.entities import WatchlistEntry
 from modules.watchlist.domain.value_objects import WatchlistEntityType, WatchlistEntryId
@@ -104,6 +110,9 @@ def service(session):
         team_statistics=SqlAlchemyTeamStatisticsRepository(session=session),
         lineups=SqlAlchemyLineupRepository(session=session),
         standings=SqlAlchemyStandingRepository(session=session),
+        injuries=SqlAlchemyInjuryRepository(session=session),
+        transfers=SqlAlchemyTransferRepository(session=session),
+        coaching_staff=SqlAlchemyCoachingStaffRepository(session=session),
         ref_index=SqlAlchemyProviderRefIndexRepository(session=session),
         kg=kg,
         timeline=SqlAlchemyTimelineEventRepository(session=session),
@@ -143,6 +152,9 @@ def service_with_outcome_resolver(session):
         team_statistics=SqlAlchemyTeamStatisticsRepository(session=session),
         lineups=SqlAlchemyLineupRepository(session=session),
         standings=SqlAlchemyStandingRepository(session=session),
+        injuries=SqlAlchemyInjuryRepository(session=session),
+        transfers=SqlAlchemyTransferRepository(session=session),
+        coaching_staff=SqlAlchemyCoachingStaffRepository(session=session),
         ref_index=SqlAlchemyProviderRefIndexRepository(session=session),
         kg=kg,
         timeline=SqlAlchemyTimelineEventRepository(session=session),
@@ -182,6 +194,9 @@ def service_with_form_differential(session):
         team_statistics=SqlAlchemyTeamStatisticsRepository(session=session),
         lineups=SqlAlchemyLineupRepository(session=session),
         standings=SqlAlchemyStandingRepository(session=session),
+        injuries=SqlAlchemyInjuryRepository(session=session),
+        transfers=SqlAlchemyTransferRepository(session=session),
+        coaching_staff=SqlAlchemyCoachingStaffRepository(session=session),
         ref_index=SqlAlchemyProviderRefIndexRepository(session=session),
         kg=kg,
         timeline=SqlAlchemyTimelineEventRepository(session=session),
@@ -211,6 +226,9 @@ def service_with_alerts(session):
         team_statistics=SqlAlchemyTeamStatisticsRepository(session=session),
         lineups=SqlAlchemyLineupRepository(session=session),
         standings=SqlAlchemyStandingRepository(session=session),
+        injuries=SqlAlchemyInjuryRepository(session=session),
+        transfers=SqlAlchemyTransferRepository(session=session),
+        coaching_staff=SqlAlchemyCoachingStaffRepository(session=session),
         ref_index=SqlAlchemyProviderRefIndexRepository(session=session),
         kg=kg,
         timeline=SqlAlchemyTimelineEventRepository(session=session),
@@ -379,6 +397,48 @@ async def test_reconcile_team_merges_provider_refs_on_repeat_sync(service, sessi
 
 
 @pytest.mark.asyncio
+async def test_reconcile_team_auto_merges_via_cross_provider_ref(service, session):
+    """TheSportsDB-class integration: a team record carrying a deterministic cross_provider_ref
+    (e.g. TheSportsDB's real idAPIfootball field) merges into the already-reconciled team under
+    that other provider, rather than creating a duplicate."""
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    primary, _ = await service.reconcile_team(_team_record(), sport.id, T0)
+    await session.commit()
+
+    supplementary_record = ProviderTeamRecord(
+        external_ref=ProviderRef(provider="thesportsdb", external_id="tsdb-1"),
+        name="Arsenal", short_name="ARS", country="England",
+        cross_provider_ref=ProviderRef(provider="mock_football", external_id="t1"),
+    )
+    merged, created = await service.reconcile_team(supplementary_record, sport.id, T0)
+    await session.commit()
+
+    assert not created
+    assert merged.id == primary.id
+    assert len(merged.provider_refs) == 2  # both provider refs now point at the same team
+
+
+@pytest.mark.asyncio
+async def test_reconcile_team_cross_provider_ref_falls_back_to_create_when_unresolved(service, session):
+    """If the claimed cross-provider team hasn't been reconciled yet, this creates a new team
+    like normal rather than raising — the claim just doesn't resolve to anything yet."""
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+
+    record = ProviderTeamRecord(
+        external_ref=ProviderRef(provider="thesportsdb", external_id="tsdb-1"),
+        name="Arsenal", short_name="ARS", country="England",
+        cross_provider_ref=ProviderRef(provider="mock_football", external_id="never-seen"),
+    )
+    team, created = await service.reconcile_team(record, sport.id, T0)
+    await session.commit()
+
+    assert created
+    assert team.name == "Arsenal"
+
+
+@pytest.mark.asyncio
 async def test_reconcile_player_resolves_team_id(service, session):
     sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
     await session.commit()
@@ -542,6 +602,99 @@ async def test_reconcile_fixture_match_by_teams_and_date_updates_existing_fixtur
     assert not created
     assert matched.id == original.id
     assert matched.version == 2
+
+
+@pytest.mark.asyncio
+async def test_reconcile_fixture_preserve_existing_score_does_not_overwrite(service, session):
+    """A supplementary (non-authoritative) source's own score must never clobber one an already-
+    trusted provider set — the real bug this option exists to prevent for TheSportsDB-class
+    integrations."""
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    competition, _ = await service.reconcile_competition("39", "mock_football", sport.id, T0)
+    season, _ = await service.reconcile_season("39", "2026", "mock_football", competition.id, T0)
+    home, _ = await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+    away, _ = await service.reconcile_team(_team_record("t2", "Chelsea"), sport.id, T0)
+    await session.commit()
+
+    authoritative_record = ProviderFixtureRecord(
+        external_ref=ProviderRef(provider="mock_football", external_id="fx1"),
+        home_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        away_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
+        scheduled_at=T0, competition_ref="39", season_label="2026",
+        status="FT", home_score=2, away_score=1,
+    )
+    original, _ = await service.reconcile_fixture(authoritative_record, season.id, T0)
+    await session.commit()
+    assert original.home_score == 2
+    assert original.away_score == 1
+
+    await service.ref_index.upsert(ProviderRefIndexEntry("thesportsdb", "tsdb-t1", EntityKind.TEAM, str(home.id.value)))
+    await service.ref_index.upsert(ProviderRefIndexEntry("thesportsdb", "tsdb-t2", EntityKind.TEAM, str(away.id.value)))
+    await session.commit()
+
+    # Same real-world match, but this supplementary source reports a different (wrong) score.
+    supplementary_record = ProviderFixtureRecord(
+        external_ref=ProviderRef(provider="thesportsdb", external_id="tsdb-fx1"),
+        home_team_ref=ProviderRef(provider="thesportsdb", external_id="tsdb-t1"),
+        away_team_ref=ProviderRef(provider="thesportsdb", external_id="tsdb-t2"),
+        scheduled_at=T0, competition_ref="4328", season_label="2026",
+        status="FT", home_score=9, away_score=9,
+    )
+    merged, created = await service.reconcile_fixture(
+        supplementary_record, season.id, T0, match_by_teams_and_date=True,
+        allow_skip_live=True, preserve_existing_score=True,
+    )
+    await session.commit()
+
+    assert not created
+    assert merged.id == original.id
+    assert merged.home_score == 2  # untouched, not overwritten with the supplementary source's 9
+    assert merged.away_score == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_fixture_preserve_existing_score_still_fills_when_absent(service, session):
+    """The guard only locks a score that's already present — a genuinely-empty existing score
+    still gets filled in from the supplementary source, since there's nothing trusted to protect."""
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    competition, _ = await service.reconcile_competition("39", "mock_football", sport.id, T0)
+    season, _ = await service.reconcile_season("39", "2026", "mock_football", competition.id, T0)
+    home, _ = await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+    away, _ = await service.reconcile_team(_team_record("t2", "Chelsea"), sport.id, T0)
+    await session.commit()
+
+    scheduled_record = ProviderFixtureRecord(
+        external_ref=ProviderRef(provider="mock_football", external_id="fx1"),
+        home_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        away_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
+        scheduled_at=T0, competition_ref="39", season_label="2026", status="NS",
+    )
+    original, _ = await service.reconcile_fixture(scheduled_record, season.id, T0)
+    await session.commit()
+    assert original.home_score is None
+
+    await service.ref_index.upsert(ProviderRefIndexEntry("thesportsdb", "tsdb-t1", EntityKind.TEAM, str(home.id.value)))
+    await service.ref_index.upsert(ProviderRefIndexEntry("thesportsdb", "tsdb-t2", EntityKind.TEAM, str(away.id.value)))
+    await session.commit()
+
+    supplementary_record = ProviderFixtureRecord(
+        external_ref=ProviderRef(provider="thesportsdb", external_id="tsdb-fx1"),
+        home_team_ref=ProviderRef(provider="thesportsdb", external_id="tsdb-t1"),
+        away_team_ref=ProviderRef(provider="thesportsdb", external_id="tsdb-t2"),
+        scheduled_at=T0, competition_ref="4328", season_label="2026",
+        status="FT", home_score=3, away_score=0,
+    )
+    merged, created = await service.reconcile_fixture(
+        supplementary_record, season.id, T0, match_by_teams_and_date=True,
+        allow_skip_live=True, preserve_existing_score=True,
+    )
+    await session.commit()
+
+    assert not created
+    assert merged.home_score == 3
+    assert merged.away_score == 0
 
 
 @pytest.mark.asyncio
@@ -997,6 +1150,9 @@ async def test_reconcile_fixture_computes_every_registered_calculator_for_a_spor
         team_statistics=SqlAlchemyTeamStatisticsRepository(session=session),
         lineups=SqlAlchemyLineupRepository(session=session),
         standings=SqlAlchemyStandingRepository(session=session),
+        injuries=SqlAlchemyInjuryRepository(session=session),
+        transfers=SqlAlchemyTransferRepository(session=session),
+        coaching_staff=SqlAlchemyCoachingStaffRepository(session=session),
         ref_index=SqlAlchemyProviderRefIndexRepository(session=session),
         kg=kg,
         timeline=SqlAlchemyTimelineEventRepository(session=session),
@@ -1075,3 +1231,168 @@ async def test_reconcile_fixture_skips_form_differential_for_unregistered_sport(
     await session.commit()
 
     assert calculator.calls == []
+
+
+# -- Injury / Transfer / Coaching staff (squad intelligence) --------------------------------
+
+
+async def _reconciled_player(service, session, team_ref="t1", player_ref="p1"):
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    team, _ = await service.reconcile_team(_team_record(team_ref), sport.id, T0)
+    await session.commit()
+    player, _ = await service.reconcile_player(
+        ProviderPlayerRecord(
+            external_ref=ProviderRef(provider="mock_football", external_id=player_ref),
+            team_ref=ProviderRef(provider="mock_football", external_id=team_ref),
+            name="Alex Carter", date_of_birth=datetime(1998, 1, 1, tzinfo=timezone.utc), position="forward",
+        ),
+        sport.id, T0,
+    )
+    await session.commit()
+    return team, player
+
+
+@pytest.mark.asyncio
+async def test_reconcile_injury_requires_reconciled_player(service):
+    record = ProviderInjuryRecord(
+        player_ref=ProviderRef(provider="mock_football", external_id="unknown"),
+        team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        status="Missing Fixture", reason="Hamstring",
+    )
+    with pytest.raises(ReconciliationDependencyError):
+        await service.reconcile_injury(record, T0)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_injury_updates_same_player_row_in_place(service, session):
+    """Re-syncing the same player's injury updates the existing row rather than creating a
+    second one — the provider's /injuries endpoint always reports current status, not a log."""
+    _, player = await _reconciled_player(service, session)
+    record = ProviderInjuryRecord(
+        player_ref=ProviderRef(provider="mock_football", external_id="p1"),
+        team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        status="Missing Fixture", reason="Hamstring", reported_at=T0,
+    )
+    first, created = await service.reconcile_injury(record, T0)
+    await session.commit()
+    assert created
+    assert first.reason == "Hamstring"
+
+    updated_record = ProviderInjuryRecord(
+        player_ref=ProviderRef(provider="mock_football", external_id="p1"),
+        team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        status="Questionable", reason="Knee Injury", reported_at=T0 + timedelta(days=3),
+    )
+    second, created_again = await service.reconcile_injury(updated_record, T0 + timedelta(days=3))
+    await session.commit()
+
+    assert not created_again
+    assert second.id == first.id
+    assert second.reason == "Knee Injury"
+    assert second.status == "Questionable"
+    assert second.player_id == player.id
+
+    all_injuries = await service.injuries.list_by_player(player.id)
+    assert len(all_injuries) == 1  # updated in place, never duplicated
+
+
+@pytest.mark.asyncio
+async def test_reconcile_injury_never_fabricates_expected_return(service, session):
+    await _reconciled_player(service, session)
+    record = ProviderInjuryRecord(
+        player_ref=ProviderRef(provider="mock_football", external_id="p1"),
+        team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        status="Missing Fixture", reason="Illness",
+    )
+    injury, _ = await service.reconcile_injury(record, T0)
+    assert injury.expected_return is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_transfer_creates_distinct_rows_for_distinct_moves(service, session):
+    """Unlike injuries, each real transfer is a genuine historical event — two different moves
+    for the same player both persist rather than the second overwriting the first."""
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+    away_team, _ = await service.reconcile_team(_team_record("t2", "Chelsea"), sport.id, T0)
+    await session.commit()
+    _, player = await _reconciled_player(service, session, team_ref="t1", player_ref="p1")
+
+    first = ProviderTransferRecord(
+        player_ref=ProviderRef(provider="mock_football", external_id="p1"),
+        from_team_ref=None, to_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        effective_date=datetime(2020, 7, 1, tzinfo=timezone.utc), transfer_type="Free",
+    )
+    second = ProviderTransferRecord(
+        player_ref=ProviderRef(provider="mock_football", external_id="p1"),
+        from_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        to_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
+        effective_date=datetime(2023, 1, 15, tzinfo=timezone.utc), transfer_type="€10M",
+    )
+    await service.reconcile_transfer(first, T0)
+    await session.commit()
+    await service.reconcile_transfer(second, T0)
+    await session.commit()
+
+    # re-syncing the same first record again must not duplicate it
+    await service.reconcile_transfer(first, T0)
+    await session.commit()
+
+    transfers = await service.transfers.list_by_player(player.id)
+    assert len(transfers) == 2
+    assert {t.transfer_type for t in transfers} == {"Free", "€10M"}
+    assert away_team.id in {t.to_team_id for t in transfers}
+
+
+@pytest.mark.asyncio
+async def test_reconcile_coaching_staff_closes_previous_when_person_changes(service, session):
+    """Time-aware: a new coach closes the previous one's row (valid_to set) instead of
+    overwriting it — history is preserved."""
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    team, _ = await service.reconcile_team(_team_record(), sport.id, T0)
+    await session.commit()
+
+    first, created = await service.reconcile_coaching_staff(
+        ProviderCoachRecord(team_ref=ProviderRef(provider="mock_football", external_id="t1"), person_name="Mikel Arteta"),
+        T0,
+    )
+    await session.commit()
+    assert created
+    assert first.valid_to is None
+
+    later = T0 + timedelta(days=200)
+    second, created_again = await service.reconcile_coaching_staff(
+        ProviderCoachRecord(team_ref=ProviderRef(provider="mock_football", external_id="t1"), person_name="New Manager"),
+        later,
+    )
+    await session.commit()
+    assert created_again
+    assert second.person_name == "New Manager"
+    assert second.valid_to is None
+
+    history = await service.coaching_staff.list_by_team(team.id)
+    assert len(history) == 2
+    closed = next(c for c in history if c.person_name == "Mikel Arteta")
+    # SQLite/aiosqlite drops tzinfo on read-back (docs/decisions.md ADR-007) — compare naive.
+    assert closed.valid_to.replace(tzinfo=None) == later.replace(tzinfo=None)  # closed, not deleted/overwritten
+
+
+@pytest.mark.asyncio
+async def test_reconcile_coaching_staff_same_person_is_a_no_op(service, session):
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    await service.reconcile_team(_team_record(), sport.id, T0)
+    await session.commit()
+
+    record = ProviderCoachRecord(team_ref=ProviderRef(provider="mock_football", external_id="t1"), person_name="Mikel Arteta")
+    first, created = await service.reconcile_coaching_staff(record, T0)
+    await session.commit()
+    second, created_again = await service.reconcile_coaching_staff(record, T0 + timedelta(days=30))
+    await session.commit()
+
+    assert created
+    assert not created_again
+    assert second.id == first.id

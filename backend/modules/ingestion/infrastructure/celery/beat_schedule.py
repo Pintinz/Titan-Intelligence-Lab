@@ -52,32 +52,85 @@ def compute_adaptive_interval(base_interval_seconds: int, quota_remaining_pct: f
     return base_interval_seconds * multiplier
 
 
-# Static baseline schedule — args are illustrative (a real deployment's Admin Center would drive
-# the actual competition/season list, docs/admin_center.md); the interval *values* are what this
-# milestone commits to.
+# Audit fix (2026-08-10): every entry below now carries a real `args` tuple. Previously none did
+# — every `ingestion.sync_*` task requires `sport_code`/`competition_ref`/`season_label`/
+# `season_id` as required positional arguments with no defaults, so if Beat had ever actually
+# fired one of these entries it would have failed with a missing-arguments TypeError. `now_iso`
+# is deliberately the one arg still omitted here — it's now optional on every task (see
+# `_resolve_now` in tasks.py) and resolves to the real time of each firing, since a value baked
+# into this module-level dict at worker startup would go stale after the very first run.
+# competition_ref values are each provider's real external league ID (verified live against
+# api-sports.io, not guessed); season labels are pinned to a season within the free-tier's
+# 2022-2024 access window (docs note this restriction repo-wide, e.g. `scripts/seed_football_markets.py`).
 BEAT_SCHEDULE = {
     "sync-countries-football": {
         "task": "ingestion.sync_countries", "schedule": timedelta(seconds=HISTORICAL_IMPORT_INTERVAL_SECONDS * 4),
+        "args": ("football",),
     },
     "sync-standings-football-epl": {
         "task": "ingestion.sync_standings", "schedule": timedelta(seconds=STANDINGS_INTERVAL_SECONDS),
+        "args": ("football", "39", "2023", "21521495-4dd4-4c50-a41d-d88642322804"),
     },
     "sync-live-fixtures-football-epl": {
         "task": "ingestion.sync_live_fixtures", "schedule": timedelta(seconds=LIVE_FIXTURES_INTERVAL_SECONDS),
+        "args": ("football", "39", "2023", "21521495-4dd4-4c50-a41d-d88642322804"),
+    },
+    "sync-countries-basketball": {
+        "task": "ingestion.sync_countries", "schedule": timedelta(seconds=HISTORICAL_IMPORT_INTERVAL_SECONDS * 4),
+        "args": ("basketball",),
+    },
+    "sync-standings-basketball-nba": {
+        "task": "ingestion.sync_standings", "schedule": timedelta(seconds=STANDINGS_INTERVAL_SECONDS),
+        "args": ("basketball", "12", "2023-2024", "0b1c3ee3-88c9-4f2c-83b3-78144a3481d3"),
+    },
+    "sync-live-fixtures-basketball-nba": {
+        "task": "ingestion.sync_live_fixtures", "schedule": timedelta(seconds=LIVE_FIXTURES_INTERVAL_SECONDS),
+        "args": ("basketball", "12", "2023-2024", "0b1c3ee3-88c9-4f2c-83b3-78144a3481d3"),
+    },
+    "sync-standings-basketball-euroleague": {
+        "task": "ingestion.sync_standings", "schedule": timedelta(seconds=STANDINGS_INTERVAL_SECONDS),
+        "args": ("basketball", "120", "2023", "0cfa00cc-1fd9-433d-a8d9-cdf7d7cbab6f"),
+    },
+    "sync-live-fixtures-basketball-euroleague": {
+        "task": "ingestion.sync_live_fixtures", "schedule": timedelta(seconds=LIVE_FIXTURES_INTERVAL_SECONDS),
+        "args": ("basketball", "120", "2023", "0cfa00cc-1fd9-433d-a8d9-cdf7d7cbab6f"),
+    },
+    "sync-countries-baseball": {
+        "task": "ingestion.sync_countries", "schedule": timedelta(seconds=HISTORICAL_IMPORT_INTERVAL_SECONDS * 4),
+        "args": ("baseball",),
+    },
+    "sync-standings-baseball-mlb": {
+        "task": "ingestion.sync_standings", "schedule": timedelta(seconds=STANDINGS_INTERVAL_SECONDS),
+        "args": ("baseball", "1", "2023", "0c67a838-9049-4bab-b3e4-6bbf675fc96b"),
+    },
+    "sync-live-fixtures-baseball-mlb": {
+        "task": "ingestion.sync_live_fixtures", "schedule": timedelta(seconds=LIVE_FIXTURES_INTERVAL_SECONDS),
+        "args": ("baseball", "1", "2023", "0c67a838-9049-4bab-b3e4-6bbf675fc96b"),
+    },
+    "sync-standings-baseball-npb": {
+        "task": "ingestion.sync_standings", "schedule": timedelta(seconds=STANDINGS_INTERVAL_SECONDS),
+        "args": ("baseball", "2", "2023", "0ee2290f-e216-48a1-bb2f-f92ec4f39d51"),
+    },
+    "sync-live-fixtures-baseball-npb": {
+        "task": "ingestion.sync_live_fixtures", "schedule": timedelta(seconds=LIVE_FIXTURES_INTERVAL_SECONDS),
+        "args": ("baseball", "2", "2023", "0ee2290f-e216-48a1-bb2f-f92ec4f39d51"),
     },
     # football-data.org fixture-schedule path (opt-in per competition via
-    # CompetitionFixtureSourcePreference) — same "args are illustrative" caveat as every other
-    # competition/season-scoped entry above: a real deployment's Admin Center drives the actual
-    # competition/season list. PROVIDER_POLL_INTERVAL_SECONDS respects the free tier's 10 req/min
-    # cap comfortably for both a schedule check and a results check.
+    # CompetitionFixtureSourcePreference) — competition_id/season_label/season_id below are EPL's
+    # real values, matching the real CompetitionFixtureSourcePreference row already configured for
+    # it (provider_competition_ref "PL"). PROVIDER_POLL_INTERVAL_SECONDS respects the free tier's
+    # 10 req/min cap comfortably for both a schedule check and a results check.
     "sync-upcoming-fixtures-football-data-org": {
         "task": "ingestion.sync_upcoming_fixtures", "schedule": timedelta(seconds=PROVIDER_POLL_INTERVAL_SECONDS),
+        "args": ("football", "a2721390-8d51-4011-905b-d6379e425675", "2023", "21521495-4dd4-4c50-a41d-d88642322804"),
     },
     "sync-completed-fixtures-football-data-org": {
         "task": "ingestion.sync_completed_fixtures", "schedule": timedelta(seconds=PROVIDER_POLL_INTERVAL_SECONDS),
+        "args": ("football", "a2721390-8d51-4011-905b-d6379e425675", "2023", "21521495-4dd4-4c50-a41d-d88642322804"),
     },
     "sync-standings-football-data-org": {
         "task": "ingestion.sync_standings_alt", "schedule": timedelta(seconds=STANDINGS_INTERVAL_SECONDS),
+        "args": ("football", "a2721390-8d51-4011-905b-d6379e425675", "2023", "21521495-4dd4-4c50-a41d-d88642322804"),
     },
     # Milestone 11B — Provider Registry health monitoring (docs/admin_center.md §2a), the follow-
     # up ADR-011 flagged as needing Celery beat rather than a new scheduler.
