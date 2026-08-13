@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+
 from modules.ingestion.domain.entities import (
     CompetitionFixtureSourcePreference,
     DataQualityReport,
@@ -92,16 +94,46 @@ def timeline_event_to_model(entity: TimelineEvent) -> TimelineEventModel:
     )
 
 
+def _canonical_entity_id(value: str) -> str:
+    """Milestone 4 finding, corrected after live test-suite verification caught the first
+    attempt at this fix regressing real behavior (see docs/milestone4_verification_report.md
+    §"provider_ref_index" for the full account): the initial hypothesis — that
+    `provider_ref_index.entity_id` should match `fixtures.id`/`teams.id`'s raw-hex SQLite
+    storage format — was wrong. No real application code ever raw-SQL-joins this column against
+    those PK columns; `EntityReconciliationService._resolve()` always round-trips through
+    `uuid.UUID()` first (hyphen-agnostic), so the storage format never mattered there. What DOES
+    depend on a consistent string format is `_resolve()`'s *own* callers comparing its return
+    value against other string-tagged entity references elsewhere in the domain layer —
+    `WatchlistEntry.entity_ref`, `TimelineEvent.entity_id` — which are populated everywhere via
+    plain `str(some_id.value)`, i.e. the HYPHENATED canonical `uuid.UUID` string form. Hex-
+    normalizing `provider_ref_index.entity_id` broke exactly this: the "favorite team" alert
+    lookup in `_notify_fixture_status_change` compares a `_resolve()`-returned team id (now hex)
+    against a hyphenated `WatchlistEntry.entity_ref`, and stopped matching — caught by
+    `test_reconcile_fixture_notifies_watchers_on_kickoff_and_final_result` failing.
+
+    Corrected canonical form: hyphenated `str(uuid.UUID(...))`, matching the convention every
+    other string-based entity reference in this codebase already uses. This still closes the
+    real defect Milestone 3 found (inconsistent formatting risk on future writes; hardened here
+    at the single mapper choke point every write passes through) without breaking the real,
+    already-working alert-lookup path. `scripts/normalize_provider_ref_index_entity_id.py`
+    backfills any row that predates this fix to the same canonical form. Non-UUID values (test
+    fixtures using mnemonic string ids) pass through unchanged rather than raising."""
+    try:
+        return str(uuid.UUID(value))
+    except (ValueError, AttributeError, TypeError):
+        return value
+
+
 def ref_index_to_domain(model: ProviderRefIndexModel) -> ProviderRefIndexEntry:
     return ProviderRefIndexEntry(
         provider=model.provider, external_id=model.external_id,
-        entity_kind=EntityKind(model.entity_kind), entity_id=model.entity_id,
+        entity_kind=EntityKind(model.entity_kind), entity_id=_canonical_entity_id(model.entity_id),
     )
 
 
 def ref_index_to_model(entity: ProviderRefIndexEntry, model: ProviderRefIndexModel | None = None) -> ProviderRefIndexModel:
     model = model or ProviderRefIndexModel(provider=entity.provider, external_id=entity.external_id, entity_kind=entity.entity_kind.value)
-    model.entity_id = entity.entity_id
+    model.entity_id = _canonical_entity_id(entity.entity_id)
     return model
 
 

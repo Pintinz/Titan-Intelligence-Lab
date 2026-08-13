@@ -1166,3 +1166,88 @@ async def test_sync_coaching_staff_honest_zero_when_provider_has_no_record(orche
 
     assert run.status is SyncStatus.SUCCEEDED
     assert run.records_fetched == 0
+
+
+@pytest.mark.asyncio
+async def test_sync_upcoming_structured_intelligence_end_to_end(orchestrator, session, router):
+    """Milestone 5 requirement 14: verify the full chain end-to-end — Celery Beat's task calls
+    exactly this method (see `sync_upcoming_structured_intelligence_task`'s own docstring) with
+    `trigger` left at its default, so this test exercises the real default, not an override, all
+    the way down to persisted `SyncRun` rows. Proves: (1) a fixture within the structured-intel
+    window gets both teams' injuries+transfers synced exactly once each (deduped), (2) its
+    lineups sync only fires because it's also within the kickoff-proximity window, (3) every
+    resulting SyncRun carries `SyncTrigger.LIVE_SCHEDULED` — the one trigger `classify_availability`
+    ever honors."""
+    sport, _ = await orchestrator.reconciler.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    home, _ = await orchestrator.reconciler.reconcile_team(
+        ProviderTeamRecord(external_ref=ProviderRef("mock", "t1"), name="Arsenal", short_name="ARS", country="England"),
+        sport.id, T0,
+    )
+    away, _ = await orchestrator.reconciler.reconcile_team(
+        ProviderTeamRecord(external_ref=ProviderRef("mock", "t2"), name="Chelsea", short_name="CHE", country="England"),
+        sport.id, T0,
+    )
+    await session.commit()
+
+    season_id = SeasonId(uuid4())
+    kickoff = T0 + timedelta(minutes=30)  # within both the 72h structured-intel window and the 90min lineup window
+    fixture, _ = await orchestrator.reconciler.reconcile_fixture(
+        ProviderFixtureRecord(
+            external_ref=ProviderRef("mock", "fx1"), home_team_ref=ProviderRef("mock", "t1"),
+            away_team_ref=ProviderRef("mock", "t2"), scheduled_at=kickoff, competition_ref="39", season_label="2026",
+            status="NS",
+        ),
+        season_id, T0, sport_code="football",
+    )
+    await session.commit()
+
+    router.lineups_to_return = []
+    router.injuries_to_return = []
+    router.transfers_to_return = []
+
+    runs = await orchestrator.sync_upcoming_structured_intelligence("football", season_id, T0)
+    await session.commit()
+
+    # 2 teams x (injuries + transfers) + 1 lineup sync for the one fixture = 5 SyncRuns
+    assert len(runs) == 5
+    assert all(r.trigger is SyncTrigger.LIVE_SCHEDULED for r in runs)
+    assert sum(1 for r in runs if r.entity_kind is EntityKind.LINEUP) == 1
+    assert sum(1 for r in runs if r.entity_kind is EntityKind.INJURY) == 2
+    assert sum(1 for r in runs if r.entity_kind is EntityKind.TRANSFER) == 2
+
+
+@pytest.mark.asyncio
+async def test_sync_upcoming_structured_intelligence_skips_lineups_outside_kickoff_window(orchestrator, session, router):
+    """A fixture within the broader structured-intel window but NOT yet within the narrower
+    lineup pre-match window still gets injuries/transfers synced (not fixture-bound, per spec §7)
+    but no lineup sync attempt at all — the provider itself won't have lineups that early."""
+    sport, _ = await orchestrator.reconciler.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    await orchestrator.reconciler.reconcile_team(
+        ProviderTeamRecord(external_ref=ProviderRef("mock", "t1"), name="Arsenal", short_name="ARS", country="England"),
+        sport.id, T0,
+    )
+    await orchestrator.reconciler.reconcile_team(
+        ProviderTeamRecord(external_ref=ProviderRef("mock", "t2"), name="Chelsea", short_name="CHE", country="England"),
+        sport.id, T0,
+    )
+    await session.commit()
+
+    season_id = SeasonId(uuid4())
+    kickoff = T0 + timedelta(hours=10)  # within 72h structured-intel window, outside the 90min lineup window
+    await orchestrator.reconciler.reconcile_fixture(
+        ProviderFixtureRecord(
+            external_ref=ProviderRef("mock", "fx1"), home_team_ref=ProviderRef("mock", "t1"),
+            away_team_ref=ProviderRef("mock", "t2"), scheduled_at=kickoff, competition_ref="39", season_label="2026",
+            status="NS",
+        ),
+        season_id, T0, sport_code="football",
+    )
+    await session.commit()
+
+    runs = await orchestrator.sync_upcoming_structured_intelligence("football", season_id, T0)
+    await session.commit()
+
+    assert len(runs) == 4  # 2 teams x (injuries + transfers), no lineup run
+    assert all(r.entity_kind is not EntityKind.LINEUP for r in runs)

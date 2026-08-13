@@ -34,7 +34,10 @@ def impute_missing(samples: list[TrainingSample], feature_order: list[str], stra
     imputed = []
     for sample in samples:
         features = {key: sample.features.get(key, fill_values[key]) for key in feature_order}
-        imputed.append(TrainingSample(features=features, label=sample.label))
+        # Milestone 18: reference_time must survive this reconstruction — dataset_splitter.split()
+        # (called later in TrainingPipelineService.train()) fails closed without it for every
+        # temporal strategy.
+        imputed.append(TrainingSample(features=features, label=sample.label, reference_time=sample.reference_time))
     return imputed
 
 

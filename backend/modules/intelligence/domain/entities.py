@@ -10,10 +10,12 @@ from modules.intelligence.domain.value_objects import (
     CommunityPlatform,
     CommunityPostId,
     CommunityTopicId,
+    EntityResolutionStatus,
     ImpactScoreId,
     IntelligenceChannelType,
     IntelligenceSyncRunId,
     NewsArticleId,
+    NewsEventConfidenceTier,
     NewsEventId,
     NewsEventType,
     NewsSourceId,
@@ -64,11 +66,43 @@ class NewsArticle:
     status: ArticleStatus = ArticleStatus.ACTIVE
 
 
+@dataclass(frozen=True)
+class ResolvedNewsEntity:
+    """Milestone 9 — one entity mention from a `NewsEvent`, carrying its resolution status
+    explicitly rather than discarding it. ``ref`` is the resolved Knowledge Graph node id (as a
+    string) when ``status`` is RESOLVED, or the raw unresolved mention text otherwise — never
+    both conflated into one opaque string the way the pre-Milestone-9 flat
+    `affected_entity_refs` union did (see `EventExtractionService.extract_and_record`'s
+    docstring for the bug this replaces). An UNRESOLVED entity is retained here for raw-audit
+    storage but must never be treated as available to a prediction feature requiring that
+    entity (the spec's explicit "mock_player must not enter production intelligence
+    features" rule)."""
+
+    ref: str
+    node_type: str | None
+    status: EntityResolutionStatus
+    role: str | None = None  # normalized player role (goalkeeper/defender/midfielder/forward),
+    # populated lazily by a consumer with access to the sports Player repository — never set at
+    # extraction time, which has no such dependency (see `news_market_impact_engine.py`).
+
+
 @dataclass
 class NewsEvent:
     """A structured event detected in an article's text (Milestone 8 "EVENT EXTRACTION") —
     every event carries Confidence, Source, Timestamp, Affected Entities, and Knowledge Graph
-    links, per the spec's explicit requirement."""
+    links, per the spec's explicit requirement.
+
+    Milestone 9 (Temporal Validity + Market-Specific Impact) additions: ``resolved_entities`` is
+    the authoritative, resolution-status-aware entity list (see `ResolvedNewsEntity`);
+    ``affected_entity_refs`` stays RESOLVED-only now (its original intended contract — existing
+    consumers like `NewsImpactEngine` already assumed every ref there is a real KG node id,
+    which this milestone's `EventExtractionService` fix now actually honors instead of violating).
+    ``confidence_tier`` is the formal 6-state taxonomy (`NewsEventConfidenceTier`) — the pre-existing
+    bare ``confidence`` float stays as Gemini's own raw extraction confidence, unchanged, a
+    distinct concept `NewsEventConfidenceClassifier` consumes as one input among several, not a
+    value it overwrites. ``information_available_at``/``availability_classification`` follow the
+    exact same "never fabricated, defaults to UNKNOWN_AVAILABILITY_TIME" contract Milestone 5
+    established for structured intelligence — see `modules.intelligence.application.news_provenance`."""
 
     id: NewsEventId
     event_type: NewsEventType
@@ -80,6 +114,23 @@ class NewsEvent:
     detected_at: datetime
     affected_entity_refs: tuple[str, ...] = field(default_factory=tuple)
     kg_edge_ids: tuple[str, ...] = field(default_factory=tuple)
+    resolved_entities: tuple[ResolvedNewsEntity, ...] = field(default_factory=tuple)
+    confidence_tier: NewsEventConfidenceTier = NewsEventConfidenceTier.UNCERTAIN
+    information_available_at: datetime | None = None
+    availability_classification: str = "UNKNOWN_AVAILABILITY_TIME"
+    validity_start: datetime | None = None
+    validity_end: datetime | None = None
+    sync_run_id: str | None = None
+
+    def is_feature_eligible(self) -> bool:
+        """The single choke point every feature-writing consumer must check before using this
+        event: point-in-time-safe (VERIFIED_PRE_MATCH) AND every entity the event needs is
+        actually resolved. An event with even one UNRESOLVED entity is excluded — "the event may
+        remain stored as raw intelligence but must not influence prediction features requiring
+        that entity" (spec §6)."""
+        if self.availability_classification != "VERIFIED_PRE_MATCH":
+            return False
+        return all(e.status is EntityResolutionStatus.RESOLVED for e in self.resolved_entities)
 
 
 @dataclass

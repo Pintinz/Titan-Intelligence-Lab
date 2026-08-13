@@ -25,8 +25,9 @@ is a documented future addition against this same framework, not built here.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from modules.features.application.feature_registration_service import (
     FeatureAlreadyRegisteredError,
@@ -35,8 +36,14 @@ from modules.features.application.feature_registration_service import (
 from modules.features.application.feature_store_service import FeatureStoreService
 from modules.features.domain.entities import FeatureValue
 from modules.features.domain.value_objects import EntityType, FeatureCategory, FeatureDataType, FeatureKey
+from modules.sports.domain.entities import Lineup, Transfer
 from modules.sports.domain.value_objects import FixtureStatus, TeamId
-from modules.sports.ports.repositories import FixtureRepositoryPort, TeamStatisticsRepositoryPort
+from modules.sports.ports.repositories import (
+    FixtureRepositoryPort,
+    LineupRepositoryPort,
+    TeamStatisticsRepositoryPort,
+    TransferRepositoryPort,
+)
 
 SYSTEM_REVIEWER = "prediction-platform"
 
@@ -47,6 +54,25 @@ SYSTEM_REVIEWER = "prediction-platform"
 # data quality. 24h matches a conservative "needs at least a daily refresh" expectation without
 # claiming freshness the data doesn't have.
 ENGINEERED_FEATURE_TTL_SECONDS = 24 * 3600
+
+# Milestone 7 — how far back a confirmed transfer still counts as "recent squad churn" for
+# `TransferActivityCalculator`. Not "the" correct value — a configured, documented default a
+# future operator can retune without a code change, same posture as
+# `modules.ingestion.application.provenance.LINEUP_PREMATCH_WINDOW_MINUTES`. 30 days covers a
+# typical late-window signing's first few fixtures, where squad-integration effects are
+# conventionally understood to matter most; older transfers are treated as already absorbed into
+# the team's regular rolling form rather than "recent activity."
+TRANSFER_ACTIVITY_WINDOW_DAYS = int(os.environ.get("TITANIQ_TRANSFER_ACTIVITY_WINDOW_DAYS") or 30)
+
+
+def _ensure_aware(dt: datetime, reference: datetime) -> datetime:
+    """Same fix as modules.ingestion.application.sync_orchestrator._ensure_aware /
+    data_quality_engine._ensure_aware — SQLite/aiosqlite drops tzinfo on read-back
+    (docs/decisions.md ADR-007); a naive value is assumed UTC and stamped to match
+    ``reference``'s awareness before comparison."""
+    if dt.tzinfo is None and reference.tzinfo is not None:
+        return dt.replace(tzinfo=reference.tzinfo)
+    return dt
 
 
 def _is_number(value: object) -> bool:
@@ -238,6 +264,109 @@ class FixtureExpectedGoalsCalculator:
         return home_value, away_value
 
 
+@dataclass
+class LineupContinuityCalculator:
+    """Milestone 6 — the first real structured-intelligence feature to consume Milestone 5's
+    point-in-time-safe `Lineup.availability_classification`. A pure ratio (no hand-picked weight,
+    same posture as every other calculator in this module — see market_seeding.py's own comment
+    on why fabricated weights are avoided here): the fraction of a team's previous confirmed
+    starting eleven that starts again in the lineup being reconciled right now.
+
+    Deliberately computed ONLY when the lineup just reconciled is itself `VERIFIED_PRE_MATCH` —
+    called from `EntityReconciliationService.reconcile_lineup` right after that classification is
+    made, never from a lineup with unknown/post-match provenance (that would either leak
+    post-match information or write a feature value with no honest `information_available_at` of
+    its own to point to). The comparison baseline (the team's previous lineup) does not need the
+    same guarantee — it's already a settled historical fact by the time this fixture is being
+    predicted, not something that could leak the *current* fixture's outcome.
+
+    Two independent features (home/away), not one differential — a team's own rotation affects
+    its own output regardless of what the opponent did, so collapsing both sides into a single
+    `home - away` number (the shape `FixtureFormDifferentialCalculator` uses) would assume a
+    symmetric relationship this signal doesn't actually have. Matches
+    `FixtureExpectedGoalsCalculator`'s independent-home/away-value shape instead."""
+
+    registration: FeatureRegistrationService
+    store: FeatureStoreService
+    lineups: LineupRepositoryPort
+    sport_code: str
+    feature_key: str
+
+    async def ensure_registered(self, now: datetime) -> None:
+        existing = await self.registration.definitions.get(FeatureKey(self.feature_key))
+        if existing is not None:
+            return
+        try:
+            await self.registration.register(
+                self.feature_key,
+                f"{self.sport_code.replace('_', ' ').title()} Lineup Continuity",
+                "Fraction of this team's previous confirmed starting lineup that starts again in "
+                "the confirmed lineup for this fixture (1.0 = unchanged eleven, 0.0 = entirely "
+                "different). Only computed once this fixture's own lineup is verified pre-match.",
+                self.sport_code,
+                FeatureCategory.ENGINEERED,
+                formula="|current_starters ∩ previous_starters| / |previous_starters|",
+                data_type=FeatureDataType.FLOAT,
+                owner=SYSTEM_REVIEWER,
+                entity_type=EntityType.FIXTURE,
+                online_ttl_seconds=ENGINEERED_FEATURE_TTL_SECONDS,
+            )
+        except FeatureAlreadyRegisteredError:
+            return
+        await self.registration.submit_for_review(self.feature_key)
+        await self.registration.approve(self.feature_key, SYSTEM_REVIEWER, now)
+        # Milestone 4 leakage classification: this feature is only ever written from a
+        # VERIFIED_PRE_MATCH lineup (see class docstring), so it earns PRE_MATCH_SAFE — set
+        # directly on the freshly-registered definition since `register()` has no such parameter.
+        definition = await self.registration.definitions.get(FeatureKey(self.feature_key))
+        if definition is not None:
+            definition.leakage_classification = "PRE_MATCH_SAFE"
+            await self.registration.definitions.upsert(definition)
+
+    @staticmethod
+    def _continuity_ratio(current: Lineup, previous: Lineup | None) -> float | None:
+        if previous is None:
+            return None
+        previous_starters = {s.player_id for s in previous.starters()}
+        if not previous_starters:
+            return None
+        current_starters = {s.player_id for s in current.starters()}
+        return len(current_starters & previous_starters) / len(previous_starters)
+
+    async def compute_and_write(self, fixture_id: str, team_id: TeamId, lineup: Lineup, now: datetime) -> FeatureValue | None:
+        if lineup.availability_classification != "VERIFIED_PRE_MATCH":
+            return None
+        before = lineup.information_available_at or now
+        previous_candidates = await self.lineups.list_recent_by_team(team_id, before=before, limit=1)
+        previous = previous_candidates[0] if previous_candidates else None
+        ratio = self._continuity_ratio(lineup, previous)
+        if ratio is None:
+            return None
+        return await self.store.write(self.feature_key, EntityType.FIXTURE, fixture_id, ratio, now)
+
+
+def football_lineup_continuity_calculators(
+    registration: FeatureRegistrationService,
+    store: FeatureStoreService,
+    lineups: LineupRepositoryPort,
+) -> tuple[LineupContinuityCalculator, LineupContinuityCalculator]:
+    """Two independent calculators (home/away), same feature-key naming convention as
+    `FixtureExpectedGoalsCalculator`'s `home_feature_key`/`away_feature_key` split — both write
+    against `EntityType.FIXTURE`, distinguished by feature key, not by a side parameter, since
+    `compute_and_write` is called once per (fixture, team) reconciliation, never for both sides
+    at once (unlike the fixture-joined differential calculators above, which need both team ids
+    simultaneously)."""
+    home = LineupContinuityCalculator(
+        registration=registration, store=store, lineups=lineups, sport_code="football",
+        feature_key="football.fixture.home_lineup_continuity",
+    )
+    away = LineupContinuityCalculator(
+        registration=registration, store=store, lineups=lineups, sport_code="football",
+        feature_key="football.fixture.away_lineup_continuity",
+    )
+    return home, away
+
+
 def football_fixture_expected_goals_calculator(
     registration: FeatureRegistrationService,
     store: FeatureStoreService,
@@ -326,6 +455,107 @@ def football_form_calculator(
         stat_key="shots_on_target",
         window=window,
     )
+
+
+@dataclass
+class TransferActivityCalculator:
+    """Milestone 7 — the transfer-side counterpart to `LineupContinuityCalculator`, the second
+    half of Milestone 5's "now genuinely unblocked" recommendation (lineups + transfers; injuries
+    remain honestly blocked — no provider supplies a real report timestamp for them). Counts a
+    team's confirmed transfers (incoming and outgoing) whose own record provenance is
+    `VERIFIED_PRE_MATCH` and whose `effective_date` falls within `window_days` before the
+    reconciliation time — a real, unweighted squad-churn count, not a fabricated or hand-tuned
+    signal.
+
+    Two independent features (home/away), not a differential — a team's own transfer activity
+    affects only its own squad, not the opponent's, matching `LineupContinuityCalculator`'s
+    reasoning exactly (see that class's docstring).
+
+    Null semantics matter here in a way they don't for lineup continuity: a count of zero is only
+    written when the team has at least one `VERIFIED_PRE_MATCH` transfer record on file at all —
+    proof this team's transfer history has genuine pre-match verification coverage. A team with
+    NO verified transfer records anywhere returns `None` (unavailable), never a fabricated zero
+    that would silently read as "no squad churn" when the truth is "no verified visibility" — the
+    exact "must remain unavailable/UNKNOWN rather than being fabricated" rule this milestone is
+    governed by."""
+
+    registration: FeatureRegistrationService
+    store: FeatureStoreService
+    transfers: TransferRepositoryPort
+    sport_code: str
+    feature_key: str
+    window_days: int = TRANSFER_ACTIVITY_WINDOW_DAYS
+
+    async def ensure_registered(self, now: datetime) -> None:
+        existing = await self.registration.definitions.get(FeatureKey(self.feature_key))
+        if existing is not None:
+            return
+        try:
+            await self.registration.register(
+                self.feature_key,
+                f"{self.sport_code.replace('_', ' ').title()} Squad Transfer Activity",
+                "Count of this team's confirmed incoming and outgoing transfers, effective within "
+                f"the last {self.window_days} days, whose provenance is verified pre-match. "
+                "Unavailable (not zero) when no verified transfer history exists for this team.",
+                self.sport_code,
+                FeatureCategory.ENGINEERED,
+                formula=(
+                    f"count(transfers where availability_classification == VERIFIED_PRE_MATCH "
+                    f"and effective_date in [now - {self.window_days}d, now))"
+                ),
+                data_type=FeatureDataType.FLOAT,
+                owner=SYSTEM_REVIEWER,
+                entity_type=EntityType.FIXTURE,
+                online_ttl_seconds=ENGINEERED_FEATURE_TTL_SECONDS,
+            )
+        except FeatureAlreadyRegisteredError:
+            return
+        await self.registration.submit_for_review(self.feature_key)
+        await self.registration.approve(self.feature_key, SYSTEM_REVIEWER, now)
+        # Milestone 4 leakage classification: this feature only ever counts VERIFIED_PRE_MATCH
+        # transfer records (see class docstring), so it earns PRE_MATCH_SAFE — set directly on
+        # the freshly-registered definition since `register()` has no such parameter.
+        definition = await self.registration.definitions.get(FeatureKey(self.feature_key))
+        if definition is not None:
+            definition.leakage_classification = "PRE_MATCH_SAFE"
+            await self.registration.definitions.upsert(definition)
+
+    def _count_recent_verified(self, records: list[Transfer], now: datetime) -> float | None:
+        verified = [r for r in records if r.availability_classification == "VERIFIED_PRE_MATCH"]
+        if not verified:
+            return None
+        window_start = now - timedelta(days=self.window_days)
+        count = sum(
+            1 for r in verified
+            if window_start <= _ensure_aware(r.effective_date, now) < now
+        )
+        return float(count)
+
+    async def compute_and_write(self, fixture_id: str, team_id: TeamId, now: datetime) -> FeatureValue | None:
+        records = await self.transfers.list_by_team(team_id)
+        count = self._count_recent_verified(records, now)
+        if count is None:
+            return None
+        return await self.store.write(self.feature_key, EntityType.FIXTURE, fixture_id, count, now)
+
+
+def football_transfer_activity_calculators(
+    registration: FeatureRegistrationService,
+    store: FeatureStoreService,
+    transfers: TransferRepositoryPort,
+) -> tuple[TransferActivityCalculator, TransferActivityCalculator]:
+    """Two independent calculators (home/away), same shape as
+    `football_lineup_continuity_calculators` — both write against `EntityType.FIXTURE`,
+    distinguished by feature key."""
+    home = TransferActivityCalculator(
+        registration=registration, store=store, transfers=transfers, sport_code="football",
+        feature_key="football.fixture.home_transfer_activity",
+    )
+    away = TransferActivityCalculator(
+        registration=registration, store=store, transfers=transfers, sport_code="football",
+        feature_key="football.fixture.away_transfer_activity",
+    )
+    return home, away
 
 
 def basketball_form_calculator(

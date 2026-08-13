@@ -18,6 +18,7 @@ must NEVER change. Only the predictor implementations may change."). The relatio
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Protocol
 
 from modules.predictions.domain.value_objects import TargetType
@@ -50,10 +51,21 @@ class TrainingSample:
     (multiclass classification support, 2026-08-06) the float index of the real class label within
     the market's own `class_labels` ordering (see `PredictionModelPort.class_labels` below) for a
     market with more than two outcomes (e.g. `football.correct_score`'s 37-cell scoreline grid,
-    `football.match_winner`'s HOME_WIN/DRAW/AWAY_WIN)."""
+    `football.match_winner`'s HOME_WIN/DRAW/AWAY_WIN).
+
+    Milestone 18 — ``reference_time`` is the authoritative timestamp `dataset_splitter.split()`
+    uses to establish chronological order for every temporal (order-sensitive) split strategy
+    (HOLDOUT/ROLLING_WINDOW/WALK_FORWARD/TIME_SERIES_SPLIT). `DatasetBuilder` populates it from
+    `PredictionOutcome.evaluated_at` — the real-world moment the sample's label became knowable,
+    already the field `list_by_market`'s own ordering was (incorrectly, pre-Milestone-18) relying
+    on positionally. Optional/default-None so every other `TrainingSample` construction site
+    (synthetic test data, non-temporal TRAIN_TEST/TRAIN_VAL_TEST/K_FOLD-family strategies) is
+    unaffected — the splitter itself fails closed (raises, never guesses) if a temporal strategy is
+    requested and this is missing, rather than silently falling back to input order."""
 
     features: dict[str, float]
     label: float
+    reference_time: datetime | None = None
 
 
 @dataclass(frozen=True)

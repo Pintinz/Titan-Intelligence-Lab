@@ -23,8 +23,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from uuid import uuid4
 
+from modules.ingestion.application.provenance import LINEUP_PREMATCH_WINDOW_MINUTES, classify_availability
 from modules.ingestion.domain.entities import ProviderRefIndexEntry, TimelineEvent
-from modules.ingestion.domain.value_objects import EntityKind, TimelineEventId, TimelineEventType
+from modules.ingestion.domain.value_objects import EntityKind, SyncTrigger, TimelineEventId, TimelineEventType
 from modules.ingestion.ports.repositories import ProviderRefIndexRepositoryPort, TimelineEventRepositoryPort
 from modules.alerts.domain.value_objects import AlertType
 from modules.alerts.ports.notifier import AlertNotifierPort
@@ -69,8 +70,13 @@ from modules.sports.domain.value_objects import (
     VenueId,
 )
 from modules.watchlist.domain.value_objects import WatchlistEntityType
+from modules.predictions.application.news_market_impact_engine import NewsMarketImpactEngine
 from modules.predictions.application.outcome_resolution_service import OutcomeResolutionService
-from modules.predictions.application.windowed_feature_engineering_service import FixtureFormDifferentialCalculator
+from modules.predictions.application.windowed_feature_engineering_service import (
+    FixtureFormDifferentialCalculator,
+    LineupContinuityCalculator,
+    TransferActivityCalculator,
+)
 from modules.sports.ports.provider_gateway import (
     ProviderCoachRecord,
     ProviderCountryRecord,
@@ -152,6 +158,23 @@ class EntityReconciliationService:
     # already-covered sport (2026-08-03: possession/shots/corners/fouls/cards joined
     # shots_on_target) — never needs another parameter here.
     form_differential_calculators: dict[str, tuple[FixtureFormDifferentialCalculator, ...]] = field(default_factory=dict)
+    # Milestone 6 — sport_code -> (home, away) LineupContinuityCalculator pair, same
+    # dict-by-sport-code shape as form_differential_calculators above (and for the same reason:
+    # lineups only exist for football today, but a future sport must not silently inherit
+    # football's calculators). Empty dict default means every existing caller that doesn't pass
+    # fixture_id/home_team_id keeps working exactly as before.
+    lineup_continuity_calculators: dict[str, tuple[LineupContinuityCalculator, LineupContinuityCalculator]] = field(default_factory=dict)
+    # Milestone 7 — sport_code -> (home, away) TransferActivityCalculator pair, same
+    # dict-by-sport-code shape as the two fields above and for the same reason. Unlike lineup
+    # continuity (only fires from reconcile_lineup, which already has fixture context via
+    # sync_lineups), transfer activity is computed from reconcile_fixture directly — a transfer
+    # record has no fixture of its own to attach to, so the signal is derived per-fixture the
+    # same way form_differential_calculators already is.
+    transfer_activity_calculators: dict[str, tuple[TransferActivityCalculator, TransferActivityCalculator]] = field(default_factory=dict)
+    # Milestone 9 — sport_code -> one NewsMarketImpactEngine (unlike the home/away calculator
+    # pairs above, one engine instance handles both sides — `compute_and_write` takes a `side`
+    # parameter instead, since it needs to scan a full roster per call regardless of side).
+    news_market_impact_engines: dict[str, NewsMarketImpactEngine] = field(default_factory=dict)
 
     # -- shared helpers -----------------------------------------------------------------------
 
@@ -425,7 +448,42 @@ class EntityReconciliationService:
         if saved.status is FixtureStatus.COMPLETED and saved.home_score is not None and saved.away_score is not None:
             await self._resolve_prediction_outcomes(saved, now)
         await self._compute_form_differential(saved, sport_code, now)
+        await self._compute_transfer_activity(saved, sport_code, now)
+        await self._compute_news_market_impact(saved, sport_code, now)
         return saved, created
+
+    async def _compute_news_market_impact(self, fixture: Fixture, sport_code: str | None, now: datetime) -> None:
+        """Milestone 9 — same "every reconciliation, not gated on completion" reasoning as
+        `_compute_form_differential`/`_compute_transfer_activity` above. Like transfer activity,
+        a `NewsEvent` has no fixture of its own to attach to (it affects a player/team across
+        every future fixture, not one specific match), so the signal is derived per-fixture here.
+
+        Milestone 10: passes this fixture's own `scheduled_at` as `kickoff` — the direct,
+        fixture-specific "no post-kickoff information" guard `NewsMarketImpactEngine` now applies
+        on top of its existing TTL-window check."""
+        if sport_code is None:
+            return
+        engine = self.news_market_impact_engines.get(sport_code)
+        if engine is None:
+            return
+        fixture_id = str(fixture.id.value)
+        await engine.compute_and_write(fixture_id, fixture.home_team_id, "home", now, kickoff=fixture.scheduled_at)
+        await engine.compute_and_write(fixture_id, fixture.away_team_id, "away", now, kickoff=fixture.scheduled_at)
+
+    async def _compute_transfer_activity(self, fixture: Fixture, sport_code: str | None, now: datetime) -> None:
+        """Milestone 7 — fixture-keyed home/away squad-churn signal, computed on every
+        reconciliation exactly like `_compute_form_differential` above (same reasoning: pre-match
+        squad state is what a prediction needs before kickoff, not just after). Silently skipped
+        for a sport with no calculator registered or when the caller didn't pass sport_code."""
+        if sport_code is None:
+            return
+        calculators = self.transfer_activity_calculators.get(sport_code, ())
+        if not calculators:
+            return
+        home_calculator, away_calculator = calculators
+        fixture_id = str(fixture.id.value)
+        await home_calculator.compute_and_write(fixture_id, fixture.home_team_id, now)
+        await away_calculator.compute_and_write(fixture_id, fixture.away_team_id, now)
 
     async def _compute_form_differential(self, fixture: Fixture, sport_code: str | None, now: datetime) -> None:
         """Fixture-keyed home-vs-away rolling form differential(s) — the real features
@@ -512,10 +570,25 @@ class EntityReconciliationService:
     # -- Lineup -------------------------------------------------------------------------------------
 
     async def reconcile_lineup(
-        self, record: ProviderLineupRecord, match_id: MatchId, now: datetime
+        self, record: ProviderLineupRecord, match_id: MatchId, now: datetime, *,
+        trigger: SyncTrigger = SyncTrigger.MANUAL, sync_run_id: str | None = None,
+        kickoff: datetime | None = None, fixture_status: FixtureStatus | None = None,
+        fixture_id: str | None = None, home_team_id: TeamId | None = None, sport_code: str | None = None,
     ) -> tuple[Lineup, bool, list[str]]:
         """Returns ``(lineup, created, unresolved_player_refs)`` — a slot whose player hasn't
-        been reconciled yet is skipped and reported rather than failing the whole lineup."""
+        been reconciled yet is skipped and reported rather than failing the whole lineup.
+
+        Milestone 5 (Verified Pre-Match Data Availability): ``trigger``/``kickoff``/
+        ``fixture_status`` feed `classify_availability` (modules.ingestion.application.provenance)
+        — defaults are deliberately conservative (``SyncTrigger.MANUAL``, no kickoff) so any
+        caller that doesn't pass them (existing tests, ad-hoc scripts) gets the same
+        ``UNKNOWN_AVAILABILITY_TIME`` result this method always produced before this milestone,
+        never an accidental ``VERIFIED_PRE_MATCH`` promotion.
+
+        Milestone 6: ``fixture_id``/``home_team_id`` (both optional, same conservative-default
+        posture) let this method pick the right home/away `LineupContinuityCalculator` — needed
+        because the feature is written under `EntityType.FIXTURE`, and this method otherwise only
+        knows `match_id`, not the fixture or which side `team_id` resolves to."""
         team_id_str = await self._resolve(record.team_ref.provider, record.team_ref.external_id, EntityKind.TEAM)
         if team_id_str is None:
             raise ReconciliationDependencyError(f"team {record.team_ref.external_id} not yet reconciled")
@@ -535,14 +608,29 @@ class EntityReconciliationService:
                 )
             )
 
+        availability = classify_availability(
+            trigger=trigger, sync_succeeded=True, validated=True, applicable=True, sync_time=now,
+            kickoff=kickoff, prematch_window_minutes=LINEUP_PREMATCH_WINDOW_MINUTES, fixture_status=fixture_status,
+        )
+
         existing = await self.lineups.get_for_match_team(match_id, team_id)
         created = existing is None
         entity = Lineup(
             id=existing.id if existing else LineupId(uuid4()), match_id=match_id, team_id=team_id,
             formation=record.formation, slots=tuple(slots), version=(existing.version + 1) if existing else 1,
+            availability_classification=availability.classification.value,
+            information_available_at=availability.information_available_at,
+            fetched_at=now, sync_run_id=sync_run_id,
         )
         saved = await self.lineups.upsert(entity)
         await self._emit(now, EntityKind.LINEUP, str(saved.id.value), created)
+
+        calculators = self.lineup_continuity_calculators.get(sport_code, ()) if sport_code else ()
+        if calculators and fixture_id is not None and home_team_id is not None:
+            home_calc, away_calc = calculators
+            calculator = home_calc if team_id == home_team_id else away_calc
+            await calculator.compute_and_write(fixture_id, team_id, saved, now)
+
         return saved, created, unresolved
 
     # -- Standing -------------------------------------------------------------------------------------
@@ -568,13 +656,24 @@ class EntityReconciliationService:
 
     # -- Injury -------------------------------------------------------------------------------
 
-    async def reconcile_injury(self, record: ProviderInjuryRecord, now: datetime) -> tuple[Injury, bool]:
+    async def reconcile_injury(
+        self, record: ProviderInjuryRecord, now: datetime, *,
+        trigger: SyncTrigger = SyncTrigger.MANUAL, sync_run_id: str | None = None,
+    ) -> tuple[Injury, bool]:
         """One row per player, updated in place on each sync (like Lineup/TeamStatistics, not
         appended like Standing) — the provider's `/injuries` endpoint always reports a player's
         *current* unavailability, not a historical log, so re-syncing the same player's injury
         naturally means "here's the latest known status," not a new event. The ref-index key is
         synthetic (player, not the record itself, since the provider has no persistent injury-
-        record id) so the same player's row is found and updated rather than duplicated."""
+        record id) so the same player's row is found and updated rather than duplicated.
+
+        Milestone 5: `has_genuine_timestamp=False` is hardcoded below, not entity-specific data —
+        no connected provider adapter supplies a real injury report/publication timestamp today
+        (see `ApiFootballAdapter.fetch_injuries`'s docstring: `reported_at` is actually the
+        fixture's kickoff). This means an injury never reaches VERIFIED_PRE_MATCH today regardless
+        of `trigger`, exactly per the spec's explicit "do not mark VERIFIED_PRE_MATCH merely
+        because it was retrieved by a scheduled task" instruction — flip this the day a provider
+        genuinely supplies one, not before."""
         player_id_str = await self._resolve(record.player_ref.provider, record.player_ref.external_id, EntityKind.PLAYER)
         if player_id_str is None:
             raise ReconciliationDependencyError(f"player {record.player_ref.external_id} not yet reconciled")
@@ -584,6 +683,10 @@ class EntityReconciliationService:
         existing_id = await self._resolve(record.player_ref.provider, synthetic_id, EntityKind.INJURY)
         existing = await self.injuries.get(EntityId(_as_uuid(existing_id))) if existing_id else None
         created = existing is None
+        availability = classify_availability(
+            trigger=trigger, sync_succeeded=True, validated=True, applicable=True, sync_time=now,
+            has_genuine_timestamp=False,
+        )
         entity = Injury(
             id=existing.id if existing else EntityId(uuid4()),
             player_id=player_id,
@@ -593,6 +696,9 @@ class EntityReconciliationService:
             expected_return=None,
             version=(existing.version + 1) if existing else 1,
             provider_refs=_merge_ref(existing.provider_refs if existing else (), record.player_ref),
+            availability_classification=availability.classification.value,
+            information_available_at=availability.information_available_at,
+            fetched_at=now, sync_run_id=sync_run_id,
         )
         saved = await self.injuries.upsert(entity)
         await self._record_ref(record.player_ref.provider, synthetic_id, EntityKind.INJURY, str(saved.id.value))
@@ -601,11 +707,26 @@ class EntityReconciliationService:
 
     # -- Transfer -----------------------------------------------------------------------------
 
-    async def reconcile_transfer(self, record: ProviderTransferRecord, now: datetime) -> Transfer:
+    async def reconcile_transfer(
+        self, record: ProviderTransferRecord, now: datetime, *,
+        trigger: SyncTrigger = SyncTrigger.MANUAL, sync_run_id: str | None = None,
+    ) -> Transfer:
         """Unlike Injury, every distinct transfer is a genuine historical event — the synthetic
         ref-index key includes the effective date and destination team so re-syncing a player's
         transfer history is idempotent (same move never duplicates) while two different real
-        moves for the same player both persist."""
+        moves for the same player both persist.
+
+        Milestone 5: unlike Injury, no provider field here is actively wrong/mislabeled — a
+        transfer just has no separate "announced_at" (only `effective_date`, its own real but
+        distinct field, per the spec's explicit "do not conflate effective/announcement/
+        registration dates" instruction). `information_available_at` is never derived from
+        `effective_date` — it's the reconciliation `now`, exactly like every other entity, gated
+        the same way (only a genuine `LIVE_SCHEDULED` sync can produce VERIFIED_PRE_MATCH). No
+        kickoff-proximity gate applies — a transfer isn't bound to one fixture's kickoff the way a
+        lineup is; it affects a player's squad status across every future fixture."""
+        availability = classify_availability(
+            trigger=trigger, sync_succeeded=True, validated=True, applicable=True, sync_time=now,
+        )
         from_team_id = None
         if record.from_team_ref is not None:
             from_team_id_str = await self._resolve(record.from_team_ref.provider, record.from_team_ref.external_id, EntityKind.TEAM)
@@ -629,6 +750,9 @@ class EntityReconciliationService:
             effective_date=record.effective_date, transfer_type=record.transfer_type,
             version=(existing.version + 1) if existing else 1,
             provider_refs=_merge_ref(existing.provider_refs if existing else (), record.player_ref),
+            availability_classification=availability.classification.value,
+            information_available_at=availability.information_available_at,
+            fetched_at=now, sync_run_id=sync_run_id,
         )
         saved = await self.transfers.upsert(entity)
         await self._record_ref(record.player_ref.provider, synthetic_id, EntityKind.TRANSFER, str(saved.id.value))

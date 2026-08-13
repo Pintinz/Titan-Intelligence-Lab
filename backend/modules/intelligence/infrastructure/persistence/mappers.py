@@ -9,6 +9,7 @@ from modules.intelligence.domain.entities import (
     NewsArticle,
     NewsEvent,
     NewsSource,
+    ResolvedNewsEntity,
     SentimentResult,
     SourceReliabilityScore,
     Summary,
@@ -18,10 +19,12 @@ from modules.intelligence.domain.value_objects import (
     CommunityPlatform,
     CommunityPostId,
     CommunityTopicId,
+    EntityResolutionStatus,
     ImpactScoreId,
     IntelligenceChannelType,
     IntelligenceSyncRunId,
     NewsArticleId,
+    NewsEventConfidenceTier,
     NewsEventId,
     NewsEventType,
     NewsSourceId,
@@ -100,6 +103,16 @@ def event_to_domain(model: NewsEventModel) -> NewsEvent:
         confidence=model.confidence, source_id=NewsSourceId(model.source_id),
         article_id=NewsArticleId(model.article_id), occurred_at=model.occurred_at, detected_at=model.detected_at,
         affected_entity_refs=tuple(model.affected_entity_refs or []), kg_edge_ids=tuple(model.kg_edge_ids or []),
+        resolved_entities=tuple(
+            ResolvedNewsEntity(ref=e["ref"], node_type=e.get("node_type"), status=EntityResolutionStatus(e["status"]))
+            for e in (model.resolved_entities or [])
+        ),
+        confidence_tier=NewsEventConfidenceTier(model.confidence_tier),
+        information_available_at=model.information_available_at,
+        availability_classification=model.availability_classification,
+        validity_start=model.validity_start,
+        validity_end=model.validity_end,
+        sync_run_id=model.sync_run_id,
     )
 
 
@@ -114,6 +127,15 @@ def event_to_model(entity: NewsEvent, model: NewsEventModel | None = None) -> Ne
     model.detected_at = entity.detected_at
     model.affected_entity_refs = list(entity.affected_entity_refs)
     model.kg_edge_ids = list(entity.kg_edge_ids)
+    model.resolved_entities = [
+        {"ref": e.ref, "node_type": e.node_type, "status": e.status.value} for e in entity.resolved_entities
+    ]
+    model.confidence_tier = entity.confidence_tier.value
+    model.information_available_at = entity.information_available_at
+    model.availability_classification = entity.availability_classification
+    model.validity_start = entity.validity_start
+    model.validity_end = entity.validity_end
+    model.sync_run_id = entity.sync_run_id
     return model
 
 

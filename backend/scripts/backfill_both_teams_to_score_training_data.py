@@ -14,7 +14,25 @@ required features (`football.market.overround`, `football.fixture.form_shots_on_
 plus whichever of the 5 optional stat-differential features are available per fixture) instead of
 the expected-goals pair those eleven markets use.
 
-Idempotent: skips any fixture that already has a football.both_teams_to_score prediction.
+Milestone 15 addition: before reading each fixture's feature snapshot, this script now calls the
+Milestone 14 `HistoricalFeatureReconstructionService.publish_for_fixture` — reusing, never
+duplicating, the existing historical-safe news pipeline (`HistoricalEntityResolutionService`'s
+Transfer-chain membership resolution, `HistoricalNewsRelevanceEngine`'s relevance classification,
+`NewsMarketImpactEngine`'s market-specific `btts_impact` dimension, and the unmodified
+`NewsEvent.is_feature_eligible()` gate). This script performs no NLP, no entity resolution, and no
+provenance logic itself — it only calls the existing services and then reads whatever they
+published, exactly like every other optional feature it already reads. The two resulting feature
+keys (`news.football.home_btts_impact`/`away_btts_impact`) are read as OPTIONAL, never REQUIRED —
+making them required would skip every fixture today, since no `VERIFIED_PRE_MATCH` news event
+exists anywhere yet; this is the same "best-effort" posture the 5 stat-differential optional
+features already have.
+
+Idempotent: skips any fixture that already has a football.both_teams_to_score prediction — which,
+since reconstruction runs strictly before that skip would ever be re-reached, also makes the news
+reconstruction call itself idempotent across re-runs. A second, independent guard additionally
+skips reconstruction for a fixture that already has a BTTS-impact value on either side (covers the
+case where a fixture was reconstructed on a prior run but never got a Prediction, e.g. because a
+different required feature was missing).
 
 Usage: TITANIQ_DB_URL=sqlite+aiosqlite:///./dev.db python scripts/backfill_both_teams_to_score_training_data.py
 """
@@ -24,12 +42,12 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from apps.api.composition import get_engine
+from apps.api.composition import build_historical_feature_reconstruction_service, get_engine
 from modules.predictions.application.model_registry_service import ModelAlreadyRegisteredError, ModelRegistryService
 from modules.predictions.application.outcome_label_mapper import MARKET_OUTCOME_LABELS
 from modules.predictions.application.outcome_resolution_service import MARKET_OUTCOME_RESOLVERS, MatchResult
@@ -41,15 +59,18 @@ from modules.predictions.infrastructure.persistence.repositories import (
     SqlAlchemyPredictionOutcomeRepository,
     SqlAlchemyPredictionRepository,
 )
+from modules.sports.domain.value_objects import FixtureId, TeamId
 
 MARKET_KEY = "football.both_teams_to_score"
 REQUIRED_FEATURES = ("football.market.overround", "football.fixture.form_shots_on_target_diff_last5")
+NEWS_BTTS_IMPACT_FEATURES = ("news.football.home_btts_impact", "news.football.away_btts_impact")
 OPTIONAL_FEATURES = (
     "football.fixture.form_possession_pct_diff_last5",
     "football.fixture.form_shots_total_diff_last5",
     "football.fixture.form_corners_diff_last5",
     "football.fixture.form_fouls_diff_last5",
     "football.fixture.form_cards_yellow_diff_last5",
+    *NEWS_BTTS_IMPACT_FEATURES,
 )
 _INERT_CONFIDENCE = ConfidenceBreakdown(
     feature_quality=0.0, feature_freshness=0.0, historical_accuracy=0.0, knowledge_graph_completeness=0.0,
@@ -84,6 +105,13 @@ async def main() -> None:
         outcomes = SqlAlchemyPredictionOutcomeRepository(session=session)
         resolver = MARKET_OUTCOME_RESOLVERS[MARKET_KEY]
         positive_label = MARKET_OUTCOME_LABELS[MARKET_KEY].positive_label
+
+        # Milestone 15 — the only new composition in this script. `ensure_registered` is
+        # idempotent (checks `existing is not None` before registering, same as market seeding
+        # already relies on) so calling it here is always safe, even though these two feature
+        # keys are typically already registered by market seeding.
+        historical_service = build_historical_feature_reconstruction_service(session)
+        await historical_service.news_market_impact.ensure_registered(datetime.now(timezone.utc))
 
         now = datetime.now(timezone.utc)
 
@@ -123,11 +151,32 @@ async def main() -> None:
 
             row = (
                 await session.execute(
-                    text("SELECT home_score, away_score, scheduled_at FROM fixtures WHERE id = :fixture_id"),
+                    text(
+                        "SELECT home_score, away_score, scheduled_at, home_team_id, away_team_id "
+                        "FROM fixtures WHERE id = :fixture_id"
+                    ),
                     {"fixture_id": fixture_id},
                 )
             ).one()
-            home_score, away_score, scheduled_at = row
+            home_score, away_score, scheduled_at, home_team_id, away_team_id = row
+            kickoff = (
+                datetime.fromisoformat(scheduled_at) if isinstance(scheduled_at, str) else scheduled_at
+            ) or now
+
+            # Milestone 15 — reconstruct historical news features BEFORE the feature snapshot is
+            # read below, reusing the Milestone 14 service exactly as-is. Idempotency guard: skip
+            # if either BTTS-impact side already has a value for this fixture (covers a fixture
+            # reconstructed on a prior run that never reached the list_by_subject skip above,
+            # e.g. because a different required feature was missing that run).
+            already_reconstructed = False
+            for key in NEWS_BTTS_IMPACT_FEATURES:
+                if await _latest_feature_value(session, key, dashed) is not None:
+                    already_reconstructed = True
+                    break
+            if not already_reconstructed:
+                await historical_service.publish_for_fixture(
+                    FixtureId(UUID(fixture_id)), TeamId(UUID(home_team_id)), TeamId(UUID(away_team_id)), kickoff,
+                )
 
             feature_snapshot: dict[str, float] = {}
             missing_required = False

@@ -66,12 +66,21 @@ class NewsIngestionService:
         now: datetime,
         trigger: SyncTrigger = SyncTrigger.SCHEDULED,
         on_article_created: Callable[[NewsArticle], Awaitable[object]] | None = None,
+        since_floor: datetime | None = None,
     ) -> IntelligenceSyncRun:
         """``on_article_created`` (optional, additive) fires once per genuinely new article —
         never for a duplicate/rejected record — so a caller can chain real downstream work (event
         extraction, impact scoring, Feature Store enrichment) without this service needing to
         know anything about what happens after ingestion. Same shape as
-        `TrainingPipelineService.train`'s ``on_checkpoint`` hook."""
+        `TrainingPipelineService.train`'s ``on_checkpoint`` hook.
+
+        ``since_floor`` (Milestone 10, optional, additive — default ``None`` preserves every
+        existing caller's exact prior behavior): a lower bound on how far back a fetch may look,
+        even on a fresh/empty checkpoint. Without it, a source with no prior checkpoint asks its
+        provider for *everything* the feed currently returns, no time bound at all — fine for a
+        one-off admin sync, but exactly the "scheduled ingestion becomes an unbounded historical
+        backfill" failure mode Milestone 10 §9 forbids. When both a checkpoint and a floor are
+        present, the later (more restrictive) of the two wins."""
         source = await self.sources.get(source_id)
         if source is None:
             raise ValueError(f"Unknown news source: {source_id}")
@@ -95,6 +104,8 @@ class NewsIngestionService:
         since = checkpoint.last_synced_at
         if since is not None:
             since = _ensure_aware(since, now)
+        if since_floor is not None:
+            since = max(since, since_floor) if since is not None else since_floor
         try:
             records = await provider.fetch_articles(source.url, since=since, cursor=checkpoint.cursor)
         except Exception as exc:  # provider fault — retry-eligible, not a crash
@@ -120,6 +131,30 @@ class NewsIngestionService:
         await self.checkpoints.upsert(checkpoint)
         run.mark_succeeded(now)
         return await self.sync_runs.update(run)
+
+    async def sync_all_sources(
+        self,
+        now: datetime,
+        trigger: SyncTrigger = SyncTrigger.SCHEDULED,
+        on_article_created: Callable[[NewsArticle], Awaitable[object]] | None = None,
+        since_floor: datetime | None = None,
+    ) -> list[IntelligenceSyncRun]:
+        """Milestone 10 — the missing "sync every registered source" entry point
+        `sync_upcoming_structured_intelligence` already has for structured intelligence. Thin
+        orchestration only: one `sync_source` call per source, in registration order. One
+        source's failure is already isolated by `sync_source` itself (it catches the provider
+        fault and returns a FAILED run rather than raising), so this loop never aborts partway
+        through — every registered source gets its own attempt regardless of any other source's
+        outcome."""
+        runs: list[IntelligenceSyncRun] = []
+        for source in await self.sources.list_all():
+            runs.append(
+                await self.sync_source(
+                    source.id, now, trigger=trigger, on_article_created=on_article_created,
+                    since_floor=since_floor,
+                )
+            )
+        return runs
 
     async def _ingest_record(
         self, source_id: NewsSourceId, record: RawArticleRecord, now: datetime

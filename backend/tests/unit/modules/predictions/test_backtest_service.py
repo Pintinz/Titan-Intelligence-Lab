@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -45,10 +45,17 @@ class _RecencyAwareModel:
 def _drifting_samples(n: int, round_size: int = 20) -> list[TrainingSample]:
     """Every ``round_size`` samples forms one "round" (matching the backtest's own ``step``);
     the real label alternates by round parity. Built oldest-first, then reversed by the caller to
-    emulate `evaluated_at.desc()` ordering.
-    """
+    emulate `evaluated_at.desc()` ordering. Milestone 18: `BacktestService.run()` reverses back to
+    chronological order and then calls `dataset_splitter.split(..., WALK_FORWARD, ...)`, which now
+    requires a real `reference_time` on every sample (the real production caller,
+    `ml_platform_router.run_backtest`, always has one — it passes `DatasetBuilder`'s own
+    `dataset.samples` straight through, and `DatasetBuilder` now populates `reference_time` from
+    `PredictionOutcome.evaluated_at`)."""
     return [
-        TrainingSample(features={"round": float(i // round_size)}, label=1.0 if (i // round_size) % 2 == 0 else 0.0)
+        TrainingSample(
+            features={"round": float(i // round_size)}, label=1.0 if (i // round_size) % 2 == 0 else 0.0,
+            reference_time=T0 + timedelta(hours=i),
+        )
         for i in range(n)
     ]
 
@@ -117,7 +124,8 @@ class TestBacktestService:
                 return ModelPrediction(raw_score=self._mean_label, probability=0.0, value="")
 
         samples_oldest_first = [
-            TrainingSample(features={"x": float(i)}, label=float(i) * 2.0) for i in range(150)
+            TrainingSample(features={"x": float(i)}, label=float(i) * 2.0, reference_time=T0 + timedelta(hours=i))
+            for i in range(150)
         ]
         samples_newest_first = list(reversed(samples_oldest_first))
 

@@ -295,7 +295,15 @@ class ApiFootballAdapter(_ApiSportsHttpAdapterBase):
         historical-season restriction that applies to some other endpoints). Each entry's
         ``player.type``/``player.reason`` are the provider's own raw unavailability text (see
         ``ProviderInjuryRecord``'s docstring) — no expected-return date is reported by this
-        endpoint, so none is invented."""
+        endpoint, so none is invented.
+
+        Milestone 4 provenance finding (docs/milestone4_verification_report.md): the ``reported_at``
+        populated below is ``fixture.date`` — the KICKOFF of the fixture this entry's unavailability
+        refers to, not a report/publication timestamp. This endpoint reports no such timestamp at
+        all. Do not treat ``reported_at`` as evidence this injury was known before that kickoff;
+        `EntityReconciliationService.reconcile_injury` stores it under `Injury.reported_at` exactly
+        as received, and `Injury.availability_classification` defaults to
+        `UNKNOWN_AVAILABILITY_TIME` precisely because of this — see that field's own docstring."""
         payload = await self._get(
             "/injuries", {"team": team_ref.external_id, "season": season_label or str(datetime.now().year)}
         )

@@ -48,6 +48,7 @@ from apps.api.composition import (
     build_intelligence_enrichment_orchestrator,
     build_monitoring_service,
     build_entity_reconciliation_service,
+    build_news_backfill_service,
     build_news_ingestion_service,
     build_provider_management_service,
     build_sync_orchestrator,
@@ -95,6 +96,8 @@ from modules.ingestion.application.cross_provider_team_mapping_service import Co
 from modules.ingestion.application.sync_orchestrator import NoFixtureSourcePreferenceError, SportNotReconciledError
 from modules.ingestion.domain.entities import CompetitionFixtureSourcePreference
 from modules.ingestion.domain.value_objects import EntityKind as IngestionEntityKind
+from modules.ingestion.domain.value_objects import SyncTrigger
+from modules.intelligence.application.news_backfill_service import BackfillRequest, BackfillValidationError
 from modules.intelligence.domain.entities import NewsSource
 from modules.intelligence.domain.value_objects import NewsSourceId, NewsSourceType
 from modules.intelligence.domain.value_objects import SyncTrigger as _NewsSyncTrigger
@@ -1424,7 +1427,12 @@ async def trigger_sync_lineups(
     if fixture is None or not fixture.provider_refs:
         raise HTTPException(status_code=404, detail=f"fixture '{fixture_id}' not found or has no provider reference") from None
     orchestrator = build_sync_orchestrator(session)
-    run = await orchestrator.sync_lineups(sport_code, fixture.provider_refs[0], fixture_id, _now(), force=body.force)
+    # Milestone 5 §13: trigger is always derived server-side, never from the request body
+    # (TriggerSyncBody has no such field) — explicit here so it can never silently drift back to
+    # a default that isn't ADMIN_MANUAL.
+    run = await orchestrator.sync_lineups(
+        sport_code, fixture.provider_refs[0], fixture_id, _now(), force=body.force, trigger=SyncTrigger.ADMIN_MANUAL
+    )
     return envelope(data=_serialize_sync_run(run))
 
 
@@ -1438,7 +1446,10 @@ async def trigger_sync_injuries(
     if team is None or not team.provider_refs:
         raise HTTPException(status_code=404, detail=f"team '{team_id}' not found or has no provider reference") from None
     orchestrator = build_sync_orchestrator(session)
-    run = await orchestrator.sync_injuries(sport_code, team.provider_refs[0], _now(), force=body.force, season_label=body.season_label)
+    run = await orchestrator.sync_injuries(
+        sport_code, team.provider_refs[0], _now(), force=body.force, season_label=body.season_label,
+        trigger=SyncTrigger.ADMIN_MANUAL,
+    )
     return envelope(data=_serialize_sync_run(run))
 
 
@@ -1452,7 +1463,9 @@ async def trigger_sync_transfers(
     if team is None or not team.provider_refs:
         raise HTTPException(status_code=404, detail=f"team '{team_id}' not found or has no provider reference") from None
     orchestrator = build_sync_orchestrator(session)
-    run = await orchestrator.sync_transfers(sport_code, team.provider_refs[0], _now(), force=body.force)
+    run = await orchestrator.sync_transfers(
+        sport_code, team.provider_refs[0], _now(), force=body.force, trigger=SyncTrigger.ADMIN_MANUAL
+    )
     return envelope(data=_serialize_sync_run(run))
 
 
@@ -1759,13 +1772,96 @@ async def trigger_news_sync(
     orchestrator = build_intelligence_enrichment_orchestrator(session)
     now = _now()
     try:
+        # Milestone 10: an administrator's one-off click is ADMIN_MANUAL, distinct from
+        # LIVE_SCHEDULED (the only trigger classify_news_availability ever honors for
+        # VERIFIED_PRE_MATCH) — this endpoint can never spoof scheduled provenance.
         run = await service.sync_source(
-            parsed_id, now, trigger=_NewsSyncTrigger.MANUAL,
-            on_article_created=lambda article: orchestrator.enrich_article(article, now),
+            parsed_id, now, trigger=_NewsSyncTrigger.ADMIN_MANUAL,
+            on_article_created=lambda article: orchestrator.enrich_article(
+                article, now, trigger=_NewsSyncTrigger.ADMIN_MANUAL,
+            ),
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
     return envelope(data=_serialize_intelligence_sync_run(run))
+
+
+class NewsBackfillRequestBody(BaseModel):
+    source_id: str
+    season_id: str
+    since: datetime
+    until: datetime | None = None
+    max_articles: int | None = None
+    dry_run: bool = True
+
+
+def _serialize_backfill_plan(plan) -> dict:
+    return {
+        "source_id": str(plan.source_id.value),
+        "source_name": plan.source_name,
+        "requested_since": plan.requested_since.isoformat(),
+        "requested_until": plan.requested_until.isoformat() if plan.requested_until else None,
+        "effective_since": plan.effective_since.isoformat(),
+        "effective_until": plan.effective_until.isoformat(),
+        "max_articles": plan.max_articles,
+        "window_clamped": plan.window_clamped,
+    }
+
+
+def _serialize_backfill_summary(summary) -> dict:
+    return {
+        "dry_run": summary.dry_run,
+        "plan": _serialize_backfill_plan(summary.plan),
+        "sync_run_id": summary.sync_run_id,
+        "articles_seen": summary.articles_seen,
+        "articles_deduplicated": summary.articles_deduplicated,
+        "articles_rejected": summary.articles_rejected,
+        "articles_within_window": summary.articles_within_window,
+        "articles_outside_window": summary.articles_outside_window,
+        "articles_relevant": summary.articles_relevant,
+        "articles_skipped_by_relevance": summary.articles_skipped_by_relevance,
+        "articles_sent_to_gemini": summary.articles_sent_to_gemini,
+        "articles_enriched": summary.articles_enriched,
+        "enrichment_failures": summary.enrichment_failures,
+        "provenance_verified": summary.provenance_verified,
+        "provenance_unknown": summary.provenance_unknown,
+        "errors": summary.errors,
+    }
+
+
+@app.post("/api/v1/admin/news/backfill")
+async def trigger_news_backfill(
+    body: NewsBackfillRequestBody, session: AsyncSession = Depends(get_session),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    """Milestone 12 — controlled historical catch-up sync for a single source, distinct from both
+    the scheduled LIVE_SCHEDULED path and this file's own ADMIN_MANUAL sync above. `dry_run`
+    defaults True (the primary verification mode): the request is validated and its bounded
+    window computed, but nothing is fetched, persisted, or sent to Gemini. A real
+    (``dry_run=false``) run additionally requires ``TITANIQ_NEWS_BACKFILL_ENABLED=true`` — refused
+    otherwise, with the refusal recorded in the response rather than silently downgraded to a
+    dry-run. BACKFILL can never produce VERIFIED_PRE_MATCH provenance (only LIVE_SCHEDULED can,
+    enforced in `news_provenance.classify_news_availability`, unchanged by this endpoint)."""
+    try:
+        source_id = NewsSourceId(uuid.UUID(body.source_id))
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid source_id '{body.source_id}'") from None
+    try:
+        season_id = SeasonId(uuid.UUID(body.season_id))
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid season_id '{body.season_id}'") from None
+
+    service = build_news_backfill_service(session)
+    now = _now()
+    request = BackfillRequest(
+        source_id=source_id, season_id=season_id, since=body.since, until=body.until,
+        max_articles=body.max_articles, dry_run=body.dry_run,
+    )
+    try:
+        summary = await service.run(request, now)
+    except BackfillValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    return envelope(data=_serialize_backfill_summary(summary))
 
 
 @app.get("/api/v1/admin/ingestion/quality/{sport_code}/{entity_kind}")

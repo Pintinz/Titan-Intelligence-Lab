@@ -1,12 +1,18 @@
 """Dataset Splitter — the 6 named split strategies from the Milestone 9.1 Dataset Platform spec
-("Train/Val/Test/Holdout/Rolling-Window/Walk-Forward datasets"). Pure functions over an ordered
-sequence of `TrainingSample`s: `TRAIN_TEST`/`TRAIN_VAL_TEST` shuffle (seeded, for reproducibility —
-the Dataset Platform's own "Reproducibility" requirement); `HOLDOUT`/`ROLLING_WINDOW`/
-`WALK_FORWARD`/`TIME_SERIES_SPLIT` deliberately do not, because they exist specifically to respect
-chronological order — callers are expected to pass samples in ascending chronological order for
-those four (`DatasetBuilder` preserves whatever order its `PredictionOutcomeRepositoryPort` query
-returned; if that isn't chronological for a given repository implementation, that's a caller-side
-ordering concern, not this module's).
+("Train/Val/Test/Holdout/Rolling-Window/Walk-Forward datasets"). Pure functions over a sequence of
+`TrainingSample`s: `TRAIN_TEST`/`TRAIN_VAL_TEST` shuffle (seeded, for reproducibility — the Dataset
+Platform's own "Reproducibility" requirement), order-independent by design.
+
+`HOLDOUT`/`ROLLING_WINDOW`/`WALK_FORWARD`/`TIME_SERIES_SPLIT` exist specifically to respect
+chronological order, so they never trust caller-supplied order (Milestone 18 fix — see
+docs/milestone18_verification_report.md): each sorts its input ascending by
+`TrainingSample.reference_time` before slicing, and fails closed (`MissingTemporalReferenceError`)
+if any sample lacks that field, rather than silently falling back to positional/input order. This
+replaces the pre-Milestone-18 contract, which merely documented "callers are expected to pass
+samples in ascending chronological order" without enforcing or even checking it — the exact gap
+Milestone 17 found `DatasetBuilder`/`PredictionOutcomeRepositoryPort` silently violating (samples
+arrived in `evaluated_at DESC` order, the opposite of what every one of these four strategies
+assumed).
 """
 
 from __future__ import annotations
@@ -16,9 +22,33 @@ import random
 from modules.predictions.domain.dataset import DatasetSplit, SplitStrategy
 from modules.predictions.ports.ml_model import TrainingSample
 
+_TEMPORAL_STRATEGIES = frozenset(
+    {SplitStrategy.HOLDOUT, SplitStrategy.ROLLING_WINDOW, SplitStrategy.WALK_FORWARD, SplitStrategy.TIME_SERIES_SPLIT}
+)
+
 
 class InsufficientSamplesForSplitError(ValueError):
     pass
+
+
+class MissingTemporalReferenceError(ValueError):
+    """Raised when a temporal (order-sensitive) split strategy is requested but one or more
+    samples has no `reference_time`. Fails closed rather than falling back to whatever positional
+    order the caller happened to pass — a caller-supplied order is never trusted as chronological,
+    which is exactly the assumption that produced the Milestone 17 defect."""
+
+
+def _chronological(samples: list[TrainingSample]) -> list[TrainingSample]:
+    missing = sum(1 for s in samples if s.reference_time is None)
+    if missing:
+        raise MissingTemporalReferenceError(
+            f"{missing} of {len(samples)} samples have no reference_time — a temporal split "
+            "strategy cannot establish chronological order without it."
+        )
+    # Stable sort: samples sharing an identical reference_time keep their relative input order —
+    # deterministic given a deterministic input list, and does not manufacture leakage across a
+    # fold boundary any more than an arbitrary tie-break would (Milestone 18 §8).
+    return sorted(samples, key=lambda s: s.reference_time)
 
 
 def split(samples: list[TrainingSample], strategy: SplitStrategy, **kwargs) -> DatasetSplit:
@@ -31,6 +61,10 @@ def split(samples: list[TrainingSample], strategy: SplitStrategy, **kwargs) -> D
         return _train_val_test(
             samples, kwargs.get("val_ratio", 0.15), kwargs.get("test_ratio", 0.15), kwargs.get("seed", 42)
         )
+
+    if strategy in _TEMPORAL_STRATEGIES:
+        samples = _chronological(samples)
+
     if strategy is SplitStrategy.HOLDOUT:
         return _holdout(samples, kwargs.get("holdout_ratio", 0.2))
     if strategy is SplitStrategy.ROLLING_WINDOW:
@@ -63,9 +97,23 @@ def _train_val_test(samples: list[TrainingSample], val_ratio: float, test_ratio:
     return DatasetSplit(strategy=SplitStrategy.TRAIN_VAL_TEST, train=train, validation=validation, test=test)
 
 
+def _assert_chronological(train: tuple[TrainingSample, ...], test: tuple[TrainingSample, ...]) -> None:
+    """The required temporal invariant (Milestone 18 §4): max(train.reference_time) <=
+    min(test.reference_time). Holds by construction given `_chronological`'s sort plus contiguous
+    slicing below — this is a fail-closed correctness proof, not a workaround; it is never expected
+    to fire, and is never weakened to tolerate messy data."""
+    if train and test:
+        assert train[-1].reference_time <= test[0].reference_time, (
+            "temporal split invariant violated: a training observation occurred after a "
+            "validation/test observation"
+        )
+
+
 def _holdout(samples: list[TrainingSample], holdout_ratio: float) -> DatasetSplit:
     cut = max(1, int(len(samples) * (1 - holdout_ratio)))
-    return DatasetSplit(strategy=SplitStrategy.HOLDOUT, train=tuple(samples[:cut]), test=tuple(samples[cut:]))
+    train, test = tuple(samples[:cut]), tuple(samples[cut:])
+    _assert_chronological(train, test)
+    return DatasetSplit(strategy=SplitStrategy.HOLDOUT, train=train, test=test)
 
 
 def _rolling_window(samples: list[TrainingSample], window_size: int, test_size: int) -> DatasetSplit:
@@ -74,6 +122,7 @@ def _rolling_window(samples: list[TrainingSample], window_size: int, test_size: 
     while i + window_size + test_size <= len(samples):
         train_fold = tuple(samples[i : i + window_size])
         test_fold = tuple(samples[i + window_size : i + window_size + test_size])
+        _assert_chronological(train_fold, test_fold)
         folds.append((train_fold, test_fold))
         i += test_size
     if not folds:
@@ -89,6 +138,7 @@ def _walk_forward(samples: list[TrainingSample], min_train_size: int, step: int)
     while size + step <= len(samples):
         train_fold = tuple(samples[:size])
         test_fold = tuple(samples[size : size + step])
+        _assert_chronological(train_fold, test_fold)
         folds.append((train_fold, test_fold))
         size += step
     if not folds:
@@ -109,5 +159,6 @@ def _time_series_split(samples: list[TrainingSample], n_splits: int) -> DatasetS
         test_fold = tuple(samples[fold_size * i : fold_size * (i + 1)])
         if not test_fold:
             break
+        _assert_chronological(train_fold, test_fold)
         folds.append((train_fold, test_fold))
     return DatasetSplit(strategy=SplitStrategy.TIME_SERIES_SPLIT, train=tuple(samples), folds=tuple(folds))

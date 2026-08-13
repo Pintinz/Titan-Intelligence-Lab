@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -126,6 +126,63 @@ async def test_feature_value_get_latest_returns_most_recent(sqlite_session):
 
     assert latest.value == pytest.approx(0.6)
     assert len(history) == 2
+
+
+@pytest.mark.asyncio
+async def test_feature_value_get_as_of_returns_value_true_at_cutoff_not_the_latest(sqlite_session):
+    """Milestone 4 point-in-time retrieval, tested against the real SQLAlchemy-backed repository
+    (not the in-memory test double in conftest.py) — the mapper/SQL `WHERE as_of <= cutoff ORDER
+    BY as_of DESC LIMIT 1` behavior is exactly the kind of thing that can silently diverge from a
+    hand-written fake, so it needs its own real-database assertion, not just service-layer
+    coverage against the fake."""
+    definition_repo = SqlAlchemyFeatureDefinitionRepository(session=sqlite_session)
+    value_repo = SqlAlchemyFeatureValueRepository(session=sqlite_session)
+    definition = _definition(dependencies=())
+    await definition_repo.upsert(definition)
+
+    early = FeatureValue(
+        id=FeatureValueId(uuid4()), feature_key=definition.feature_key, entity_type=EntityType.TEAM,
+        entity_id="team-1", as_of=T0, value=0.4,
+    )
+    mid = FeatureValue(
+        id=FeatureValueId(uuid4()), feature_key=definition.feature_key, entity_type=EntityType.TEAM,
+        entity_id="team-1", as_of=datetime(2026, 7, 26, tzinfo=timezone.utc), value=0.5,
+    )
+    late = FeatureValue(
+        id=FeatureValueId(uuid4()), feature_key=definition.feature_key, entity_type=EntityType.TEAM,
+        entity_id="team-1", as_of=datetime(2026, 7, 28, tzinfo=timezone.utc), value=0.9,
+    )
+    await value_repo.record(early)
+    await value_repo.record(late)
+    await value_repo.record(mid)  # inserted last but chronologically the middle value
+    await sqlite_session.commit()
+
+    as_of_cutoff = datetime(2026, 7, 27, tzinfo=timezone.utc)
+    result = await value_repo.get_as_of(definition.feature_key, EntityType.TEAM, "team-1", as_of_cutoff)
+
+    assert result is not None
+    assert result.value == pytest.approx(0.5)  # "mid", not "late" (future) or "early" (stale)
+
+
+@pytest.mark.asyncio
+async def test_feature_value_get_as_of_returns_none_before_any_value_existed(sqlite_session):
+    definition_repo = SqlAlchemyFeatureDefinitionRepository(session=sqlite_session)
+    value_repo = SqlAlchemyFeatureValueRepository(session=sqlite_session)
+    definition = _definition(dependencies=())
+    await definition_repo.upsert(definition)
+    await value_repo.record(
+        FeatureValue(
+            id=FeatureValueId(uuid4()), feature_key=definition.feature_key, entity_type=EntityType.TEAM,
+            entity_id="team-1", as_of=T0, value=0.4,
+        )
+    )
+    await sqlite_session.commit()
+
+    result = await value_repo.get_as_of(
+        definition.feature_key, EntityType.TEAM, "team-1", T0 - timedelta(days=1)
+    )
+
+    assert result is None
 
 
 @pytest.mark.asyncio

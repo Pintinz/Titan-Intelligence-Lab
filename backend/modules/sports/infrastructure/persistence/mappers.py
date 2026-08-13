@@ -372,6 +372,10 @@ def lineup_to_domain(model: LineupModel) -> Lineup:
         slots=tuple(_lineup_slot_from_dict(s) for s in model.slots),
         version=model.version,
         provider_refs=_provider_refs_from_dict(model.provider_ref),
+        availability_classification=model.availability_classification,
+        information_available_at=model.information_available_at,
+        fetched_at=model.fetched_at,
+        sync_run_id=model.sync_run_id,
     )
 
 
@@ -383,6 +387,10 @@ def lineup_to_model(entity: Lineup, model: LineupModel | None = None) -> LineupM
     model.slots = [_lineup_slot_to_dict(s) for s in entity.slots]
     model.version = entity.version
     model.provider_ref = _provider_refs_to_dict(entity.provider_refs)
+    model.availability_classification = entity.availability_classification
+    model.information_available_at = entity.information_available_at
+    model.fetched_at = entity.fetched_at
+    model.sync_run_id = entity.sync_run_id
     return model
 
 
@@ -397,6 +405,10 @@ def injury_to_domain(model: InjuryModel) -> Injury:
         source_ref=None,
         version=model.version,
         provider_refs=_provider_refs_from_dict(model.provider_ref),
+        availability_classification=model.availability_classification,
+        information_available_at=model.information_available_at,
+        fetched_at=model.fetched_at,
+        sync_run_id=model.sync_run_id,
     )
 
 
@@ -409,6 +421,10 @@ def injury_to_model(entity: Injury, model: InjuryModel | None = None) -> InjuryM
     model.expected_return = entity.expected_return
     model.version = entity.version
     model.provider_ref = _provider_refs_to_dict(entity.provider_refs)
+    model.availability_classification = entity.availability_classification
+    model.information_available_at = entity.information_available_at
+    model.fetched_at = entity.fetched_at
+    model.sync_run_id = entity.sync_run_id
     return model
 
 
@@ -422,6 +438,10 @@ def transfer_to_domain(model: TransferModel) -> Transfer:
         transfer_type=model.transfer_type,
         version=model.version,
         provider_refs=_provider_refs_from_dict(model.provider_ref),
+        availability_classification=model.availability_classification,
+        information_available_at=model.information_available_at,
+        fetched_at=model.fetched_at,
+        sync_run_id=model.sync_run_id,
     )
 
 
@@ -434,6 +454,10 @@ def transfer_to_model(entity: Transfer, model: TransferModel | None = None) -> T
     model.transfer_type = entity.transfer_type
     model.version = entity.version
     model.provider_ref = _provider_refs_to_dict(entity.provider_refs)
+    model.availability_classification = entity.availability_classification
+    model.information_available_at = entity.information_available_at
+    model.fetched_at = entity.fetched_at
+    model.sync_run_id = entity.sync_run_id
     return model
 
 

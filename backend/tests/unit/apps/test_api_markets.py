@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -25,7 +25,10 @@ from modules.identity.domain.value_objects import Email, Role
 from modules.identity.infrastructure.persistence.models import Base as IdentityBase
 from modules.identity.infrastructure.persistence.repositories import SqlAlchemyUserRepository
 from modules.identity.infrastructure.security import MockJWTValidator
+from modules.predictions.domain.entities import ModelDefinition
+from modules.predictions.domain.value_objects import MarketId, ModelId, ModelStatus
 from modules.predictions.infrastructure.persistence.models import Base as PredictionsBase
+from modules.predictions.infrastructure.persistence.repositories import SqlAlchemyModelRepository
 
 T0 = datetime(2026, 7, 26, tzinfo=timezone.utc)
 
@@ -125,6 +128,56 @@ def test_register_and_get_market(client, db_session_factory):
     fetched = client.get("/api/v1/markets/football.router_test_market", headers=headers)
     assert fetched.status_code == 200
     assert fetched.json()["data"]["market_key"] == "football.router_test_market"
+
+
+async def _register_champion(db_session_factory, market_id: str, *, genuinely_trained: bool) -> None:
+    async with db_session_factory() as session:
+        models = SqlAlchemyModelRepository(session=session)
+        model = ModelDefinition(
+            id=ModelId(uuid4()), market_id=MarketId(UUID(market_id)), model_key="test.champion",
+            version=1, algorithm="logistic_regression" if genuinely_trained else "heuristic_logistic_v1",
+            status=ModelStatus.CHAMPION,
+            artifact_ref="artifacts/real-model.joblib" if genuinely_trained else None,
+        )
+        await models.upsert(model)
+        await session.commit()
+
+
+def test_market_with_no_champion_reports_training_status_no_champion(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
+    _register_market(client, headers, market_key="football.training_status_none")
+
+    fetched = client.get("/api/v1/markets/football.training_status_none", headers=headers)
+
+    assert fetched.json()["data"]["training_status"] == "NO_CHAMPION"
+
+
+def test_market_with_heuristic_placeholder_champion_reports_training_status_honestly(client, db_session_factory):
+    """Milestone 4 status honesty (Rule 13): a market whose only Champion is a placeholder-
+    heuristic (no artifact_ref) must not report the same training_status as a genuinely trained
+    one — this is the real gap found in football.first_half_winner and 4 sibling markets."""
+    headers = _auth_headers(client, db_session_factory)
+    created = _register_market(client, headers, market_key="football.training_status_heuristic")
+    market_id = created.json()["data"]["id"]
+    __import__("asyncio").run(_register_champion(db_session_factory, market_id, genuinely_trained=False))
+
+    fetched = client.get("/api/v1/markets/football.training_status_heuristic", headers=headers)
+    listed = client.get("/api/v1/markets", params={"sport_code": "football"}, headers=headers)
+
+    assert fetched.json()["data"]["training_status"] == "HEURISTIC_PLACEHOLDER"
+    listed_entry = next(m for m in listed.json()["data"] if m["market_key"] == "football.training_status_heuristic")
+    assert listed_entry["training_status"] == "HEURISTIC_PLACEHOLDER"
+
+
+def test_market_with_trained_champion_reports_training_status_trained(client, db_session_factory):
+    headers = _auth_headers(client, db_session_factory)
+    created = _register_market(client, headers, market_key="football.training_status_trained")
+    market_id = created.json()["data"]["id"]
+    __import__("asyncio").run(_register_champion(db_session_factory, market_id, genuinely_trained=True))
+
+    fetched = client.get("/api/v1/markets/football.training_status_trained", headers=headers)
+
+    assert fetched.json()["data"]["training_status"] == "TRAINED"
 
 
 def test_non_admin_cannot_register_market(client, db_session_factory):

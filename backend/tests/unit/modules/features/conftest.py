@@ -79,6 +79,17 @@ class InMemoryFeatureValueRepository:
         ]
         return sorted(matches, key=lambda v: v.as_of, reverse=True)[:limit]
 
+    async def get_as_of(self, feature_key, entity_type, entity_id, as_of):
+        # Mirrors SqlAlchemyFeatureValueRepository.get_as_of's WHERE as_of <= cutoff ORDER BY
+        # as_of DESC LIMIT 1 — the most recent value that was already true at `as_of`, ignoring
+        # insertion order (list position) entirely, same as the real SQL query would.
+        matches = [
+            v for v in self.store
+            if v.feature_key == feature_key and v.entity_type == entity_type and v.entity_id == entity_id
+            and v.as_of <= as_of
+        ]
+        return max(matches, key=lambda v: v.as_of) if matches else None
+
     async def list_all_recent(self, feature_key, since=None, limit=5000):
         matches = [
             v for v in self.store

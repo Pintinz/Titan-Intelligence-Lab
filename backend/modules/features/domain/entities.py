@@ -47,11 +47,19 @@ class FeatureDefinition:
     reviewed_at: datetime | None = None
     rejection_reason: str | None = None
     deprecated_at: datetime | None = None
+    # Milestone 4 provenance foundation — "PRE_MATCH_SAFE" | "POST_MATCH_ONLY" |
+    # "POINT_IN_TIME_REQUIRED" | "UNKNOWN_PROVENANCE".
+    leakage_classification: str = "UNKNOWN_PROVENANCE"
 
     def is_consumable(self) -> bool:
         """Only ACTIVE features may be wired into a model's training config
         (docs/feature_catalog.md: "no model may consume an undocumented feature")."""
         return self.status is FeatureStatus.ACTIVE
+
+    def is_market_safe(self) -> bool:
+        """POST_MATCH_ONLY features must never enter a market's live prediction/training feature
+        set (Milestone 4 Rule 8) — checked by `FeatureMarketMappingService.map_feature()`."""
+        return self.leakage_classification != "POST_MATCH_ONLY"
 
 
 @dataclass

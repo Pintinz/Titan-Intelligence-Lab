@@ -105,7 +105,7 @@ class TeamModel(TimestampMixin, VersionedMixin, Base):
     name: Mapped[str] = mapped_column(String(200))
     short_name: Mapped[str] = mapped_column(String(32))
     country: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    venue_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("venues.id"), nullable=True)
+    venue_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("venues.id"), nullable=True, index=True)
     logo_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
 
@@ -145,9 +145,9 @@ class FixtureModel(TimestampMixin, VersionedMixin, Base):
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     season_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("seasons.id"), index=True)
-    home_team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id"))
-    away_team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id"))
-    venue_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("venues.id"), nullable=True)
+    home_team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id"), index=True)
+    away_team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id"), index=True)
+    venue_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("venues.id"), nullable=True, index=True)
     scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     status: Mapped[str] = mapped_column(String(32), default="scheduled", index=True)
     home_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -176,8 +176,8 @@ class MatchEventModel(TimestampMixin, Base):
     period: Mapped[int] = mapped_column(Integer)
     type: Mapped[str] = mapped_column(String(64))
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
-    team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id"), nullable=True)
-    player_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("players.id"), nullable=True)
+    team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id"), nullable=True, index=True)
+    player_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("players.id"), nullable=True, index=True)
 
 
 class TeamStatisticsModel(TimestampMixin, VersionedMixin, Base):
@@ -220,6 +220,15 @@ class LineupModel(TimestampMixin, VersionedMixin, Base):
     team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id"), index=True)
     formation: Mapped[str | None] = mapped_column(String(32), nullable=True)
     slots: Mapped[list] = mapped_column(JSON, default=list)
+    # Milestone 4 provenance foundation (docs/milestone4_verification_report.md) — see
+    # InjuryModel's own comment below for the shared semantics of this pair of columns.
+    availability_classification: Mapped[str] = mapped_column(String(32), default="UNKNOWN_AVAILABILITY_TIME")
+    information_available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Milestone 5 (Verified Pre-Match Data Availability) — see
+    # modules.ingestion.application.provenance's module docstring for fetched_at vs
+    # information_available_at semantics, and Lineup/Injury/Transfer's domain entity comments.
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sync_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class InjuryModel(TimestampMixin, VersionedMixin, Base):
@@ -232,6 +241,22 @@ class InjuryModel(TimestampMixin, VersionedMixin, Base):
     reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
     expected_return: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     source_ref: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Milestone 4 provenance foundation. `reported_at` above is NOT a genuine report/publication
+    # timestamp — confirmed by reading `ApiFootballAdapter.fetch_injuries`: it's populated from
+    # the API-Football `/injuries` response's `fixture.date`, i.e. the KICKOFF of the fixture the
+    # player is unavailable for, not when the injury became known. That endpoint reports no
+    # report/publication timestamp at all. `availability_classification` is the honest
+    # "VERIFIED_PRE_MATCH | VERIFIED_POST_MATCH | UNKNOWN_AVAILABILITY_TIME" verdict (same 3-state
+    # concept as KNOWN_BEFORE_EVENT/UNKNOWN/KNOWN_AFTER_EVENT on the other structured-intelligence
+    # tables below); `information_available_at`, when set, is a genuine verified availability
+    # timestamp distinct from `reported_at` — never derived from `reported_at` itself. Defaults to
+    # UNKNOWN_AVAILABILITY_TIME; only an explicit verification pass may promote a row to
+    # VERIFIED_PRE_MATCH. Never auto-classified as pre-match — see EntityKind/leakage-prevention
+    # tests in tests/unit/modules/sports/test_availability_classification.py.
+    availability_classification: Mapped[str] = mapped_column(String(32), default="UNKNOWN_AVAILABILITY_TIME")
+    information_available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sync_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class SuspensionModel(TimestampMixin, Base):
@@ -242,6 +267,10 @@ class SuspensionModel(TimestampMixin, Base):
     reason: Mapped[str] = mapped_column(String(255))
     start_date: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     end_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    availability_classification: Mapped[str] = mapped_column(String(32), default="UNKNOWN_AVAILABILITY_TIME")
+    information_available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sync_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class TransferModel(TimestampMixin, VersionedMixin, Base):
@@ -253,6 +282,10 @@ class TransferModel(TimestampMixin, VersionedMixin, Base):
     to_team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id"), nullable=True, index=True)
     effective_date: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     transfer_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    availability_classification: Mapped[str] = mapped_column(String(32), default="UNKNOWN_AVAILABILITY_TIME")
+    information_available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sync_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class RankingModel(TimestampMixin, Base):

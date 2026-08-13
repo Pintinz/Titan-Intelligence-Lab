@@ -9,7 +9,7 @@ import pytest_asyncio
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from apps.api.composition import get_dataset_repo, get_jwt_validator, get_session
+from apps.api.composition import get_jwt_validator, get_session
 from apps.api.main import app
 from modules.identity.domain.value_objects import Email, Role
 from modules.identity.infrastructure.persistence.models import Base as IdentityBase
@@ -60,10 +60,11 @@ def client(db_session_factory):
 
     app.dependency_overrides[get_session] = override_get_session
     app.dependency_overrides[get_jwt_validator] = lambda: MockJWTValidator()
-    get_dataset_repo.cache_clear()  # process-wide singleton — start each test with an empty registry
+    # Milestone 20: dataset persistence is now SQL-backed (`build_dataset_repo(session)`), scoped
+    # to this test's own isolated `db_session_factory` engine — no process-wide singleton to
+    # reset between tests anymore.
     yield TestClient(app)
     app.dependency_overrides.clear()
-    get_dataset_repo.cache_clear()
 
 
 async def _promote_to_admin(db_session_factory, email: str) -> None:
@@ -212,6 +213,49 @@ class TestModelRegistry:
         assert response.status_code == 200
         assert response.json()["meta"]["count"] == 1
         assert response.json()["data"][0]["status"] == "champion"
+
+    def test_list_models_flags_heuristic_placeholder_champion_as_not_genuinely_trained(self, client, db_session_factory):
+        """Milestone 4 status honesty (Rule 13): `_seed_market`'s default champion is exactly the
+        real-world placeholder shape (`algorithm="heuristic_logistic_v1"`, no `artifact_ref`) that
+        `football.first_half_winner` and 4 other markets carry in production — must report
+        `is_genuinely_trained: False`, not look identical to a real trained Champion."""
+        headers = _admin_headers(client, db_session_factory)
+        asyncio.run(_seed_market(db_session_factory, "football.ml_heuristic_models_market"))
+
+        response = client.get("/api/v1/admin/ml/models/football.ml_heuristic_models_market", headers=headers)
+
+        assert response.status_code == 200
+        assert response.json()["data"][0]["is_genuinely_trained"] is False
+
+    def test_list_models_flags_champion_with_artifact_as_genuinely_trained(self, client, db_session_factory):
+        headers = _admin_headers(client, db_session_factory)
+
+        async def _seed_trained():
+            from modules.predictions.domain.entities import MarketDefinition
+
+            async with db_session_factory() as session:
+                markets = SqlAlchemyMarketRepository(session=session)
+                market = MarketDefinition(
+                    id=MarketId(uuid4()), market_key="football.ml_trained_models_market", sport_code="football",
+                    name="Test Market", category="match_outcome", market_kind=MarketKind.BINARY,
+                    target_type=TargetType.CLASSIFICATION, status=MarketStatus.PRODUCTION,
+                )
+                await markets.upsert(market)
+                models = SqlAlchemyModelRepository(session=session)
+                model = ModelDefinition(
+                    id=ModelId(uuid4()), market_id=market.id, model_key="football.ml_trained_models_market.real",
+                    version=1, algorithm="logistic_regression", status=ModelStatus.CHAMPION,
+                    artifact_ref="artifacts/real-model.joblib",
+                )
+                await models.upsert(model)
+                await session.commit()
+
+        asyncio.run(_seed_trained())
+
+        response = client.get("/api/v1/admin/ml/models/football.ml_trained_models_market", headers=headers)
+
+        assert response.status_code == 200
+        assert response.json()["data"][0]["is_genuinely_trained"] is True
 
     def test_set_deployment_mode(self, client, db_session_factory):
         headers = _admin_headers(client, db_session_factory)

@@ -82,6 +82,30 @@ async def test_logistic_predictor_applies_mapping_weight():
 
 
 @pytest.mark.asyncio
+async def test_logistic_predictor_ignores_a_mapped_weight_for_a_feature_absent_from_features():
+    """Milestone 8 — the exact scenario `is_required=False` structured-intel features hit on the
+    four heuristic markets today: `mapping_weights` has an entry (from `FeatureMarketMapping`,
+    required or not), but the feature key itself is absent from `features`
+    (`PredictionContextBuilder`/`resolve_feature_snapshot` already filtered it out as an
+    unavailable optional feature). Confirms it contributes exactly nothing to `raw_score` — not
+    "weight × 0" — the same prediction as if the mapping didn't exist at all."""
+    predictor = WeightedLogisticPredictor()
+
+    with_absent_feature = await predictor.predict(
+        MarketKind.BINARY,
+        features={"team_form": 0.8},
+        mapping_weights={"team_form": 1.0, "football.fixture.home_transfer_activity": 0.05},
+    )
+    without_the_mapping_at_all = await predictor.predict(
+        MarketKind.BINARY, features={"team_form": 0.8}, mapping_weights={"team_form": 1.0},
+    )
+
+    assert with_absent_feature.raw_score == pytest.approx(without_the_mapping_at_all.raw_score)
+    assert with_absent_feature.probability == pytest.approx(without_the_mapping_at_all.probability)
+    assert "football.fixture.home_transfer_activity" not in with_absent_feature.feature_contributions
+
+
+@pytest.mark.asyncio
 async def test_linear_predictor_raw_score_is_predicted_value():
     predictor = WeightedLinearPredictor()
 

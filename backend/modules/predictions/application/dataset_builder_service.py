@@ -86,7 +86,13 @@ def _content_hash(market_id: MarketId, samples: list[TrainingSample], feature_or
     payload = {
         "market_id": str(market_id),
         "feature_order": feature_order,
-        "samples": [[sample.features.get(key, None) for key in feature_order] + [sample.label] for sample in samples],
+        # Milestone 18: reference_time is included since it now determines split membership for
+        # every temporal strategy — two datasets with identical features/labels but different
+        # reference_times can split completely differently, so the hash must reflect that.
+        "samples": [
+            [sample.features.get(key, None) for key in feature_order] + [sample.label, sample.reference_time]
+            for sample in samples
+        ],
     }
     encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -177,7 +183,15 @@ class DatasetBuilder:
             )
             if label is None:
                 continue  # can't honestly recover a training label for this outcome — skip, never fabricate
-            samples.append(TrainingSample(features=dict(prediction.feature_snapshot), label=label))
+            # Milestone 18: reference_time = the real-world moment this outcome's label became
+            # knowable — the authoritative timestamp dataset_splitter.split() sorts by for every
+            # temporal strategy (never the DB query order, which is descending and was the
+            # Milestone 17 defect's root cause).
+            samples.append(
+                TrainingSample(
+                    features=dict(prediction.feature_snapshot), label=label, reference_time=outcome.evaluated_at
+                )
+            )
             source_prediction_ids.append(str(prediction.id))
 
         feature_order = sorted({key for sample in samples for key in sample.features})

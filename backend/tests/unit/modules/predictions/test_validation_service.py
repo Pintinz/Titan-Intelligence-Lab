@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import statistics as pystats
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -52,12 +53,25 @@ class _ConstantModel:
         pass
 
 
+T0 = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+
 def _classification_samples(n: int = 40) -> list[TrainingSample]:
-    return [TrainingSample(features={"x": float(i)}, label=1.0 if i % 2 == 0 else 0.0) for i in range(n)]
+    # Milestone 18: HOLDOUT/TIME_SERIES_SPLIT/ROLLING_WINDOW/WALK_FORWARD delegate straight through
+    # to dataset_splitter.split(), which now fails closed without a real reference_time.
+    return [
+        TrainingSample(
+            features={"x": float(i)}, label=1.0 if i % 2 == 0 else 0.0, reference_time=T0 + timedelta(hours=i)
+        )
+        for i in range(n)
+    ]
 
 
 def _regression_samples(n: int = 40) -> list[TrainingSample]:
-    return [TrainingSample(features={"x": float(i)}, label=float(i)) for i in range(n)]
+    return [
+        TrainingSample(features={"x": float(i)}, label=float(i), reference_time=T0 + timedelta(hours=i))
+        for i in range(n)
+    ]
 
 
 def _factory(target_type: TargetType = TargetType.CLASSIFICATION):

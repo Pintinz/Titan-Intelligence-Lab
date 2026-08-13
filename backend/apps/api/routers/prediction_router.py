@@ -26,6 +26,7 @@ from modules.predictions.application.prediction_cache_service import (
     InvalidPredictionStatusTransitionError,
     MarketNotFoundError,
 )
+from modules.predictions.application.feature_market_mapping_service import MissingRequiredFeatureError
 from modules.predictions.application.prediction_context_builder import (
     MarketNotInProductionError,
     NoChampionModelError,
@@ -147,6 +148,14 @@ async def generate_prediction(
     except MarketNotInProductionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
     except NoChampionModelError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except MissingRequiredFeatureError as exc:
+        # Milestone 16 — a required feature genuinely has no verified pre-match value yet (most
+        # commonly: real point-in-time news/structured-intelligence sync hasn't run or hasn't
+        # found qualifying evidence for this fixture). The check itself, and the required/optional
+        # feature-market contract behind it, are intentionally NOT weakened here — this only turns
+        # an internal implementation detail (an uncaught ValueError) into the same honest
+        # "insufficient data" response MarketNotInProductionError/NoChampionModelError already get.
         raise HTTPException(status_code=409, detail=str(exc)) from None
     return envelope(data=_serialize_prediction(prediction))
 

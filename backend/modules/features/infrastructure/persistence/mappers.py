@@ -85,6 +85,7 @@ def definition_to_domain(model: FeatureDefinitionModel) -> FeatureDefinition:
         reviewed_at=model.reviewed_at,
         rejection_reason=model.rejection_reason,
         deprecated_at=model.deprecated_at,
+        leakage_classification=model.leakage_classification,
     )
 
 
@@ -115,6 +116,7 @@ def definition_to_model(
     model.reviewed_at = entity.reviewed_at
     model.rejection_reason = entity.rejection_reason
     model.deprecated_at = entity.deprecated_at
+    model.leakage_classification = entity.leakage_classification
     return model
 
 
@@ -149,6 +151,7 @@ def _snapshot_definition(payload: dict) -> FeatureDefinition:
         status=FeatureStatus(payload["status"]),
         dependencies=tuple(FeatureKey(d) for d in payload.get("dependencies", [])),
         leakage_reviewed=payload.get("leakage_reviewed", False),
+        leakage_classification=payload.get("leakage_classification", "UNKNOWN_PROVENANCE"),
     )
 
 
@@ -174,10 +177,26 @@ def version_snapshot_to_model(entity: FeatureDefinitionVersionSnapshot) -> Featu
         "status": d.status.value,
         "dependencies": [dep.value for dep in d.dependencies],
         "leakage_reviewed": d.leakage_reviewed,
+        "leakage_classification": d.leakage_classification,
     }
     return FeatureDefinitionVersionModel(
         feature_key=entity.feature_key.value, version=entity.version, snapshot=payload, recorded_at=entity.recorded_at
     )
+
+
+def _canonical_entity_id(value: str) -> str:
+    """Same fix, same corrected rationale, as `modules.ingestion.infrastructure.persistence.
+    mappers._canonical_entity_id` (see that docstring for the full account of why hex was tried
+    first and reverted). Canonical form is hyphenated `str(uuid.UUID(...))`, matching every
+    other string-based entity reference in this codebase (`str(some_id.value)` is the universal
+    convention). This still hardens `feature_values_offline.entity_id` against a caller writing
+    an inconsistently-formatted string, without risking a mismatch against callers that compare
+    it to a domain id's plain `str()`. Non-UUID values pass through unchanged — keeps working
+    for test fixtures using mnemonic string keys (e.g. "team-1")."""
+    try:
+        return str(uuid.UUID(value))
+    except (ValueError, AttributeError, TypeError):
+        return value
 
 
 def value_to_domain(model: FeatureValueModel) -> FeatureValue:
@@ -185,7 +204,7 @@ def value_to_domain(model: FeatureValueModel) -> FeatureValue:
         id=FeatureValueId(model.id),
         feature_key=FeatureKey(model.feature_key),
         entity_type=EntityType(model.entity_type),
-        entity_id=model.entity_id,
+        entity_id=_canonical_entity_id(model.entity_id),
         as_of=model.as_of,
         value=decode_feature_value(model.value),
         quality_flags=tuple(QualityFlag(f) for f in model.quality_flags),
@@ -197,7 +216,7 @@ def value_to_model(entity: FeatureValue) -> FeatureValueModel:
         id=entity.id.value,
         feature_key=entity.feature_key.value,
         entity_type=entity.entity_type.value,
-        entity_id=entity.entity_id,
+        entity_id=_canonical_entity_id(entity.entity_id),
         as_of=entity.as_of,
         value=encode_feature_value(entity.value),
         quality_flags=[f.value for f in entity.quality_flags],

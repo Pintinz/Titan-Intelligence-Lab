@@ -5,12 +5,24 @@ Stadium Changes, Match Postponements, Player Availability, Lineup Expectations. 
 must contain: Confidence, Source, Timestamp, Affected entities, Knowledge Graph links.").
 
 Wraps `TextIntelligenceProviderPort.extract_events` and persists the result as a `NewsEvent`
-carrying every required field. "Affected entities" combines the provider's own entity list with
-whatever `EntityExtractionService` resolves from the same text — resolved Knowledge Graph node
-ids where a match exists, the raw mention text otherwise. Actually creating graph *edges* for
-the event (e.g. a `TRANSFERRED_TO` edge) is `KnowledgeGraphEnrichmentService`'s job (Milestone
-8), which reads these persisted events rather than this service reaching into the graph's write
-path directly.
+carrying every required field. Actually creating graph *edges* for the event (e.g. a
+`TRANSFERRED_TO` edge) is `KnowledgeGraphEnrichmentService`'s job (Milestone 8), which reads
+these persisted events rather than this service reaching into the graph's write path directly.
+
+Milestone 9 audit fix: this used to build `affected_entity_refs` as a flat
+`raw.entities + resolved_refs` union — the provider's own *unresolved* entity mentions from
+`extract_events` (a separate NLP call from `extract_entities`, sharing no resolution step) mixed
+directly with the *actually KG-resolved* refs from `EntityExtractionService.extract_and_link`,
+with no way for any downstream consumer to tell which was which. `MockGeminiAdapter.extract_events`
+hardcodes literal `"mock_player"`/`"mock_team"` strings here — this is exactly how those strings
+were reaching `affected_entity_refs`, unfiltered, indistinguishable from a real resolved
+Knowledge Graph node id. Fixed: `affected_entity_refs` is now populated ONLY from the properly
+resolved path (RESOLVED-only, its originally-intended contract — every existing consumer, e.g.
+`NewsImpactEngine._looks_like_node_id`, already assumed every ref there is a real KG node id).
+The provider's own raw entity mentions are no longer silently merged in at all; the real
+per-mention resolution status is preserved on `NewsEvent.resolved_entities` instead of being
+discarded, so an event with only unresolved entities is still stored (raw intelligence) but
+`is_feature_eligible()` correctly excludes it.
 """
 
 from __future__ import annotations
@@ -20,8 +32,14 @@ from datetime import datetime
 from uuid import uuid4
 
 from modules.intelligence.application.entity_extraction_service import EntityExtractionService
-from modules.intelligence.domain.entities import NewsEvent
-from modules.intelligence.domain.value_objects import NewsArticleId, NewsEventId, NewsEventType, NewsSourceId
+from modules.intelligence.domain.entities import NewsEvent, ResolvedNewsEntity
+from modules.intelligence.domain.value_objects import (
+    EntityResolutionStatus,
+    NewsArticleId,
+    NewsEventId,
+    NewsEventType,
+    NewsSourceId,
+)
 from modules.intelligence.ports.repositories import NewsEventRepositoryPort
 from modules.intelligence.ports.text_intelligence_provider import TextIntelligenceProviderPort
 
@@ -49,9 +67,21 @@ class EventExtractionService:
             return []
 
         linked_mentions = await self.entity_extraction.extract_and_link(text)
-        resolved_refs = tuple(
-            str(mention.kg_node_id) if mention.kg_node_id is not None else mention.text
+        resolved_entities = tuple(
+            ResolvedNewsEntity(
+                ref=str(mention.kg_node_id) if mention.kg_node_id is not None else mention.text,
+                node_type=mention.node_type.value if mention.node_type is not None else None,
+                status=(
+                    EntityResolutionStatus.RESOLVED
+                    if mention.kg_node_id is not None
+                    else EntityResolutionStatus.UNRESOLVED
+                ),
+            )
             for mention in linked_mentions
+        )
+        # RESOLVED-only, deduped, order-preserving — the field's original intended contract.
+        affected = tuple(
+            dict.fromkeys(e.ref for e in resolved_entities if e.status is EntityResolutionStatus.RESOLVED)
         )
 
         recorded: list[NewsEvent] = []
@@ -59,7 +89,6 @@ class EventExtractionService:
             event_type = self._resolve_event_type(raw.event_type)
             if event_type is None:
                 continue
-            affected = tuple(dict.fromkeys(raw.entities + resolved_refs))  # union, order-preserving, deduped
             event = NewsEvent(
                 id=NewsEventId(uuid4()),
                 event_type=event_type,
@@ -70,6 +99,7 @@ class EventExtractionService:
                 occurred_at=occurred_at,
                 detected_at=now,
                 affected_entity_refs=affected,
+                resolved_entities=resolved_entities,
             )
             recorded.append(await self.events.record(event))
         return recorded

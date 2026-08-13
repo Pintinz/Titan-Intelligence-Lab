@@ -112,6 +112,10 @@ from modules.intelligence.application.intelligence_retrieval_service import (
 from modules.intelligence.application.knowledge_graph_enrichment_service import KnowledgeGraphEnrichmentService
 from modules.intelligence.application.news_impact_engine import NewsImpactEngine
 from modules.intelligence.application.news_ingestion_service import NewsIngestionService
+from modules.intelligence.application.historical_entity_resolution_service import HistoricalEntityResolutionService
+from modules.intelligence.application.historical_news_relevance_engine import HistoricalNewsRelevanceEngine
+from modules.intelligence.application.news_backfill_service import NewsBackfillService
+from modules.intelligence.application.scheduled_news_sync_service import ScheduledNewsSyncService
 from modules.intelligence.application.sentiment_service import SentimentService
 from modules.intelligence.application.source_reliability_service import SourceReliabilityService
 from modules.intelligence.application.summarization_service import SummarizationService
@@ -137,6 +141,7 @@ from modules.predictions.application.calibration_reporting_service import Calibr
 from modules.predictions.application.confidence_engine import ConfidenceEngine
 from modules.predictions.application.dataset_builder_service import DatasetBuilder
 from modules.predictions.application.dataset_registry_service import DatasetRegistryService
+from modules.predictions.application.training_preflight_service import TrainingPreflightService
 from modules.predictions.application.experiment_tracking_service import ExperimentTrackingService
 from modules.predictions.application.explainability_engine import ExplainabilityEngine
 from modules.predictions.application.feature_market_mapping_service import FeatureMarketMappingService
@@ -158,14 +163,22 @@ from modules.predictions.application.challenger_evaluation_service import Challe
 from modules.predictions.application.error_memory_service import ErrorMemoryService
 from modules.predictions.application.scheduled_retraining_orchestrator import ScheduledRetrainingOrchestrator
 from modules.predictions.application.training_pipeline_service import RetrainingScheduler, TrainingPipelineService
+from modules.predictions.application.historical_feature_reconstruction_service import (
+    HistoricalFeatureReconstructionService,
+)
+from modules.predictions.application.news_market_impact_engine import NewsMarketImpactEngine
 from modules.predictions.application.windowed_feature_engineering_service import (
     FixtureExpectedGoalsCalculator,
     FixtureFormDifferentialCalculator,
+    LineupContinuityCalculator,
+    TransferActivityCalculator,
     baseball_form_calculator,
     basketball_form_calculator,
     football_fixture_expected_goals_calculator,
     football_fixture_stat_differential_calculators,
     football_form_calculator,
+    football_lineup_continuity_calculators,
+    football_transfer_activity_calculators,
     table_tennis_form_calculator,
 )
 from modules.predictions.baseball.market_seeding import BaseballMarketSeeder
@@ -185,11 +198,11 @@ from modules.predictions.infrastructure.ml.shap_explainer_service import SHAPExp
 from modules.predictions.infrastructure.monitoring.in_memory_latency_repository import (
     InMemoryLatencySampleRepository,
 )
-from modules.predictions.infrastructure.persistence.in_memory_dataset_repository import InMemoryDatasetRepository
 from modules.predictions.infrastructure.persistence.in_memory_model_comparison_repository import (
     InMemoryModelComparisonRepository,
 )
 from modules.predictions.infrastructure.persistence.repositories import (
+    SqlAlchemyDatasetRepository,
     SqlAlchemyExperimentRepository,
     SqlAlchemyFeatureMarketMappingRepository,
     SqlAlchemyMarketRepository,
@@ -436,6 +449,9 @@ def build_entity_reconciliation_service(session: AsyncSession) -> EntityReconcil
         alerts=build_alert_service(session),
         outcome_resolver=build_outcome_resolution_service(session),
         form_differential_calculators={"football": build_football_form_differential_calculators(session)},
+        lineup_continuity_calculators={"football": build_football_lineup_continuity_calculators(session)},
+        transfer_activity_calculators={"football": build_football_transfer_activity_calculators(session)},
+        news_market_impact_engines={"football": build_football_news_market_impact_engine(session)},
     )
 
 
@@ -710,6 +726,62 @@ def build_intelligence_enrichment_orchestrator(session: AsyncSession) -> Intelli
         source_reliability=build_source_reliability_service(session),
         feature_store=build_feature_store_enrichment_service(session),
         sources=SqlAlchemyNewsSourceRepository(session=session),
+        events=SqlAlchemyNewsEventRepository(session=session),
+    )
+
+
+def build_scheduled_news_sync_service(session: AsyncSession) -> ScheduledNewsSyncService:
+    """Milestone 10 — composes the real ingestion + enrichment pipeline behind the one Celery
+    task allowed to ever produce SyncTrigger.LIVE_SCHEDULED news provenance."""
+    return ScheduledNewsSyncService(
+        news_ingestion=build_news_ingestion_service(session),
+        enrichment=build_intelligence_enrichment_orchestrator(session),
+        fixtures=SqlAlchemyFixtureRepository(session=session),
+        teams=SqlAlchemyTeamRepository(session=session),
+        players=SqlAlchemyPlayerRepository(session=session),
+        kg_nodes=SqlAlchemyKGNodeRepository(session=session),
+    )
+
+
+def build_historical_entity_resolution_service(session: AsyncSession) -> HistoricalEntityResolutionService:
+    """Milestone 13 — point-in-time player->team membership, reconstructed exclusively from
+    `Transfer.effective_date` chains. Never wired to `Player.team_id` or Knowledge Graph
+    `PLAYS_FOR` edges — the M13 audit confirmed neither is a reliable historical source."""
+    return HistoricalEntityResolutionService(transfers=SqlAlchemyTransferRepository(session=session))
+
+
+def _market_rule_exists(event_type, market_key: str) -> bool:
+    """Milestone 13 — the real `market_rule_exists` implementation, composed here (not inside
+    `modules.intelligence`) so that module keeps its existing one-directional boundary: it has
+    never imported `modules.predictions`, and this milestone does not change that. Queries
+    Milestone 9's `MARKET_IMPACT_RULES` read-only — never redesigns the market-impact system."""
+    from modules.predictions.application.news_market_impact_registry import MARKET_IMPACT_RULES
+
+    return any(rule.event_type is event_type and rule.market_key == market_key for rule in MARKET_IMPACT_RULES)
+
+
+def build_historical_news_relevance_engine(session: AsyncSession) -> HistoricalNewsRelevanceEngine:
+    """Milestone 13 — Mode 2 (historical reconstruction) relevance, a sibling to
+    `build_scheduled_news_sync_service`'s Mode 1 vocabulary, never a replacement for it."""
+    return HistoricalNewsRelevanceEngine(
+        kg_nodes=SqlAlchemyKGNodeRepository(session=session),
+        entity_resolution=build_historical_entity_resolution_service(session),
+        market_rule_exists=_market_rule_exists,
+    )
+
+
+def build_news_backfill_service(session: AsyncSession) -> NewsBackfillService:
+    """Milestone 12 — composes the same real ingestion + enrichment pipeline behind the
+    administrator-only, dry-run-by-default BACKFILL entry point. Reuses NewsIngestionService/
+    IntelligenceEnrichmentOrchestrator exactly as built above; SyncTrigger.BACKFILL is the only
+    difference, and it is never eligible to produce VERIFIED_PRE_MATCH provenance."""
+    return NewsBackfillService(
+        news_ingestion=build_news_ingestion_service(session),
+        enrichment=build_intelligence_enrichment_orchestrator(session),
+        fixtures=SqlAlchemyFixtureRepository(session=session),
+        teams=SqlAlchemyTeamRepository(session=session),
+        players=SqlAlchemyPlayerRepository(session=session),
+        kg_nodes=SqlAlchemyKGNodeRepository(session=session),
     )
 
 
@@ -861,20 +933,23 @@ def build_prediction_audit_repository(session: AsyncSession) -> SqlAlchemyPredic
 # --- Milestone 9.1 Enterprise ML Platform composition ---------------------------------------
 
 
-@lru_cache
-def get_dataset_repo() -> DatasetRepositoryPort:
-    """Process-wide in-memory singleton (docs/decisions.md ADR-008 mock-first/adapter-swap
-    posture) — a SQL-backed `DatasetRepositoryPort` implementation (migration 0023's `datasets`
-    table already exists for it) is future work, added when a real production need for
-    persistence-across-restarts shows up, same posture as `PlattScalingCalibrator`."""
-    return InMemoryDatasetRepository()
+def build_dataset_repo(session: AsyncSession) -> DatasetRepositoryPort:
+    """Milestone 20: durable, SQL-backed (`SqlAlchemyDatasetRepository` against the `datasets`
+    table, which has existed unused since Milestone 4/9) — closes the `dataset_provenance_persisted`
+    gap `TrainingPreflightService` (Milestone 19) identified. Session-scoped like every other
+    `Sql*Repository` factory in this module, not a process-wide singleton — the previous
+    `InMemoryDatasetRepository()` posture (docs/decisions.md ADR-008) is retired for production
+    wiring; `InMemoryDatasetRepository` itself is untouched and still available for tests."""
+    return SqlAlchemyDatasetRepository(session=session)
 
 
 @lru_cache
 def get_model_comparison_repo() -> ModelComparisonRepositoryPort:
-    """Same in-memory posture as `get_dataset_repo()` — a Continuous Outcome Learning Engine
-    Challenger-vs-Champion verdict is reviewable for the life of this process (Ops Center, `/api/v1/admin/ml/*`);
-    a SQL-backed implementation is the same documented future work as `datasets`."""
+    """Process-wide in-memory singleton (docs/decisions.md ADR-008 mock-first/adapter-swap
+    posture) — a Continuous Outcome Learning Engine Challenger-vs-Champion verdict is reviewable
+    for the life of this process (Ops Center, `/api/v1/admin/ml/*`); a SQL-backed implementation
+    is future work, same posture `build_dataset_repo()` had before Milestone 20 closed it for
+    datasets specifically."""
     return InMemoryModelComparisonRepository()
 
 
@@ -904,7 +979,7 @@ def get_temperature_calibrator() -> TemperatureScalingCalibrator:
 
 
 def build_dataset_registry_service(session: AsyncSession) -> DatasetRegistryService:
-    return DatasetRegistryService(datasets=get_dataset_repo())
+    return DatasetRegistryService(datasets=build_dataset_repo(session))
 
 
 def build_dataset_builder(session: AsyncSession) -> DatasetBuilder:
@@ -912,6 +987,16 @@ def build_dataset_builder(session: AsyncSession) -> DatasetBuilder:
         markets=SqlAlchemyMarketRepository(session=session),
         predictions=SqlAlchemyPredictionRepository(session=session),
         outcomes=SqlAlchemyPredictionOutcomeRepository(session=session),
+    )
+
+
+def build_training_preflight_service(session: AsyncSession) -> TrainingPreflightService:
+    return TrainingPreflightService(
+        markets=SqlAlchemyMarketRepository(session=session),
+        mappings=SqlAlchemyFeatureMarketMappingRepository(session=session),
+        feature_definitions=SqlAlchemyFeatureDefinitionRepository(session=session),
+        dataset_builder=build_dataset_builder(session),
+        dataset_repo=build_dataset_repo(session),
     )
 
 
@@ -933,6 +1018,7 @@ def build_automatic_model_selection_service(session: AsyncSession) -> AutomaticM
         model_registry=build_model_registry_service(session),
         experiments=build_experiment_tracking_service(session),
         artifact_store=get_model_artifact_store(),
+        feature_definitions=SqlAlchemyFeatureDefinitionRepository(session=session),
     )
 
 
@@ -1009,6 +1095,49 @@ def build_football_form_differential_calculators(session: AsyncSession) -> tuple
     )
 
 
+def build_football_lineup_continuity_calculators(session: AsyncSession) -> tuple[LineupContinuityCalculator, LineupContinuityCalculator]:
+    return football_lineup_continuity_calculators(
+        build_feature_registration_service(session),
+        build_feature_store_service(session),
+        SqlAlchemyLineupRepository(session=session),
+    )
+
+
+def build_football_transfer_activity_calculators(session: AsyncSession) -> tuple[TransferActivityCalculator, TransferActivityCalculator]:
+    return football_transfer_activity_calculators(
+        build_feature_registration_service(session),
+        build_feature_store_service(session),
+        SqlAlchemyTransferRepository(session=session),
+    )
+
+
+def build_football_news_market_impact_engine(session: AsyncSession) -> NewsMarketImpactEngine:
+    return NewsMarketImpactEngine(
+        registration=build_feature_registration_service(session),
+        store=build_feature_store_service(session),
+        events=SqlAlchemyNewsEventRepository(session=session),
+        kg_nodes=SqlAlchemyKGNodeRepository(session=session),
+        players=SqlAlchemyPlayerRepository(session=session),
+        # Milestone 14 — wired unconditionally (harmless when unused: only consulted if a caller
+        # passes `historical_reference_time`) so historical reconstruction is available wherever
+        # this engine already is, with no separate composition path to keep in sync.
+        transfers=SqlAlchemyTransferRepository(session=session),
+        historical_entity_resolution=build_historical_entity_resolution_service(session),
+        sport_code="football",
+    )
+
+
+def build_historical_feature_reconstruction_service(session: AsyncSession) -> HistoricalFeatureReconstructionService:
+    """Milestone 14 — not wired into any live endpoint or Celery task; see
+    docs/milestone14_verification_report.md's Known Limitations / Deferred Work. Milestone 15 wired
+    it into scripts/backfill_both_teams_to_score_training_data.py (a one-off training script, not a
+    live path)."""
+    return HistoricalFeatureReconstructionService(
+        news_market_impact=build_football_news_market_impact_engine(session),
+        relevance_engine=build_historical_news_relevance_engine(session),
+    )
+
+
 def build_football_odds_feature_writer(session: AsyncSession) -> FootballOddsFeatureWriter:
     return football_odds_feature_writer(build_feature_store_service(session))
 
@@ -1032,6 +1161,9 @@ def build_football_market_seeder(session: AsyncSession) -> FootballMarketSeeder:
         ),
         differential_calculators=build_football_form_differential_calculators(session),
         expected_goals_calculator=build_football_expected_goals_calculator(session),
+        lineup_continuity_calculators=build_football_lineup_continuity_calculators(session),
+        transfer_activity_calculators=build_football_transfer_activity_calculators(session),
+        news_market_impact_engine=build_football_news_market_impact_engine(session),
     )
 
 

@@ -39,6 +39,12 @@ class FeatureDefinitionModel(Base):
     status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
     dependencies: Mapped[list] = mapped_column(JSON, default=list)
     leakage_reviewed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Milestone 4 provenance foundation (docs/milestone4_verification_report.md) — complements,
+    # does not replace, `leakage_reviewed` above: "PRE_MATCH_SAFE" | "POST_MATCH_ONLY" |
+    # "POINT_IN_TIME_REQUIRED" | "UNKNOWN_PROVENANCE". A feature classified POST_MATCH_ONLY must
+    # never be mapped into a market's live prediction/training feature set — enforced by
+    # `FeatureMarketMappingService.map_feature()` (see that method's own docstring).
+    leakage_classification: Mapped[str] = mapped_column(String(32), default="UNKNOWN_PROVENANCE")
     reviewed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)

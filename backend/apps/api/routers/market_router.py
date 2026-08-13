@@ -22,7 +22,12 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.auth_deps import get_current_user, require_role
-from apps.api.composition import build_feature_market_mapping_service, build_market_registry_service, get_session
+from apps.api.composition import (
+    build_feature_market_mapping_service,
+    build_market_registry_service,
+    build_model_registry_service,
+    get_session,
+)
 from modules.identity.domain.entities import User
 from modules.identity.domain.value_objects import Role
 from modules.predictions.application.feature_market_mapping_service import (
@@ -36,7 +41,7 @@ from modules.predictions.application.market_registry_service import (
     MarketNotFoundError,
     MarketNotReadyForProductionError,
 )
-from modules.predictions.domain.entities import FeatureMarketMapping, MarketDefinition
+from modules.predictions.domain.entities import FeatureMarketMapping, MarketDefinition, ModelDefinition
 from modules.predictions.domain.value_objects import MarketKind, MarketStatus, TargetType
 
 router = APIRouter(prefix="/api/v1/markets", tags=["markets"])
@@ -73,7 +78,20 @@ def _parse_status(value: str | None) -> MarketStatus | None:
         raise HTTPException(status_code=422, detail=f"Unrecognized status '{value}'") from None
 
 
-def _serialize_market(market: MarketDefinition) -> dict:
+def _training_status(champion: ModelDefinition | None) -> str:
+    """Milestone 4 status honesty (Rule 13): `market.status == PRODUCTION` alone doesn't say
+    whether the market's Champion was ever genuinely trained — a market can reach PRODUCTION with
+    a placeholder Champion registered only to unblock `PredictionContextBuilder` (see
+    `ModelDefinition.is_genuinely_trained`'s docstring). Distinct from `market.status`
+    (the market lifecycle stage) and from `ModelDefinition.provenance_status` (whether a *trained*
+    model's training data lineage is independently verifiable) — this answers a third, narrower
+    question: was a real model ever fit for this market at all."""
+    if champion is None:
+        return "NO_CHAMPION"
+    return "TRAINED" if champion.is_genuinely_trained() else "HEURISTIC_PLACEHOLDER"
+
+
+def _serialize_market(market: MarketDefinition, champion: ModelDefinition | None = None) -> dict:
     return {
         "id": str(market.id),
         "market_key": market.market_key,
@@ -88,6 +106,7 @@ def _serialize_market(market: MarketDefinition) -> dict:
         "explainability_required": market.explainability_required,
         "confidence_threshold": market.confidence_threshold,
         "status": market.status.value,
+        "training_status": _training_status(champion),
         "owner": market.owner,
         "version": market.version,
         "created_at": market.created_at.isoformat() if market.created_at else None,
@@ -184,7 +203,12 @@ async def list_markets(
         results = await service.markets.list_by_sport(sport_code)
     else:
         results = await service.markets.list_all()
-    return envelope(data=[_serialize_market(m) for m in results], meta={"count": len(results)})
+    models = build_model_registry_service(session)
+    champions = [await models.models.get_champion(m.id) for m in results]
+    return envelope(
+        data=[_serialize_market(m, champion) for m, champion in zip(results, champions)],
+        meta={"count": len(results)},
+    )
 
 
 @router.get("/{market_key}")
@@ -195,7 +219,9 @@ async def get_market(
     market = await service.markets.get_by_key(market_key)
     if market is None:
         raise HTTPException(status_code=404, detail="market not found")
-    return envelope(data=_serialize_market(market))
+    models = build_model_registry_service(session)
+    champion = await models.models.get_champion(market.id)
+    return envelope(data=_serialize_market(market, champion))
 
 
 def _handle_market_lifecycle_errors(exc: Exception):

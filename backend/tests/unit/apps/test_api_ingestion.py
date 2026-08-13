@@ -420,3 +420,38 @@ def test_kg_node_read_returns_edges_after_sync(client, db_session_factory):
     data = response.json()["data"]
     assert data["node_type"] == "team"
     assert any(edge["edge_type"] == "belongs_to" for edge in data["edges_out"])
+
+
+def test_admin_injuries_sync_cannot_spoof_trigger_via_request_body(client, db_session_factory):
+    """Milestone 5 §13/scenario L: a client cannot claim `trigger=SCHEDULED`/
+    `availability_status=VERIFIED_PRE_MATCH` for itself — `TriggerSyncBody` has no such field, and
+    the endpoint hardcodes `trigger=SyncTrigger.ADMIN_MANUAL` server-side regardless of request
+    content. Asserted against the real persisted `SyncRun.trigger`, not just the HTTP response,
+    proving the spoofing attempt never reaches storage."""
+    asyncio.run(_seed_reconciled_sport(db_session_factory))
+    client.post("/api/v1/admin/sync/football/teams/39", json={"force": False})
+    team_id = asyncio.run(_first_reconciled_team_id(db_session_factory))
+
+    response = client.post(
+        f"/api/v1/admin/sync/football/injuries/{team_id}",
+        json={
+            "force": True,
+            "trigger": "live_scheduled",
+            "availability_status": "VERIFIED_PRE_MATCH",
+            "information_available_at": "2020-01-01T00:00:00Z",
+        },
+    )
+
+    assert response.status_code == 200  # unknown fields are silently ignored, not rejected or honored
+    run = response.json()["data"]
+    assert run is not None
+
+    async def _stored_trigger() -> str:
+        from modules.ingestion.infrastructure.persistence.repositories import SqlAlchemySyncRunRepository
+
+        async with db_session_factory() as session:
+            runs = await SqlAlchemySyncRunRepository(session=session).list_recent(sport_code="football", limit=10)
+            injury_runs = [r for r in runs if r.entity_kind.value == "injury"]
+            return injury_runs[0].trigger.value
+
+    assert asyncio.run(_stored_trigger()) == "admin_manual"

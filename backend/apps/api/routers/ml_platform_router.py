@@ -264,6 +264,9 @@ async def list_models(
                 "framework": m.framework,
                 "status": m.status.value,
                 "deployment_mode": m.deployment_mode,
+                # Milestone 4 status honesty (Rule 13): a CHAMPION-status row is not necessarily a
+                # genuinely trained model — see ModelDefinition.is_genuinely_trained's docstring.
+                "is_genuinely_trained": m.is_genuinely_trained(),
             }
             for m in models
         ],

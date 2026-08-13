@@ -38,6 +38,16 @@ class FeatureValueRepositoryPort(Protocol):
     async def get_latest(
         self, feature_key: FeatureKey, entity_type: EntityType, entity_id: str
     ) -> FeatureValue | None: ...
+    async def get_as_of(
+        self, feature_key: FeatureKey, entity_type: EntityType, entity_id: str, as_of: datetime
+    ) -> FeatureValue | None:
+        """Milestone 4 point-in-time retrieval — the value as it was known at or before `as_of`,
+        never a value recorded after it. `get_latest()` above answers "what do we know right
+        now"; this answers "what did we know at time T", the distinction Rule 5/§1.1 of
+        docs/milestone2_market_feature_news_mapping.md identifies as previously non-existent
+        anywhere in this codebase. Historical feature reconstruction must call this, never
+        `get_latest()`, once a caller needs point-in-time correctness."""
+        ...
     async def list_history(
         self, feature_key: FeatureKey, entity_type: EntityType, entity_id: str, limit: int = 100
     ) -> list[FeatureValue]: ...

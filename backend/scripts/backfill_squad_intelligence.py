@@ -22,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from apps.api.composition import build_sync_orchestrator, get_engine
+from modules.ingestion.domain.value_objects import SyncTrigger
 from modules.sports.domain.value_objects import SportCode
 from modules.sports.infrastructure.persistence.models import FixtureModel, PlayerModel
 from modules.sports.infrastructure.persistence.repositories import SqlAlchemySportRepository, SqlAlchemyTeamRepository
@@ -61,8 +62,11 @@ async def main() -> None:
         print(f"Seeding squad intelligence for {len(candidates)} team(s): {', '.join(t.name for t in candidates)}")
 
         for label, coro, kwargs in (
-            ("injuries", orchestrator.sync_injuries, {"season_label": SEASON_LABEL}),
-            ("transfers", orchestrator.sync_transfers, {}),
+            # Milestone 5: explicit BACKFILL trigger — this script fetches "current" data long
+            # after the fact of any real prediction, so it must never be mistaken for a genuine
+            # LIVE_SCHEDULED sync (the only trigger classify_availability ever trusts).
+            ("injuries", orchestrator.sync_injuries, {"season_label": SEASON_LABEL, "trigger": SyncTrigger.BACKFILL}),
+            ("transfers", orchestrator.sync_transfers, {"trigger": SyncTrigger.BACKFILL}),
             ("coaching staff", orchestrator.sync_coaching_staff, {}),
         ):
             print(f"-- {label} --")
@@ -104,7 +108,9 @@ async def main() -> None:
 
                 fixture_ref = ProviderRef(provider="api_football", external_id=str(fixture_ref_dict))
                 print(f"-- lineups (fixture {fixture_row.id}) --")
-                run = await orchestrator.sync_lineups("football", fixture_ref, str(fixture_row.id), now, force=True)
+                run = await orchestrator.sync_lineups(
+                    "football", fixture_ref, str(fixture_row.id), now, force=True, trigger=SyncTrigger.BACKFILL
+                )
                 await session.commit()
                 if run is None:
                     print("  sync skipped (locked or throttled)")

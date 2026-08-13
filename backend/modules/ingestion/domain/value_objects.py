@@ -42,10 +42,29 @@ class SyncStatus(str, Enum):
 
 
 class SyncTrigger(str, Enum):
+    """Milestone 5 (Verified Pre-Match Data Availability) extended this enum — previously
+    ``SCHEDULED`` was the default `trigger=` value on every `SyncOrchestrator` method regardless
+    of what actually invoked it (an admin's one-off button click, a backfill script, or a real
+    Celery Beat firing all looked identical in `SyncRun.trigger`), which made it impossible to
+    tell, after the fact, whether a sync's timing genuinely reflects real-world data availability.
+    That ambiguity is exactly what blocked `information_available_at`/`availability_classification`
+    from ever being trustworthy (see `docs/milestone5_verification_report.md`).
+
+    Only ``LIVE_SCHEDULED`` — a real, periodic Celery Beat firing, distinct from ``SCHEDULED``'s
+    prior overloaded meaning — is ever eligible to produce `VERIFIED_PRE_MATCH` provenance. Every
+    other value (including the new ``ADMIN_MANUAL``/``BACKFILL``/``RECONCILIATION``/``SYSTEM``)
+    must not, by construction — enforced in `modules.ingestion.application.provenance` and never
+    trusted merely because a caller claims one of these values."""
+
     SCHEDULED = "scheduled"
     MANUAL = "manual"
     RETRY = "retry"
     LIVE = "live"  # triggered by live-match adaptive polling, not the regular schedule
+    LIVE_SCHEDULED = "live_scheduled"  # a real, periodic Celery Beat firing — see class docstring
+    ADMIN_MANUAL = "admin_manual"  # an operator's one-off button click via the admin API
+    BACKFILL = "backfill"  # a one-off dev/ops script backfilling historical data long after the fact
+    RECONCILIATION = "reconciliation"  # an ad-hoc data-repair/reconciliation pass, not a data-freshness sync
+    SYSTEM = "system"  # an internal system process other than the above (e.g. a downstream trigger)
 
 
 class TimelineEventType(str, Enum):

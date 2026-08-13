@@ -545,3 +545,50 @@ def test_generate_prediction_no_champion_model_returns_409(client, db_session_fa
     )
 
     assert response.status_code == 409
+
+
+def test_generate_prediction_missing_required_feature_returns_409_not_500(client, db_session_factory):
+    """Milestone 16 — a required feature with no verified pre-match value (the real, currently-live
+    state of football.both_teams_to_score's two news + four structured-intelligence required
+    features, per docs/milestone16_preimplementation_audit.md §16) must resolve to the same honest
+    'insufficient data' response every other unservable-prediction case already gets, not an
+    unhandled 500. The check itself is not weakened — the mapping stays is_required=True and the
+    request still cannot produce a prediction; only the response shape changes."""
+    import asyncio
+
+    from modules.predictions.domain.entities import FeatureMarketMapping
+    from modules.predictions.domain.value_objects import FeatureMarketMappingId
+    from modules.predictions.infrastructure.persistence.repositories import SqlAlchemyFeatureMarketMappingRepository
+
+    market_key = "football.api_missing_required_feature_market"
+
+    async def _add_unsatisfiable_required_mapping(market_id):
+        async with db_session_factory() as session:
+            mappings = SqlAlchemyFeatureMarketMappingRepository(session=session)
+            await mappings.upsert(
+                FeatureMarketMapping(
+                    id=FeatureMarketMappingId(uuid4()), market_id=market_id,
+                    feature_key="news.football.home_btts_impact", is_required=True,
+                )
+            )
+            await session.commit()
+
+    market_id, _model_id = asyncio.run(
+        _seed_production_market(db_session_factory, market_key, "football.market.overround")
+    )
+    asyncio.run(_add_unsatisfiable_required_mapping(market_id))
+    headers = _auth_headers(client)
+
+    response = client.post(
+        "/api/v1/predictions/generate",
+        json={
+            "market_key": market_key,
+            "entity_type": "fixture",
+            "entity_id": "fixture-1",
+            "subject_ref": "fixture-1",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 409
+    assert "news.football.home_btts_impact" in response.json()["detail"]

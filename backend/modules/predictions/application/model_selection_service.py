@@ -20,6 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from modules.features.domain.value_objects import FeatureKey
+from modules.features.ports.repositories import FeatureDefinitionRepositoryPort
 from modules.predictions.application.experiment_tracking_service import ExperimentTrackingService
 from modules.predictions.application.model_registry_service import ModelRegistryService
 from modules.predictions.application.training_pipeline_service import TrainingPipelineService
@@ -107,13 +109,21 @@ class AutomaticModelSelectionService:
     model_registry: ModelRegistryService
     experiments: ExperimentTrackingService
     artifact_store: ModelArtifactStorePort
+    # Milestone 4 provenance foundation — resolves `dataset.lineage.feature_keys` to their real
+    # current `FeatureDefinition.version` at registration time, closing the bug where
+    # `ModelDefinition.feature_versions` was silently dropped (see `select_and_register_challenger`).
+    feature_definitions: FeatureDefinitionRepositoryPort | None = None
 
     async def select(
         self,
         dataset: Dataset,
         target_type: TargetType,
         candidates: tuple[CandidateSpec, ...] | None = None,
-        split_strategy: SplitStrategy = SplitStrategy.TRAIN_TEST,
+        # Milestone 4 Rule 14: TRAIN_TEST (random shuffle) is non-compliant as the production
+        # default for time-dependent sports data — TIME_SERIES_SPLIT respects sample order
+        # instead. Explicitly passing `split_strategy=SplitStrategy.TRAIN_TEST` remains possible
+        # for any caller (e.g. an existing test) that has a specific reason to.
+        split_strategy: SplitStrategy = SplitStrategy.TIME_SERIES_SPLIT,
         **split_kwargs,
     ) -> ModelSelectionResult:
         roster = candidates or (
@@ -164,7 +174,11 @@ class AutomaticModelSelectionService:
         next_version: int,
         now: datetime,
         candidates: tuple[CandidateSpec, ...] | None = None,
-        split_strategy: SplitStrategy = SplitStrategy.TRAIN_TEST,
+        # Milestone 4 Rule 14: TRAIN_TEST (random shuffle) is non-compliant as the production
+        # default for time-dependent sports data — TIME_SERIES_SPLIT respects sample order
+        # instead. Explicitly passing `split_strategy=SplitStrategy.TRAIN_TEST` remains possible
+        # for any caller (e.g. an existing test) that has a specific reason to.
+        split_strategy: SplitStrategy = SplitStrategy.TIME_SERIES_SPLIT,
         **split_kwargs,
     ) -> tuple[ModelDefinition, ModelSelectionResult]:
         """Runs `select()`, registers the winner as CANDIDATE, immediately promotes it to
@@ -184,6 +198,8 @@ class AutomaticModelSelectionService:
             f"{model_key}/v{next_version}.bin", selection.winning_model.serialize()
         )
 
+        feature_versions = await self._resolve_feature_versions(dataset.lineage.feature_keys)
+
         model_def = await self.model_registry.register(
             market_id=market_id,
             model_key=model_key,
@@ -191,6 +207,7 @@ class AutomaticModelSelectionService:
             algorithm=selection.winning_candidate.algorithm.value,
             framework=selection.winning_candidate.framework.value,
             dataset_version=dataset.version,
+            feature_versions=feature_versions,
             trained_at=now,
             now=now,
             artifact_ref=artifact_ref,
@@ -200,3 +217,17 @@ class AutomaticModelSelectionService:
         await self.experiments.record_model_selection(market_id, selection, now)
 
         return challenger, selection
+
+    async def _resolve_feature_versions(self, feature_keys: tuple[str, ...]) -> dict:
+        """Real `feature_key -> FeatureDefinition.version` provenance, not fabricated. Returns
+        `{}` (the previous, silently-wrong behavior's actual output shape) only when this
+        service wasn't wired with a `feature_definitions` port — never guesses a version for a
+        key it can't look up."""
+        if self.feature_definitions is None:
+            return {}
+        versions: dict[str, int] = {}
+        for key in feature_keys:
+            definition = await self.feature_definitions.get(FeatureKey(key))
+            if definition is not None:
+                versions[key] = definition.version
+        return versions

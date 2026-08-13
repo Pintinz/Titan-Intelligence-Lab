@@ -46,6 +46,13 @@ class NewsArticleModel(Base):
     language: Mapped[str] = mapped_column(String(8), default="en")
     version: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    # Milestone 4 item 9 — groundwork only, deliberately unpopulated by this milestone (no
+    # historical join is fabricated). Distinct from `published_at` (when the source claims the
+    # event occurred) and `fetched_at` (when TitanIQ's ingestion ran, confirmed by Milestone 3's
+    # audit to lag `published_at` by anywhere from ~2 hours to 234 days for real articles) — this
+    # is meant to eventually hold the genuine "when this became actionable information" moment
+    # once a real point-in-time-aware ingestion pipeline exists (Milestone 5+).
+    information_available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class NewsEventModel(Base):
@@ -61,6 +68,14 @@ class NewsEventModel(Base):
     detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     affected_entity_refs: Mapped[list] = mapped_column(JSON, default=list)
     kg_edge_ids: Mapped[list] = mapped_column(JSON, default=list)
+    # Milestone 9 — resolved_entities: list[{"ref": str, "node_type": str|None, "status": str}].
+    resolved_entities: Mapped[list] = mapped_column(JSON, default=list)
+    confidence_tier: Mapped[str] = mapped_column(String(16), default="uncertain")
+    information_available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    availability_classification: Mapped[str] = mapped_column(String(32), default="UNKNOWN_AVAILABILITY_TIME")
+    validity_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    validity_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sync_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 class SourceReliabilityScoreModel(Base):

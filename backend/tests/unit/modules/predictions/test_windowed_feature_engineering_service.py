@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -10,17 +10,30 @@ from modules.features.application.feature_lineage_service import FeatureLineageS
 from modules.features.application.feature_registration_service import FeatureRegistrationService
 from modules.features.application.feature_store_service import FeatureStoreService
 from modules.predictions.application.windowed_feature_engineering_service import (
+    TRANSFER_ACTIVITY_WINDOW_DAYS,
     baseball_form_calculator,
     basketball_form_calculator,
     football_fixture_expected_goals_calculator,
     football_fixture_form_differential_calculator,
     football_fixture_stat_differential_calculators,
     football_form_calculator,
+    football_lineup_continuity_calculators,
+    football_transfer_activity_calculators,
     table_tennis_form_calculator,
 )
 from modules.features.domain.value_objects import EntityType, FeatureKey
-from modules.sports.domain.entities import Fixture, TeamStatistics
-from modules.sports.domain.value_objects import EntityId, FixtureId, FixtureStatus, MatchId, SeasonId, TeamId
+from modules.sports.domain.entities import Fixture, Lineup, LineupSlot, TeamStatistics, Transfer
+from modules.sports.domain.value_objects import (
+    EntityId,
+    FixtureId,
+    FixtureStatus,
+    LineupId,
+    LineupRole,
+    MatchId,
+    PlayerId,
+    SeasonId,
+    TeamId,
+)
 
 T0 = datetime(2026, 7, 26, tzinfo=timezone.utc)
 
@@ -135,6 +148,66 @@ def team_statistics_repo():
 @pytest.fixture
 def fixtures_repo():
     return InMemoryFixtureRepository()
+
+
+@dataclass
+class InMemoryLineupRepository:
+    store: list = field(default_factory=list)  # list[tuple[TeamId, Lineup, datetime]]
+
+    def add(self, team_id, lineup, scheduled_at):
+        self.store.append((team_id, lineup, scheduled_at))
+
+    async def list_recent_by_team(self, team_id, before, limit=10):
+        matches = [
+            lineup for tid, lineup, scheduled_at in sorted(self.store, key=lambda row: row[2], reverse=True)
+            if tid == team_id and scheduled_at < before
+        ]
+        return matches[:limit]
+
+
+@pytest.fixture
+def lineups_repo():
+    return InMemoryLineupRepository()
+
+
+def _lineup(team_id, player_ids, availability_classification="VERIFIED_PRE_MATCH", information_available_at=None):
+    return Lineup(
+        id=LineupId(uuid4()),
+        match_id=MatchId(uuid4()),
+        team_id=team_id,
+        slots=tuple(LineupSlot(player_id=PlayerId(pid), role=LineupRole.STARTER) for pid in player_ids),
+        availability_classification=availability_classification,
+        information_available_at=information_available_at,
+    )
+
+
+@dataclass
+class InMemoryTransferRepository:
+    store: list = field(default_factory=list)  # list[Transfer]
+
+    def add(self, transfer):
+        self.store.append(transfer)
+
+    async def list_by_team(self, team_id):
+        return [t for t in self.store if t.from_team_id == team_id or t.to_team_id == team_id]
+
+
+@pytest.fixture
+def transfers_repo():
+    return InMemoryTransferRepository()
+
+
+def _transfer(
+    team_id, effective_date, availability_classification="VERIFIED_PRE_MATCH", is_incoming=True,
+):
+    return Transfer(
+        id=EntityId(uuid4()),
+        player_id=PlayerId(uuid4()),
+        from_team_id=None if is_incoming else team_id,
+        to_team_id=team_id if is_incoming else None,
+        effective_date=effective_date,
+        availability_classification=availability_classification,
+    )
 
 
 @pytest.mark.asyncio
@@ -399,3 +472,299 @@ async def test_expected_goals_calculator_returns_none_tuple_when_neither_side_ha
 
     assert home_value is None
     assert away_value is None
+
+
+@pytest.mark.asyncio
+async def test_lineup_continuity_computes_overlap_ratio_with_previous_starters(registration, store, lineups_repo):
+    home_calc, away_calc = football_lineup_continuity_calculators(registration, store, lineups_repo)
+    team_id = TeamId(uuid4())
+    p1, p2, p3, p4 = uuid4(), uuid4(), uuid4(), uuid4()
+    previous = _lineup(team_id, [p1, p2, p3, p4])
+    lineups_repo.add(team_id, previous, T0.replace(day=20))
+    # 3 of the previous 4 starters start again -> 0.75
+    current = _lineup(team_id, [p1, p2, p3, uuid4()], information_available_at=T0.replace(day=25))
+
+    await home_calc.ensure_registered(T0)
+    value = await home_calc.compute_and_write("fixture-1", team_id, current, T0.replace(day=25))
+
+    assert value.value == pytest.approx(0.75)
+    assert value.entity_type == EntityType.FIXTURE
+    assert value.entity_id == "fixture-1"
+    assert value.feature_key.value == "football.fixture.home_lineup_continuity"
+
+
+@pytest.mark.asyncio
+async def test_lineup_continuity_uses_away_feature_key_for_the_away_calculator(registration, store, lineups_repo):
+    home_calc, away_calc = football_lineup_continuity_calculators(registration, store, lineups_repo)
+    team_id = TeamId(uuid4())
+    p1 = uuid4()
+    lineups_repo.add(team_id, _lineup(team_id, [p1]), T0.replace(day=20))
+    current = _lineup(team_id, [p1], information_available_at=T0.replace(day=25))
+
+    await away_calc.ensure_registered(T0)
+    value = await away_calc.compute_and_write("fixture-1", team_id, current, T0.replace(day=25))
+
+    assert value.value == pytest.approx(1.0)
+    assert value.feature_key.value == "football.fixture.away_lineup_continuity"
+
+
+@pytest.mark.asyncio
+async def test_lineup_continuity_returns_none_when_current_lineup_is_not_verified_pre_match(
+    registration, store, lineups_repo
+):
+    home_calc, _ = football_lineup_continuity_calculators(registration, store, lineups_repo)
+    team_id = TeamId(uuid4())
+    p1 = uuid4()
+    lineups_repo.add(team_id, _lineup(team_id, [p1]), T0.replace(day=20))
+    current = _lineup(team_id, [p1], availability_classification="UNKNOWN_AVAILABILITY_TIME")
+
+    await home_calc.ensure_registered(T0)
+    value = await home_calc.compute_and_write("fixture-1", team_id, current, T0.replace(day=25))
+
+    assert value is None
+
+
+@pytest.mark.asyncio
+async def test_lineup_continuity_returns_none_when_no_previous_lineup_exists(registration, store, lineups_repo):
+    home_calc, _ = football_lineup_continuity_calculators(registration, store, lineups_repo)
+    team_id = TeamId(uuid4())
+    current = _lineup(team_id, [uuid4()], information_available_at=T0.replace(day=25))
+
+    await home_calc.ensure_registered(T0)
+    value = await home_calc.compute_and_write("fixture-1", team_id, current, T0.replace(day=25))
+
+    assert value is None
+
+
+@pytest.mark.asyncio
+async def test_lineup_continuity_returns_none_when_previous_lineup_has_no_starters(
+    registration, store, lineups_repo
+):
+    home_calc, _ = football_lineup_continuity_calculators(registration, store, lineups_repo)
+    team_id = TeamId(uuid4())
+    empty_previous = Lineup(id=LineupId(uuid4()), match_id=MatchId(uuid4()), team_id=team_id, slots=())
+    lineups_repo.add(team_id, empty_previous, T0.replace(day=20))
+    current = _lineup(team_id, [uuid4()], information_available_at=T0.replace(day=25))
+
+    await home_calc.ensure_registered(T0)
+    value = await home_calc.compute_and_write("fixture-1", team_id, current, T0.replace(day=25))
+
+    assert value is None
+
+
+@pytest.mark.asyncio
+async def test_lineup_continuity_only_looks_before_information_available_at_not_now(
+    registration, store, lineups_repo
+):
+    """The comparison baseline must be the team's previous lineup as of when *this* fixture's
+    lineup became genuinely known (`information_available_at`), not as of `now` — otherwise a
+    later-reconciled, later-scheduled lineup for a different fixture could leak into the
+    baseline for an earlier one."""
+    home_calc, _ = football_lineup_continuity_calculators(registration, store, lineups_repo)
+    team_id = TeamId(uuid4())
+    p1, p2 = uuid4(), uuid4()
+    older = _lineup(team_id, [p1, p2])
+    lineups_repo.add(team_id, older, T0.replace(day=15))
+    # a lineup scheduled AFTER this fixture's own information_available_at must not count as "previous"
+    newer = _lineup(team_id, [p1])
+    lineups_repo.add(team_id, newer, T0.replace(month=8, day=30))
+    current = _lineup(team_id, [p1, p2], information_available_at=T0.replace(day=20))
+
+    await home_calc.ensure_registered(T0)
+    value = await home_calc.compute_and_write("fixture-1", team_id, current, T0.replace(month=9, day=10))
+
+    assert value.value == pytest.approx(1.0)  # matched against `older` (2/2), not `newer` (would be 1/1 too, but wrong basis)
+
+
+@pytest.mark.asyncio
+async def test_lineup_continuity_ensure_registered_sets_pre_match_safe_leakage_classification(
+    registration, store, lineups_repo
+):
+    home_calc, away_calc = football_lineup_continuity_calculators(registration, store, lineups_repo)
+
+    await home_calc.ensure_registered(T0)
+    await away_calc.ensure_registered(T0)
+
+    home_definition = await registration.definitions.get(FeatureKey(home_calc.feature_key))
+    away_definition = await registration.definitions.get(FeatureKey(away_calc.feature_key))
+    assert home_definition.leakage_classification == "PRE_MATCH_SAFE"
+    assert away_definition.leakage_classification == "PRE_MATCH_SAFE"
+    assert home_definition.is_consumable()
+    assert home_definition.online_ttl_seconds == 24 * 3600
+
+
+@pytest.mark.asyncio
+async def test_lineup_continuity_ensure_registered_is_idempotent(registration, store, lineups_repo):
+    home_calc, _ = football_lineup_continuity_calculators(registration, store, lineups_repo)
+
+    await home_calc.ensure_registered(T0)
+    await home_calc.ensure_registered(T0)  # must not raise FeatureAlreadyRegisteredError
+
+    definition = await registration.definitions.get(FeatureKey(home_calc.feature_key))
+    assert definition is not None
+    assert definition.is_consumable()
+
+
+@pytest.mark.asyncio
+async def test_transfer_activity_counts_verified_transfers_within_window(registration, store, transfers_repo):
+    home_calc, _ = football_transfer_activity_calculators(registration, store, transfers_repo)
+    team_id = TeamId(uuid4())
+    transfers_repo.add(_transfer(team_id, T0 - timedelta(days=5), is_incoming=True))
+    transfers_repo.add(_transfer(team_id, T0 - timedelta(days=10), is_incoming=False))
+    transfers_repo.add(_transfer(team_id, T0 - timedelta(days=TRANSFER_ACTIVITY_WINDOW_DAYS + 5)))  # too old
+
+    await home_calc.ensure_registered(T0)
+    value = await home_calc.compute_and_write("fixture-1", team_id, T0)
+
+    assert value.value == pytest.approx(2.0)
+    assert value.entity_type == EntityType.FIXTURE
+    assert value.entity_id == "fixture-1"
+    assert value.feature_key.value == "football.fixture.home_transfer_activity"
+
+
+@pytest.mark.asyncio
+async def test_transfer_activity_excludes_unknown_availability_transfers(registration, store, transfers_repo):
+    """Covers both the "manual/backfill sync" and "unknown timestamp" exclusion scenarios — a
+    transfer synced via SyncTrigger.MANUAL/BACKFILL lands as UNKNOWN_AVAILABILITY_TIME at the
+    reconciliation layer (modules.ingestion.application.provenance.classify_availability), and
+    this calculator must never count it regardless of how recent its effective_date is."""
+    home_calc, _ = football_transfer_activity_calculators(registration, store, transfers_repo)
+    team_id = TeamId(uuid4())
+    transfers_repo.add(_transfer(team_id, T0 - timedelta(days=1), availability_classification="VERIFIED_PRE_MATCH"))
+    transfers_repo.add(_transfer(team_id, T0 - timedelta(days=1), availability_classification="UNKNOWN_AVAILABILITY_TIME"))
+
+    await home_calc.ensure_registered(T0)
+    value = await home_calc.compute_and_write("fixture-1", team_id, T0)
+
+    assert value.value == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_transfer_activity_excludes_non_verified_pre_match_classifications(registration, store, transfers_repo):
+    """The count filter is a strict `== VERIFIED_PRE_MATCH`, not merely "not UNKNOWN" — any other
+    classification (EXPIRED/POST_MATCH/INVALID) must also be excluded."""
+    home_calc, _ = football_transfer_activity_calculators(registration, store, transfers_repo)
+    team_id = TeamId(uuid4())
+    transfers_repo.add(_transfer(team_id, T0 - timedelta(days=1), availability_classification="VERIFIED_PRE_MATCH"))
+    for bad_classification in ("POST_MATCH", "EXPIRED", "INVALID"):
+        transfers_repo.add(_transfer(team_id, T0 - timedelta(days=1), availability_classification=bad_classification))
+
+    await home_calc.ensure_registered(T0)
+    value = await home_calc.compute_and_write("fixture-1", team_id, T0)
+
+    assert value.value == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_transfer_activity_returns_none_when_no_verified_transfers_exist_at_all(
+    registration, store, transfers_repo
+):
+    """No verified transfer history at all means unavailable, not a fabricated zero — even when
+    UNKNOWN-classified records exist, since a 0 here would misleadingly read as 'no squad churn'
+    rather than 'no verified visibility.'"""
+    home_calc, _ = football_transfer_activity_calculators(registration, store, transfers_repo)
+    team_id = TeamId(uuid4())
+    transfers_repo.add(_transfer(team_id, T0 - timedelta(days=1), availability_classification="UNKNOWN_AVAILABILITY_TIME"))
+
+    await home_calc.ensure_registered(T0)
+    value = await home_calc.compute_and_write("fixture-1", team_id, T0)
+
+    assert value is None
+
+
+@pytest.mark.asyncio
+async def test_transfer_activity_returns_genuine_zero_when_verified_history_exists_outside_window(
+    registration, store, transfers_repo
+):
+    """A team WITH verified transfer coverage but none inside the recent window gets a real 0.0 —
+    distinct from the "no verified data at all" None case above."""
+    home_calc, _ = football_transfer_activity_calculators(registration, store, transfers_repo)
+    team_id = TeamId(uuid4())
+    transfers_repo.add(_transfer(team_id, T0 - timedelta(days=TRANSFER_ACTIVITY_WINDOW_DAYS + 1)))
+
+    await home_calc.ensure_registered(T0)
+    value = await home_calc.compute_and_write("fixture-1", team_id, T0)
+
+    assert value is not None
+    assert value.value == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_transfer_activity_excludes_future_dated_transfers(registration, store, transfers_repo):
+    """A transfer whose effective_date is at or after `now` (not yet in effect, or a same-instant
+    edge) must not count as already-happened churn — historical leakage prevention."""
+    home_calc, _ = football_transfer_activity_calculators(registration, store, transfers_repo)
+    team_id = TeamId(uuid4())
+    transfers_repo.add(_transfer(team_id, T0 - timedelta(days=1)))  # counts
+    transfers_repo.add(_transfer(team_id, T0))  # exactly now -> excluded
+    transfers_repo.add(_transfer(team_id, T0 + timedelta(days=5)))  # future -> excluded
+
+    await home_calc.ensure_registered(T0)
+    value = await home_calc.compute_and_write("fixture-1", team_id, T0)
+
+    assert value.value == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_transfer_activity_window_boundary_is_inclusive_of_start_exclusive_of_now(
+    registration, store, transfers_repo
+):
+    home_calc, _ = football_transfer_activity_calculators(registration, store, transfers_repo)
+    team_id = TeamId(uuid4())
+    transfers_repo.add(_transfer(team_id, T0 - timedelta(days=TRANSFER_ACTIVITY_WINDOW_DAYS)))  # exactly at window start -> counts
+    transfers_repo.add(_transfer(team_id, T0 - timedelta(days=TRANSFER_ACTIVITY_WINDOW_DAYS, seconds=1)))  # just outside -> excluded
+
+    await home_calc.ensure_registered(T0)
+    value = await home_calc.compute_and_write("fixture-1", team_id, T0)
+
+    assert value.value == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_transfer_activity_home_and_away_use_distinct_feature_keys_and_team_filters(
+    registration, store, transfers_repo
+):
+    home_calc, away_calc = football_transfer_activity_calculators(registration, store, transfers_repo)
+    home_team_id, away_team_id = TeamId(uuid4()), TeamId(uuid4())
+    transfers_repo.add(_transfer(home_team_id, T0 - timedelta(days=1)))
+    transfers_repo.add(_transfer(away_team_id, T0 - timedelta(days=1)))
+    transfers_repo.add(_transfer(away_team_id, T0 - timedelta(days=2)))
+
+    await home_calc.ensure_registered(T0)
+    await away_calc.ensure_registered(T0)
+    home_value = await home_calc.compute_and_write("fixture-1", home_team_id, T0)
+    away_value = await away_calc.compute_and_write("fixture-1", away_team_id, T0)
+
+    assert home_value.value == pytest.approx(1.0)
+    assert home_value.feature_key.value == "football.fixture.home_transfer_activity"
+    assert away_value.value == pytest.approx(2.0)
+    assert away_value.feature_key.value == "football.fixture.away_transfer_activity"
+
+
+@pytest.mark.asyncio
+async def test_transfer_activity_ensure_registered_sets_pre_match_safe_leakage_classification(
+    registration, store, transfers_repo
+):
+    home_calc, away_calc = football_transfer_activity_calculators(registration, store, transfers_repo)
+
+    await home_calc.ensure_registered(T0)
+    await away_calc.ensure_registered(T0)
+
+    home_definition = await registration.definitions.get(FeatureKey(home_calc.feature_key))
+    away_definition = await registration.definitions.get(FeatureKey(away_calc.feature_key))
+    assert home_definition.leakage_classification == "PRE_MATCH_SAFE"
+    assert away_definition.leakage_classification == "PRE_MATCH_SAFE"
+    assert home_definition.is_consumable()
+    assert home_definition.online_ttl_seconds == 24 * 3600
+
+
+@pytest.mark.asyncio
+async def test_transfer_activity_ensure_registered_is_idempotent(registration, store, transfers_repo):
+    home_calc, _ = football_transfer_activity_calculators(registration, store, transfers_repo)
+
+    await home_calc.ensure_registered(T0)
+    await home_calc.ensure_registered(T0)  # must not raise FeatureAlreadyRegisteredError
+
+    definition = await registration.definitions.get(FeatureKey(home_calc.feature_key))
+    assert definition is not None
+    assert definition.is_consumable()

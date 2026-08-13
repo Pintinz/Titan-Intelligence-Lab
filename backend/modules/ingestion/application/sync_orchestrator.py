@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
 from modules.ingestion.application.data_quality_engine import IngestionQualityEngine
@@ -22,6 +22,11 @@ from modules.ingestion.application.data_validation_engine import DataValidationE
 from modules.ingestion.application.entity_reconciliation_service import (
     EntityReconciliationService,
     ReconciliationDependencyError,
+)
+from modules.ingestion.application.provenance import (
+    LINEUP_PREMATCH_WINDOW_MINUTES,
+    STRUCTURED_INTEL_SYNC_WINDOW_HOURS,
+    is_within_prematch_window,
 )
 from modules.ingestion.domain.entities import SyncCheckpoint, SyncRun, TimelineEvent
 from modules.ingestion.domain.value_objects import EntityKind, SyncRunId, SyncStatus, SyncTrigger, TimelineEventId, TimelineEventType
@@ -34,7 +39,7 @@ from modules.ingestion.ports.repositories import (
     TimelineEventRepositoryPort,
 )
 from modules.predictions.football.odds_feature_writer import FootballOddsFeatureWriter
-from modules.sports.domain.value_objects import FixtureId, ProviderRef, SportCode
+from modules.sports.domain.value_objects import FixtureId, FixtureStatus, ProviderRef, SportCode
 from modules.sports.infrastructure.providers.provider_router import SportsProviderRouter
 from modules.sports.ports.repositories import SportRepositoryPort
 
@@ -120,7 +125,15 @@ class SyncOrchestrator:
         force: bool = False,
         lock_ttl_seconds: int = DEFAULT_LOCK_TTL_SECONDS,
         provider_key: str | None = None,
+        run_id: SyncRunId | None = None,
     ) -> SyncRun | None:
+        """Milestone 5: ``run_id``, when passed, lets a caller (e.g. ``sync_lineups``) know the
+        exact ``SyncRunId`` this run will use *before* `_run_sync` itself assigns one — needed so
+        its ``process_one`` closure can stamp each reconciled record with the real
+        ``sync_run_id`` (Milestone 5 §11 traceability), which no caller could otherwise see since
+        ``process_one`` runs inside this method, not the caller's own scope. Every other call site
+        that doesn't need this (everything except lineups/injuries/transfers today) leaves it
+        ``None`` and gets the same auto-generated id as before."""
         checkpoint = await self.checkpoints.get(sport_code, entity_kind, scope_key)
         if not force and trigger != SyncTrigger.LIVE and await self._should_skip(checkpoint, now, min_interval_seconds):
             return None  # nothing to do — incremental skip, no SyncRun/quality-report noise
@@ -131,7 +144,7 @@ class SyncOrchestrator:
 
         try:
             run = SyncRun(
-                id=SyncRunId(uuid4()), sport_code=sport_code, entity_kind=entity_kind, scope_key=scope_key,
+                id=run_id or SyncRunId(uuid4()), sport_code=sport_code, entity_kind=entity_kind, scope_key=scope_key,
                 trigger=trigger, status=SyncStatus.RUNNING, started_at=now,
             )
             await self.sync_runs.record(run)
@@ -541,14 +554,24 @@ class SyncOrchestrator:
 
     async def sync_lineups(
         self, sport_code: str, fixture_ref: ProviderRef, fixture_id: str, now: datetime, *,
-        trigger=SyncTrigger.SCHEDULED, low_priority: bool = True, force: bool = False,
+        trigger=SyncTrigger.ADMIN_MANUAL, low_priority: bool = True, force: bool = False,
     ) -> SyncRun | None:
         """Per-fixture, same shape as sync_team_statistics_for_fixture — `fetch_lineups`/
         `validate_lineup`/`reconcile_lineup` were already real and fully built (docs/roadmap.md
         Milestone 5) but had no orchestration calling them, so the lineups table stayed empty.
         `reconcile_lineup` needs a `MatchId`, resolved the same way sync_team_statistics_for_fixture
         does. Records with unresolved player slots are still saved (reconcile_lineup skips just
-        those slots), never rejected wholesale for one missing player."""
+        those slots), never rejected wholesale for one missing player.
+
+        Milestone 5 (Verified Pre-Match Data Availability): the `trigger` default flipped from
+        `SCHEDULED` to `ADMIN_MANUAL` — `SCHEDULED` was never accurate here (no Beat schedule
+        called this method until this milestone added one, via `sync_upcoming_lineups` below,
+        which explicitly passes `LIVE_SCHEDULED`), so every prior caller (admin endpoint,
+        backfill script) was silently mislabeled. Also resolves the fixture's own
+        `scheduled_at`/`status` to feed `reconcile_lineup`'s kickoff-proximity gate — `sync_lineups`
+        previously never looked at the fixture at all beyond its provider ref."""
+        run_id = SyncRunId(uuid4())
+
         async def fetch():
             return await self.router.fetch_lineups(sport_code, fixture_ref, now, low_priority=low_priority)
 
@@ -556,26 +579,38 @@ class SyncOrchestrator:
             result = self.validator.validate_lineup(record)
             if not result.is_valid:
                 return RecordOutcome(rejected=True, issue_category="invalid")
+            fixture = await self.reconciler.fixtures.get(FixtureId(UUID(fixture_id)))
             match = await self.reconciler.get_or_create_match(FixtureId(UUID(fixture_id)), now)
             try:
-                _, created, _unresolved = await self.reconciler.reconcile_lineup(record, match.id, now)
+                _, created, _unresolved = await self.reconciler.reconcile_lineup(
+                    record, match.id, now, trigger=trigger, sync_run_id=str(run_id.value),
+                    kickoff=_ensure_aware(fixture.scheduled_at, now) if fixture else None,
+                    fixture_status=fixture.status if fixture else None,
+                    fixture_id=fixture_id, home_team_id=fixture.home_team_id if fixture else None,
+                    sport_code=sport_code,
+                )
             except ReconciliationDependencyError:
                 return RecordOutcome(rejected=True, issue_category="relationship")
             return RecordOutcome(created=created, updated=not created)
 
         return await self._run_sync(
             sport_code, EntityKind.LINEUP, fixture_ref.external_id, trigger, now,
-            fetch=fetch, process_one=process_one, force=force,
+            fetch=fetch, process_one=process_one, force=force, run_id=run_id,
         )
 
     async def sync_injuries(
         self, sport_code: str, team_ref: ProviderRef, now: datetime, *,
-        trigger=SyncTrigger.SCHEDULED, low_priority: bool = True, force: bool = False,
+        trigger=SyncTrigger.ADMIN_MANUAL, low_priority: bool = True, force: bool = False,
         season_label: str | None = None,
     ) -> SyncRun | None:
         """Per-team, same shape as sync_players. A team with no reported injuries returns zero
         records — a real `SyncRun` with `records_fetched=0` still gets written (that's the
-        honest, common result), not treated as a failure."""
+        honest, common result), not treated as a failure.
+
+        Milestone 5: `trigger` default flipped `SCHEDULED` -> `ADMIN_MANUAL` — see `sync_lineups`'s
+        docstring for why."""
+        run_id = SyncRunId(uuid4())
+
         async def fetch():
             return await self.router.fetch_injuries(sport_code, team_ref, now, low_priority=low_priority, season_label=season_label)
 
@@ -584,21 +619,26 @@ class SyncOrchestrator:
             if not result.is_valid:
                 return RecordOutcome(rejected=True, issue_category="invalid")
             try:
-                _, created = await self.reconciler.reconcile_injury(record, now)
+                _, created = await self.reconciler.reconcile_injury(record, now, trigger=trigger, sync_run_id=str(run_id.value))
             except ReconciliationDependencyError:
                 return RecordOutcome(rejected=True, issue_category="relationship")
             return RecordOutcome(created=created, updated=not created)
 
         return await self._run_sync(
             sport_code, EntityKind.INJURY, team_ref.external_id, trigger, now,
-            fetch=fetch, process_one=process_one, force=force,
+            fetch=fetch, process_one=process_one, force=force, run_id=run_id,
         )
 
     async def sync_transfers(
         self, sport_code: str, team_ref: ProviderRef, now: datetime, *,
-        trigger=SyncTrigger.SCHEDULED, low_priority: bool = True, force: bool = False,
+        trigger=SyncTrigger.ADMIN_MANUAL, low_priority: bool = True, force: bool = False,
     ) -> SyncRun | None:
-        """Per-team, same shape as sync_players."""
+        """Per-team, same shape as sync_players.
+
+        Milestone 5: `trigger` default flipped `SCHEDULED` -> `ADMIN_MANUAL` — see `sync_lineups`'s
+        docstring for why."""
+        run_id = SyncRunId(uuid4())
+
         async def fetch():
             return await self.router.fetch_transfers(sport_code, team_ref, now, low_priority=low_priority)
 
@@ -607,15 +647,71 @@ class SyncOrchestrator:
             if not result.is_valid:
                 return RecordOutcome(rejected=True, issue_category="invalid")
             try:
-                await self.reconciler.reconcile_transfer(record, now)
+                await self.reconciler.reconcile_transfer(record, now, trigger=trigger, sync_run_id=str(run_id.value))
             except ReconciliationDependencyError:
                 return RecordOutcome(rejected=True, issue_category="relationship")
             return RecordOutcome(created=True)
 
         return await self._run_sync(
             sport_code, EntityKind.TRANSFER, team_ref.external_id, trigger, now,
-            fetch=fetch, process_one=process_one, force=force,
+            fetch=fetch, process_one=process_one, force=force, run_id=run_id,
         )
+
+    async def sync_upcoming_structured_intelligence(
+        self, sport_code: str, season_id, now: datetime, *,
+        trigger=SyncTrigger.LIVE_SCHEDULED,
+        structured_intel_window_hours: int = STRUCTURED_INTEL_SYNC_WINDOW_HOURS,
+        lineup_prematch_window_minutes: int = LINEUP_PREMATCH_WINDOW_MINUTES,
+        force: bool = False,
+    ) -> list[SyncRun]:
+        """Milestone 5 §1 — "the scheduler must identify the relevant upcoming fixtures... and
+        synchronize applicable intelligence before kickoff. Do not blindly synchronize every
+        fixture unnecessarily." This is the entry point Celery Beat calls (via `LIVE_SCHEDULED`,
+        the only trigger `classify_availability` ever honors) — it prioritizes fixtures already
+        `SCHEDULED` and starting within `structured_intel_window_hours`, for the one season it's
+        given (matching every other Beat-driven sync method's existing per-competition/season
+        scoping, e.g. `sync_standings`), not the entire fixture catalog.
+
+        Injuries/transfers are synced once per distinct team across the whole run (a team playing
+        multiple upcoming fixtures in the window is not re-synced per fixture) — lineups are
+        synced per fixture, gated by `sync_lineups`/`reconcile_lineup`'s own kickoff-proximity
+        check, so calling this well before kickoff is safe: `reconcile_lineup` itself declines to
+        mark anything `VERIFIED_PRE_MATCH` outside the window, it just won't have real lineup data
+        yet either (the provider itself typically has none to return that early)."""
+        fixtures = await self.reconciler.fixtures.list_by_season(season_id)
+        window_end = now + timedelta(hours=structured_intel_window_hours)
+        upcoming = [
+            f for f in fixtures
+            if f.status is FixtureStatus.SCHEDULED and now <= _ensure_aware(f.scheduled_at, now) <= window_end
+        ]
+
+        runs: list[SyncRun] = []
+        synced_team_ids: set[str] = set()
+        for fixture in upcoming:
+            for team_id in (fixture.home_team_id, fixture.away_team_id):
+                key = str(team_id.value)
+                if key in synced_team_ids:
+                    continue
+                synced_team_ids.add(key)
+                team = await self.reconciler.teams.get(team_id)
+                if team is None or not team.provider_refs:
+                    continue
+                team_ref = team.provider_refs[0]
+                injury_run = await self.sync_injuries(sport_code, team_ref, now, trigger=trigger, force=force)
+                transfer_run = await self.sync_transfers(sport_code, team_ref, now, trigger=trigger, force=force)
+                runs.extend(r for r in (injury_run, transfer_run) if r is not None)
+
+            if not fixture.provider_refs:
+                continue
+            if not is_within_prematch_window(_ensure_aware(fixture.scheduled_at, now), now, lineup_prematch_window_minutes):
+                continue  # not yet worth fetching — the provider itself won't have lineups this early
+            lineup_run = await self.sync_lineups(
+                sport_code, fixture.provider_refs[0], str(fixture.id.value), now, trigger=trigger, force=force,
+            )
+            if lineup_run is not None:
+                runs.append(lineup_run)
+
+        return runs
 
     async def sync_coaching_staff(
         self, sport_code: str, team_ref: ProviderRef, now: datetime, *,

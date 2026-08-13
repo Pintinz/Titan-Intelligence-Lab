@@ -12,6 +12,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from modules.predictions.domain.dataset import Dataset, DatasetId
 from modules.predictions.domain.entities import (
     Experiment,
     FeatureMarketMapping,
@@ -33,6 +34,7 @@ from modules.predictions.domain.value_objects import (
 )
 from modules.predictions.infrastructure.persistence import mappers
 from modules.predictions.infrastructure.persistence.models import (
+    DatasetModel,
     ExperimentModel,
     FeatureMarketMappingModel,
     MarketDefinitionModel,
@@ -329,3 +331,43 @@ class SqlAlchemyPredictionAuditRepository:
         stmt = stmt.order_by(PredictionAuditModel.occurred_at.desc()).limit(limit)
         result = await self.session.execute(stmt)
         return [mappers.prediction_audit_to_domain(row) for row in result.scalars().all()]
+
+
+@dataclass
+class SqlAlchemyDatasetRepository:
+    """Milestone 20: closes the `dataset_provenance_persisted` gap `TrainingPreflightService`
+    (Milestone 19) surfaced — the `datasets` table has existed since Milestone 4/9
+    (`DatasetModel`); this is the first repository to actually read/write it."""
+
+    session: AsyncSession
+
+    async def get(self, dataset_id: DatasetId) -> Dataset | None:
+        model = await self.session.get(DatasetModel, dataset_id.value)
+        return mappers.dataset_to_domain(model) if model else None
+
+    async def get_latest_version(self, market_id: MarketId) -> Dataset | None:
+        stmt = (
+            select(DatasetModel)
+            .where(DatasetModel.market_id == market_id.value)
+            .order_by(DatasetModel.version.desc())
+            .limit(1)
+        )
+        model = (await self.session.execute(stmt)).scalar_one_or_none()
+        return mappers.dataset_to_domain(model) if model else None
+
+    async def list_by_market(self, market_id: MarketId, limit: int = 50) -> list[Dataset]:
+        stmt = (
+            select(DatasetModel)
+            .where(DatasetModel.market_id == market_id.value)
+            .order_by(DatasetModel.version.desc())
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return [mappers.dataset_to_domain(row) for row in result.scalars().all()]
+
+    async def upsert(self, dataset: Dataset) -> Dataset:
+        existing = await self.session.get(DatasetModel, dataset.id.value)
+        model = mappers.dataset_to_model(dataset, existing)
+        self.session.add(model)
+        await self.session.flush()
+        return mappers.dataset_to_domain(model)

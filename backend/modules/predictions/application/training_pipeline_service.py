@@ -158,13 +158,35 @@ class TrainingPipelineService:
                 samples, feature_order, feature_selection_top_k, method=feature_selection_method
             )
             samples = [
-                TrainingSample(features={key: s.features[key] for key in selected_features if key in s.features}, label=s.label)
+                TrainingSample(
+                    features={key: s.features[key] for key in selected_features if key in s.features},
+                    label=s.label,
+                    reference_time=s.reference_time,  # Milestone 18: must survive for split() below
+                )
                 for s in samples
             ]
 
         split_result = split(samples, split_strategy, **split_kwargs)
-        train_samples = list(split_result.train)
-        test_samples = list(split_result.test) or list(split_result.validation)
+        if split_result.folds:
+            # Milestone 4 fix: ROLLING_WINDOW/WALK_FORWARD/TIME_SERIES_SPLIT report their real
+            # per-round splits only in `.folds` — `.train` on a fold-based `DatasetSplit` is the
+            # *entire* dataset (see `dataset_splitter.py`'s `_rolling_window`/`_walk_forward`/
+            # `_time_series_split`, all `train=tuple(samples)`), meant for a caller that wants to
+            # do a final fit after using folds for evaluation, not as this method's fit set —
+            # fitting on it directly would train on data chronologically after the eval window.
+            # Previously unhandled entirely: `test_samples` fell through to empty (`.test`/
+            # `.validation` are never populated for these three strategies), so every fold-based
+            # split silently produced "no evaluable test metric" for every candidate — caught by
+            # `test_scheduled_retraining_orchestrator.py`/`test_model_selection_service.py`
+            # failing once TIME_SERIES_SPLIT became `AutomaticModelSelectionService`'s default
+            # (Rule 14). Use the last (most recent) fold: train on everything chronologically
+            # before it, evaluate on it — the standard walk-forward "final validation" shape.
+            train_samples, test_fold = split_result.folds[-1]
+            train_samples = list(train_samples)
+            test_samples = list(test_fold)
+        else:
+            train_samples = list(split_result.train)
+            test_samples = list(split_result.test) or list(split_result.validation)
         validation_samples = list(split_result.validation) if use_early_stopping and split_result.validation else None
 
         train_metrics = await model.fit(train_samples, validation_samples=validation_samples)

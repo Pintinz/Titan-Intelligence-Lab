@@ -15,7 +15,7 @@ from modules.ingestion.application.entity_reconciliation_service import (
     ReconciliationDependencyError,
 )
 from modules.ingestion.domain.entities import ProviderRefIndexEntry
-from modules.ingestion.domain.value_objects import EntityKind, TimelineEventType
+from modules.ingestion.domain.value_objects import EntityKind, SyncTrigger, TimelineEventType
 from modules.ingestion.infrastructure.persistence.models import Base as IngestionBase
 from modules.ingestion.infrastructure.persistence.repositories import (
     SqlAlchemyProviderRefIndexRepository,
@@ -202,6 +202,49 @@ def service_with_form_differential(session):
         timeline=SqlAlchemyTimelineEventRepository(session=session),
         form_differential_calculators={"football": (calculator,)},
     ), calculator
+
+
+class _RecordingTransferActivityCalculator:
+    """Stub standing in for `TransferActivityCalculator` — verifies only the *wiring* (called
+    once per side, with the right args), not its own computation, which
+    `test_windowed_feature_engineering_service.py` already covers directly."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def compute_and_write(self, fixture_id, team_id, now):
+        self.calls.append((fixture_id, team_id, now))
+        return None
+
+
+@pytest.fixture
+def service_with_transfer_activity(session):
+    kg = KnowledgeGraphPopulationService(
+        nodes=SqlAlchemyKGNodeRepository(session=session), edges=SqlAlchemyKGEdgeRepository(session=session)
+    )
+    home_calculator = _RecordingTransferActivityCalculator()
+    away_calculator = _RecordingTransferActivityCalculator()
+    return EntityReconciliationService(
+        sports=SqlAlchemySportRepository(session=session),
+        countries=SqlAlchemyCountryRepository(session=session),
+        competitions=SqlAlchemyCompetitionRepository(session=session),
+        seasons=SqlAlchemySeasonRepository(session=session),
+        venues=SqlAlchemyVenueRepository(session=session),
+        teams=SqlAlchemyTeamRepository(session=session),
+        players=SqlAlchemyPlayerRepository(session=session),
+        fixtures=SqlAlchemyFixtureRepository(session=session),
+        matches=SqlAlchemyMatchRepository(session=session),
+        team_statistics=SqlAlchemyTeamStatisticsRepository(session=session),
+        lineups=SqlAlchemyLineupRepository(session=session),
+        standings=SqlAlchemyStandingRepository(session=session),
+        injuries=SqlAlchemyInjuryRepository(session=session),
+        transfers=SqlAlchemyTransferRepository(session=session),
+        coaching_staff=SqlAlchemyCoachingStaffRepository(session=session),
+        ref_index=SqlAlchemyProviderRefIndexRepository(session=session),
+        kg=kg,
+        timeline=SqlAlchemyTimelineEventRepository(session=session),
+        transfer_activity_calculators={"football": (home_calculator, away_calculator)},
+    ), home_calculator, away_calculator
 
 
 @pytest.fixture
@@ -1233,6 +1276,99 @@ async def test_reconcile_fixture_skips_form_differential_for_unregistered_sport(
     assert calculator.calls == []
 
 
+@pytest.mark.asyncio
+async def test_reconcile_fixture_computes_transfer_activity_for_both_sides(
+    service_with_transfer_activity, session,
+):
+    """Milestone 7 — the fixture-association and home/away-correctness scenarios: transfer
+    activity has no fixture of its own to attach to (unlike lineups), so it must be computed from
+    reconcile_fixture directly, once per side, against the correct team_id."""
+    service, home_calculator, away_calculator = service_with_transfer_activity
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    competition, _ = await service.reconcile_competition("39", "mock_football", sport.id, T0)
+    season, _ = await service.reconcile_season("39", "2026", "mock_football", competition.id, T0)
+    home, _ = await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+    away, _ = await service.reconcile_team(_team_record("t2", "Chelsea"), sport.id, T0)
+    await session.commit()
+
+    fixture_record = ProviderFixtureRecord(
+        external_ref=ProviderRef(provider="mock_football", external_id="fx-transfer-activity"),
+        home_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        away_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
+        scheduled_at=T0, competition_ref="39", season_label="2026",
+    )
+    fixture, _ = await service.reconcile_fixture(fixture_record, season.id, T0, sport_code="football")
+    await session.commit()
+
+    assert len(home_calculator.calls) == 1
+    home_fixture_id, home_team_id, home_now = home_calculator.calls[0]
+    assert home_fixture_id == str(fixture.id.value)
+    assert home_team_id == home.id
+    assert home_now == T0
+
+    assert len(away_calculator.calls) == 1
+    away_fixture_id, away_team_id, away_now = away_calculator.calls[0]
+    assert away_fixture_id == str(fixture.id.value)
+    assert away_team_id == away.id
+    assert away_now == T0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_fixture_skips_transfer_activity_without_sport_code(
+    service_with_transfer_activity, session,
+):
+    """A caller that doesn't pass sport_code must not crash — it just silently opts out, exactly
+    like form differential's equivalent test above."""
+    service, home_calculator, away_calculator = service_with_transfer_activity
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    competition, _ = await service.reconcile_competition("39", "mock_football", sport.id, T0)
+    season, _ = await service.reconcile_season("39", "2026", "mock_football", competition.id, T0)
+    await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+    await service.reconcile_team(_team_record("t2", "Chelsea"), sport.id, T0)
+    await session.commit()
+
+    fixture_record = ProviderFixtureRecord(
+        external_ref=ProviderRef(provider="mock_football", external_id="fx-transfer-no-sport"),
+        home_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        away_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
+        scheduled_at=T0, competition_ref="39", season_label="2026",
+    )
+    await service.reconcile_fixture(fixture_record, season.id, T0)
+    await session.commit()
+
+    assert home_calculator.calls == []
+    assert away_calculator.calls == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_fixture_skips_transfer_activity_for_unregistered_sport(
+    service_with_transfer_activity, session,
+):
+    """A sport with no registered calculator must not raise."""
+    service, home_calculator, away_calculator = service_with_transfer_activity
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    competition, _ = await service.reconcile_competition("39", "mock_football", sport.id, T0)
+    season, _ = await service.reconcile_season("39", "2026", "mock_football", competition.id, T0)
+    await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+    await service.reconcile_team(_team_record("t2", "Chelsea"), sport.id, T0)
+    await session.commit()
+
+    fixture_record = ProviderFixtureRecord(
+        external_ref=ProviderRef(provider="mock_football", external_id="fx-transfer-other-sport"),
+        home_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        away_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
+        scheduled_at=T0, competition_ref="39", season_label="2026",
+    )
+    await service.reconcile_fixture(fixture_record, season.id, T0, sport_code="basketball")
+    await session.commit()
+
+    assert home_calculator.calls == []
+    assert away_calculator.calls == []
+
+
 # -- Injury / Transfer / Coaching staff (squad intelligence) --------------------------------
 
 
@@ -1395,4 +1531,268 @@ async def test_reconcile_coaching_staff_same_person_is_a_no_op(service, session)
 
     assert created
     assert not created_again
+
+
+class TestVerifiedPreMatchAvailabilityIntegration:
+    """Milestone 5 (Verified Pre-Match Data Availability) — integration proof that
+    `reconcile_lineup`/`reconcile_injury`/`reconcile_transfer` actually route through
+    `classify_availability` end-to-end (modules.ingestion.application.provenance), not just that
+    the pure function itself is correct (see test_availability_classification.py's unit-level
+    A-K coverage). Scenarios A/B/F/G/H/I re-verified here against the real reconciliation call
+    path, against a real SQLite session."""
+
+    @pytest.mark.asyncio
+    async def test_lineup_reconciled_via_live_scheduled_within_window_is_verified_pre_match(self, service, session):
+        sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+        await session.commit()
+        team, _ = await service.reconcile_team(_team_record(), sport.id, T0)
+        await session.commit()
+        player, _ = await service.reconcile_player(
+            ProviderPlayerRecord(
+                external_ref=ProviderRef(provider="mock_football", external_id="p1"),
+                team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+                name="Alex Carter", date_of_birth=None, position="forward",
+            ),
+            sport.id, T0,
+        )
+        await session.commit()
+
+        match_id = MatchId(uuid4())
+        kickoff = T0 + timedelta(minutes=60)
+        record = ProviderLineupRecord(
+            fixture_ref=ProviderRef(provider="mock_football", external_id="fx1"),
+            team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+            formation="4-3-3",
+            slots=(ProviderLineupSlotRecord(player_ref=ProviderRef(provider="mock_football", external_id="p1"), role="starter"),),
+        )
+        lineup, _, _ = await service.reconcile_lineup(
+            record, match_id, T0, trigger=SyncTrigger.LIVE_SCHEDULED, kickoff=kickoff,
+        )
+        await session.commit()
+
+        assert lineup.availability_classification == "VERIFIED_PRE_MATCH"
+        assert lineup.information_available_at == T0
+        assert lineup.fetched_at == T0
+        assert player.id == lineup.slots[0].player_id
+
+    @pytest.mark.asyncio
+    async def test_lineup_reconciled_via_admin_manual_is_unknown_availability(self, service, session):
+        sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+        await session.commit()
+        await service.reconcile_team(_team_record(), sport.id, T0)
+        await session.commit()
+
+        match_id = MatchId(uuid4())
+        kickoff = T0 + timedelta(minutes=60)
+        record = ProviderLineupRecord(
+            fixture_ref=ProviderRef(provider="mock_football", external_id="fx1"),
+            team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+            formation="4-3-3", slots=(),
+        )
+        lineup, _, _ = await service.reconcile_lineup(
+            record, match_id, T0, trigger=SyncTrigger.ADMIN_MANUAL, kickoff=kickoff,
+        )
+        await session.commit()
+
+        assert lineup.availability_classification == "UNKNOWN_AVAILABILITY_TIME"
+        assert lineup.information_available_at is None
+
+    @pytest.mark.asyncio
+    async def test_injury_reconciled_via_live_scheduled_still_stays_unknown(self, service, session):
+        """Proves the real call path never lets an injury reach VERIFIED_PRE_MATCH today, even
+        under the one trigger that would otherwise qualify — because no adapter yet supplies a
+        genuine report timestamp (reconcile_injury hardcodes has_genuine_timestamp=False)."""
+        await _reconciled_player(service, session)
+        record = ProviderInjuryRecord(
+            player_ref=ProviderRef(provider="mock_football", external_id="p1"),
+            team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+            status="Missing Fixture", reason="Hamstring",
+        )
+        injury, _ = await service.reconcile_injury(record, T0, trigger=SyncTrigger.LIVE_SCHEDULED)
+        await session.commit()
+
+        assert injury.availability_classification == "UNKNOWN_AVAILABILITY_TIME"
+        assert injury.information_available_at is None
+        assert injury.fetched_at == T0
+
+    @pytest.mark.asyncio
+    async def test_transfer_reconciled_via_live_scheduled_is_verified_pre_match(self, service, session):
+        sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+        await session.commit()
+        await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+        await session.commit()
+        _, player = await _reconciled_player(service, session, team_ref="t1", player_ref="p1")
+
+        record = ProviderTransferRecord(
+            player_ref=ProviderRef(provider="mock_football", external_id="p1"),
+            from_team_ref=None, to_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+            effective_date=datetime(2026, 9, 1, tzinfo=timezone.utc), transfer_type="Free",
+        )
+        transfer = await service.reconcile_transfer(record, T0, trigger=SyncTrigger.LIVE_SCHEDULED)
+        await session.commit()
+
+        assert transfer.availability_classification == "VERIFIED_PRE_MATCH"
+        assert transfer.information_available_at == T0
+
+    @pytest.mark.asyncio
+    async def test_transfer_reconciled_via_admin_manual_stays_unknown(self, service, session):
+        sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+        await session.commit()
+        await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+        await session.commit()
+        await _reconciled_player(service, session, team_ref="t1", player_ref="p1")
+
+        record = ProviderTransferRecord(
+            player_ref=ProviderRef(provider="mock_football", external_id="p1"),
+            from_team_ref=None, to_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+            effective_date=datetime(2026, 9, 1, tzinfo=timezone.utc), transfer_type="Free",
+        )
+        transfer = await service.reconcile_transfer(record, T0, trigger=SyncTrigger.ADMIN_MANUAL)
+        await session.commit()
+
+        assert transfer.availability_classification == "UNKNOWN_AVAILABILITY_TIME"
+
+    @pytest.mark.asyncio
+    async def test_reconciliation_defaults_never_accidentally_verify(self, service, session):
+        """A caller that doesn't pass trigger/kickoff at all (every pre-Milestone-5 test and
+        script) must get exactly the same UNKNOWN_AVAILABILITY_TIME result as before this
+        milestone — the new parameters are additive, never a silent behavior change for existing
+        callers."""
+        await _reconciled_player(service, session)
+        record = ProviderInjuryRecord(
+            player_ref=ProviderRef(provider="mock_football", external_id="p1"),
+            team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+            status="Missing Fixture", reason="Hamstring",
+        )
+        injury, _ = await service.reconcile_injury(record, T0)
+        await session.commit()
+
+        assert injury.availability_classification == "UNKNOWN_AVAILABILITY_TIME"
+
+
+class TestProviderRefIndexCanonicalEntityId:
+    """Milestone 4 item 1: "Add tests proving: provider reference -> canonical entity ->
+    fixture/team/player resolves correctly." Exercises the real round trip through
+    `SqlAlchemyProviderRefIndexRepository`/`_canonical_entity_id`
+    (modules/ingestion/infrastructure/persistence/mappers.py) against a real SQLite session —
+    not a fake/in-memory repo — so both the write-time normalization and the read-time lookup
+    are proven against actual storage, not just the mapper function in isolation."""
+
+    @staticmethod
+    async def _raw_stored_entity_id(session: AsyncSession, provider: str, external_id: str, entity_kind: EntityKind) -> str:
+        from sqlalchemy import select as sa_select
+
+        from modules.ingestion.infrastructure.persistence.models import ProviderRefIndexModel
+
+        stmt = sa_select(ProviderRefIndexModel.entity_id).where(
+            ProviderRefIndexModel.provider == provider,
+            ProviderRefIndexModel.external_id == external_id,
+            ProviderRefIndexModel.entity_kind == entity_kind.value,
+        )
+        return (await session.execute(stmt)).scalar_one()
+
+    @pytest.mark.asyncio
+    async def test_team_provider_ref_resolves_to_canonical_hyphenated_team_id(self, service, session):
+        sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+        await session.commit()
+        team, _ = await service.reconcile_team(_team_record(), sport.id, T0)
+        await session.commit()
+
+        stored = await self._raw_stored_entity_id(session, "mock_football", "t1", EntityKind.TEAM)
+        assert stored == str(team.id.value)  # canonical hyphenated form, matching Team.id itself
+
+        resolved = await service.ref_index.get("mock_football", "t1", EntityKind.TEAM)
+        assert resolved == str(team.id.value)
+
+        looked_up = await service.teams.get(team.id)
+        assert looked_up is not None
+        assert looked_up.id == team.id
+        assert looked_up.name == team.name
+
+    @pytest.mark.asyncio
+    async def test_player_provider_ref_resolves_to_canonical_player_id(self, service, session):
+        sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+        await session.commit()
+        await service.reconcile_team(_team_record(), sport.id, T0)
+        await session.commit()
+        player, _ = await service.reconcile_player(
+            ProviderPlayerRecord(
+                external_ref=ProviderRef(provider="mock_football", external_id="p1"),
+                team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+                name="Bukayo Saka", date_of_birth=None, position="FW",
+            ),
+            sport.id, T0,
+        )
+        await session.commit()
+
+        stored = await self._raw_stored_entity_id(session, "mock_football", "p1", EntityKind.PLAYER)
+        assert stored == str(player.id.value)
+
+        from modules.sports.domain.value_objects import PlayerId
+
+        looked_up = await service.players.get(PlayerId(_as_uuid_for_test(stored)))
+        assert looked_up is not None
+        assert looked_up.id == player.id
+
+    @pytest.mark.asyncio
+    async def test_fixture_provider_ref_resolves_through_team_refs_to_real_fixture(self, service, session):
+        sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+        await session.commit()
+        home, _ = await service.reconcile_team(_team_record(external_id="t1", name="Arsenal"), sport.id, T0)
+        away, _ = await service.reconcile_team(_team_record(external_id="t2", name="Chelsea"), sport.id, T0)
+        await session.commit()
+        competition, _ = await service.reconcile_competition("39", "mock_football", sport.id, T0, name="Premier League")
+        season, _ = await service.reconcile_season("39", "2026", "mock_football", competition.id, T0)
+        await session.commit()
+
+        record = ProviderFixtureRecord(
+            external_ref=ProviderRef(provider="mock_football", external_id="f1"),
+            home_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+            away_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
+            scheduled_at=T0, competition_ref="39", season_label="2026", status="SCHEDULED",
+        )
+        fixture, _ = await service.reconcile_fixture(record, season.id, T0)
+        await session.commit()
+
+        stored = await self._raw_stored_entity_id(session, "mock_football", "f1", EntityKind.FIXTURE)
+        assert stored == str(fixture.id.value)
+
+        looked_up = await service.fixtures.get(fixture.id)
+        assert looked_up is not None
+        assert looked_up.home_team_id == home.id
+        assert looked_up.away_team_id == away.id
+
+    @pytest.mark.asyncio
+    async def test_pre_fix_hex_stored_entity_id_still_resolves_correctly(self, service, session):
+        """Rows written before the mapper's canonicalization fix (or by any external
+        script) may still be stored in raw hex-no-hyphen form. `uuid.UUID()` parsing is
+        hyphen-agnostic, so lookups through the real reconciliation/repository path must
+        resolve identically regardless of which form is on disk — proving the read path
+        does not depend on the write-time fix having already normalized every row."""
+        sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+        await session.commit()
+        team, _ = await service.reconcile_team(_team_record(), sport.id, T0)
+        await session.commit()
+
+        from modules.ingestion.infrastructure.persistence.models import ProviderRefIndexModel
+
+        model = ProviderRefIndexModel(
+            provider="legacy_provider", external_id="legacy-1", entity_kind=EntityKind.TEAM.value,
+            entity_id=str(team.id.value).replace("-", ""),
+        )
+        session.add(model)
+        await session.commit()
+
+        resolved = await service.ref_index.get("legacy_provider", "legacy-1", EntityKind.TEAM)
+        assert resolved == str(team.id.value)  # mapper normalizes hex back to canonical on read
+
+        looked_up = await service.teams.get(team.id)
+        assert looked_up is not None
+        assert looked_up.id == team.id
+
+
+def _as_uuid_for_test(value: str):
+    from uuid import UUID
+
+    return UUID(value)
     assert second.id == first.id

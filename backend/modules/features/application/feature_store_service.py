@@ -95,6 +95,20 @@ class FeatureStoreService:
             return cached
         return await self.offline.get_latest(key, entity_type, entity_id)
 
+    async def read_as_of(
+        self, feature_key: str, entity_type: EntityType, entity_id: str, as_of: datetime
+    ) -> FeatureValue | None:
+        """Milestone 4 point-in-time retrieval — the counterpart to `read()` for historical
+        reconstruction (backtesting, training-dataset assembly, re-deriving what a past
+        prediction should have seen). Deliberately bypasses `online` entirely: the Redis cache
+        only ever holds the single most-recent value per key (`online.set`/`.get` have no
+        version/as-of dimension), so it can never safely answer "what did we know at time T" —
+        going straight to the offline store's `get_as_of` is the only correct path here, not an
+        optimization left on the table. Historical feature reconstruction must call this, not
+        `read()`, whenever a specific timestamp — not "now" — is the actual question."""
+        key = feature_key if isinstance(feature_key, FeatureKey) else FeatureKey(feature_key)
+        return await self.offline.get_as_of(key, entity_type, entity_id, as_of)
+
     @staticmethod
     def is_stale(value: FeatureValue, now: datetime, max_staleness_seconds: int) -> bool:
         return (now - value.as_of).total_seconds() > max_staleness_seconds

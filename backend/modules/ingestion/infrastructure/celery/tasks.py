@@ -179,3 +179,24 @@ def sync_team_statistics_task(
         )
 
     return _run_summary(asyncio.run(_do()))
+
+
+@celery_app.task(name="ingestion.sync_upcoming_structured_intelligence", bind=True, queue="default", **_RETRY_KWARGS)
+def sync_upcoming_structured_intelligence_task(
+    self, sport_code: str, season_id_str: str, now_iso: str | None = None
+) -> list[dict | None]:
+    """Milestone 5 — the Beat-driven entry point for injuries/transfers/lineups. Deliberately
+    omits a `trigger` argument (unlike every other task above): `SyncOrchestrator
+    .sync_upcoming_structured_intelligence`'s own default is `SyncTrigger.LIVE_SCHEDULED`, and
+    this task is the *only* real caller — a Beat firing is exactly what that trigger value means.
+    No other call site (admin API, backfill scripts) invokes this task, so there is no client
+    input path that could ever claim `LIVE_SCHEDULED` for itself (Milestone 5 §13 — a client
+    request must not be trusted as provenance)."""
+    async def _do():
+        orchestrator = await _get_orchestrator()
+        return await orchestrator.sync_upcoming_structured_intelligence(
+            sport_code, SeasonId(UUID(season_id_str)), _resolve_now(now_iso)
+        )
+
+    runs = asyncio.run(_do())
+    return [_run_summary(r) for r in runs]

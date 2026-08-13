@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -10,7 +10,7 @@ from modules.predictions.application.experiment_tracking_service import Experime
 from modules.predictions.application.model_registry_service import ModelRegistryService
 from modules.predictions.application.model_selection_service import AutomaticModelSelectionService
 from modules.predictions.application.training_pipeline_service import TrainingPipelineService
-from modules.predictions.domain.dataset import Dataset, DatasetId, DatasetLineage, DatasetStatistics, DatasetStatus
+from modules.predictions.domain.dataset import Dataset, DatasetId, DatasetLineage, DatasetStatistics, DatasetStatus, SplitStrategy
 from modules.predictions.domain.ml_value_objects import MLAlgorithm, MLFramework
 from modules.predictions.domain.model_selection import CandidateSpec, NoViableCandidateError
 from modules.predictions.domain.value_objects import MarketId, ModelStatus, TargetType
@@ -26,8 +26,16 @@ FAST_CLASSIFICATION_CANDIDATES = (
 
 
 def _classification_dataset(n: int = 60, status: DatasetStatus = DatasetStatus.APPROVED) -> Dataset:
+    # Milestone 18: select()'s default split strategy is TIME_SERIES_SPLIT, which now fails closed
+    # without a real reference_time on every sample — give each a strictly increasing timestamp
+    # (built already in chronological order; test_dataset_splitter.py separately proves the
+    # splitter is correct even for shuffled input).
     samples = [
-        TrainingSample(features={"x1": float(i % 10) - 5.0, "x2": float((i * 3) % 10) - 5.0}, label=1.0 if (i % 10 - 5) + ((i * 3) % 10 - 5) > 0 else 0.0)
+        TrainingSample(
+            features={"x1": float(i % 10) - 5.0, "x2": float((i * 3) % 10) - 5.0},
+            label=1.0 if (i % 10 - 5) + ((i * 3) % 10 - 5) > 0 else 0.0,
+            reference_time=T0 + timedelta(hours=i),
+        )
         for i in range(n)
     ]
     feature_order = ["x1", "x2"]
@@ -55,7 +63,11 @@ def _multiclass_dataset(n: int = 90, status: DatasetStatus = DatasetStatus.APPRO
         x1 = float(i % 10) - 5.0
         x2 = float((i * 3) % 10) - 5.0
         class_index = 0 if x1 < -1.5 else (2 if x1 > 1.5 else 1)
-        samples.append(TrainingSample(features={"x1": x1, "x2": x2}, label=float(class_index)))
+        samples.append(
+            TrainingSample(
+                features={"x1": x1, "x2": x2}, label=float(class_index), reference_time=T0 + timedelta(hours=i)
+            )
+        )
     return Dataset(
         id=DatasetId(uuid4()),
         market_id=MarketId(uuid4()),
@@ -156,7 +168,7 @@ class TestSelect:
     async def test_regression_ranking_picks_lowest_mae_among_two_viable_candidates(self, service):
         dataset = _classification_dataset()
         dataset.samples = [
-            TrainingSample(features=s.features, label=float(s.label) * 10.0) for s in dataset.samples
+            TrainingSample(features=s.features, label=float(s.label) * 10.0, reference_time=s.reference_time) for s in dataset.samples
         ]
 
         result = await service.select(
@@ -174,9 +186,14 @@ class TestSelect:
     async def test_candidate_with_empty_test_split_is_skipped_not_selected(self, service):
         dataset = _classification_dataset()
 
+        # Milestone 4: `select()`'s default split strategy is now TIME_SERIES_SPLIT (Rule 14 —
+        # random TRAIN_TEST is no longer the production default). This test is specifically
+        # about TRAIN_TEST's own `test_ratio=0.0` edge case, so it requests that strategy
+        # explicitly — exactly the escape hatch the milestone's own default-flip preserves.
         with pytest.raises(NoViableCandidateError):
             await service.select(
-                dataset, TargetType.CLASSIFICATION, candidates=FAST_CLASSIFICATION_CANDIDATES, test_ratio=0.0
+                dataset, TargetType.CLASSIFICATION, candidates=FAST_CLASSIFICATION_CANDIDATES,
+                split_strategy=SplitStrategy.TRAIN_TEST, test_ratio=0.0,
             )
 
     async def test_unsupported_algorithm_for_target_type_is_skipped_not_fatal(self, service):
@@ -185,7 +202,7 @@ class TestSelect:
         # GAUSSIAN_NB has no regression form — selecting for REGRESSION should skip it, not raise.
         regression_dataset = _classification_dataset()
         regression_dataset.samples = [
-            TrainingSample(features=s.features, label=float(s.label) * 10.0) for s in regression_dataset.samples
+            TrainingSample(features=s.features, label=float(s.label) * 10.0, reference_time=s.reference_time) for s in regression_dataset.samples
         ]
 
         result = await service.select(

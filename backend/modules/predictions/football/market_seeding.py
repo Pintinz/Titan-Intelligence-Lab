@@ -52,10 +52,13 @@ from modules.predictions.application.feature_market_mapping_service import (
     MappingAlreadyExistsError,
 )
 from modules.predictions.application.market_registry_service import MarketAlreadyRegisteredError, MarketRegistryService
+from modules.predictions.application.news_market_impact_engine import NewsMarketImpactEngine
 from modules.predictions.application.windowed_feature_engineering_service import (
     FixtureExpectedGoalsCalculator,
     FixtureFormDifferentialCalculator,
+    LineupContinuityCalculator,
     RollingTeamStatAverageCalculator,
+    TransferActivityCalculator,
 )
 from modules.predictions.domain.market_outcome_registry import get_outcome_spec
 from modules.predictions.domain.value_objects import MarketKind, MarketStatus, TargetType
@@ -137,6 +140,92 @@ _EXPECTED_GOALS_FEATURES: tuple[str, ...] = (
     "football.fixture.expected_away_goals",
 )
 
+# Milestone 6 (Verified Pre-Match Data Availability -> first real structured-intelligence feature):
+# `LineupContinuityCalculator` only ever writes a value once a fixture's own lineup reaches
+# `VERIFIED_PRE_MATCH` (windowed_feature_engineering_service.py) — added here only to the 14
+# markets confirmed genuinely ML-trained (docs/milestone4_verification_report.md §9's Champion
+# provenance trace), not the 5 heuristic-placeholder markets: those read `FeatureMarketMapping`
+# live at inference time (`ModelDefinition.is_genuinely_trained()` is False for them, so
+# `PredictionEngine` falls back to the formula predictor), so adding a feature there would be a
+# live behavior change to already-serving predictions, not inert prep — out of scope for this
+# milestone (see docs/milestone6_verification_report.md). For the 14 trained markets below,
+# `required_features` only affects a *future* retrain's input vector — today's Champions are
+# unaffected until one is separately retrained and promoted (still blocked, per the standing "no
+# training/promotion" rule every milestone since Milestone 4 has honored).
+_LINEUP_CONTINUITY_FEATURES: tuple[str, ...] = (
+    "football.fixture.home_lineup_continuity",
+    "football.fixture.away_lineup_continuity",
+)
+
+# Milestone 7 (the transfer-side counterpart to Milestone 6's lineup continuity feature, per
+# docs/milestone5_verification_report.md's "Recommended Milestone 6 scope" §1 — "a real
+# VERIFIED_PRE_MATCH signal exists for lineups AND transfers"): `TransferActivityCalculator` only
+# ever writes a value once a team has at least one VERIFIED_PRE_MATCH transfer record on file
+# (windowed_feature_engineering_service.py) — same 14-trained-market scope as
+# `_LINEUP_CONTINUITY_FEATURES` above and for the same reason (inert `required_features` prep for
+# a trained model's next retrain; the 5 heuristic markets read `FeatureMarketMapping` live and are
+# deliberately untouched — see docs/milestone7_verification_report.md).
+_TRANSFER_ACTIVITY_FEATURES: tuple[str, ...] = (
+    "football.fixture.home_transfer_activity",
+    "football.fixture.away_transfer_activity",
+)
+
+# Milestone 8 — unlike Milestones 6/7's wiring into the 14 trained markets (inert until a future
+# retrain), the four heuristic-placeholder markets below are served LIVE by a formula predictor
+# (`WeightedLogisticPredictor`/`WeightedLinearPredictor`/`WeightedOrdinalPredictor`,
+# `weighted_scoring.py`) that reads `FeatureMarketMapping` fresh on every prediction request. Both
+# feature sets are therefore mapped `is_required=False` here (see `optional_features` on each of
+# the four market specs below, and `_seed_market`'s per-market check) — every fixture in dev.db
+# has zero non-null values for either feature today, so `is_required=True` would immediately raise
+# `MissingRequiredFeatureError` on every prediction these four markets serve.
+#
+# Weights are sized the same conservative way `NEW_STAT_FEATURE_WEIGHTS` already is, to avoid
+# repeating the 2026-08-06 sigmoid-saturation incident documented above: `home/away_lineup_continuity`
+# is a genuinely 0..1-scaled ratio (low risk even near weight 1.0), but `home/away_transfer_activity`
+# is an unbounded non-negative count of the exact same shape as the stat-differential features that
+# caused that incident — a busy transfer window could plausibly push it into double digits. 0.1 for
+# continuity and 0.05 for transfer activity keep each feature's typical maximum contribution to
+# `raw_score` under roughly 1 unit, well inside the sigmoid's non-saturating range, matching
+# `form_shots_total_diff_last5`'s comparable sizing for a similarly-scaled raw count.
+#
+# Known limitation, documented rather than solved with new complexity here: `lineup_continuity` is
+# an unsigned, always-non-negative value (Milestone 6's own docstring: "two independent features,
+# not one differential"), unlike every other feature already safely wired into these formula
+# predictors (all signed home-minus-away differentials centered near zero). Feeding it directly
+# means a constant small positive nudge proportional to (home + away continuity), not a
+# "which side is more continuous" signal — a real feature-engineering simplification, not a
+# leakage or safety issue. A future milestone could replace this with a genuine signed differential
+# feature if real outcome data ever shows this matters; not attempted here to keep this milestone
+# to "wire the existing, already-verified features safely," not "invent a new feature."
+STRUCTURED_INTEL_OPTIONAL_WEIGHTS: dict[str, float] = {
+    "football.fixture.home_lineup_continuity": 0.1,
+    "football.fixture.away_lineup_continuity": 0.1,
+    "football.fixture.home_transfer_activity": 0.05,
+    "football.fixture.away_transfer_activity": 0.05,
+}
+
+# Milestone 9 — News Market Impact Engine features (news_market_impact_engine.py). Unlike
+# Milestones 6/7's lineup-continuity/transfer-activity (generic team-strength signals wired into
+# all 14 trained markets), these are deliberately market-specific per the spec's own core
+# requirement ("do NOT calculate one generic impact score and apply it to every market") — each
+# dimension is wired only into the markets it's actually about. All three target only markets
+# already among the 14 genuinely-trained set (never the 4 heuristic markets), so — unlike
+# Milestone 8's wiring — these are required=True (the seeder's default), following exactly the
+# same "inert until a future retrain" reasoning Milestones 6/7 already established: a trained
+# Champion is unaffected until separately retrained and promoted.
+_NEWS_GOAL_IMPACT_FEATURES: tuple[str, ...] = (
+    "news.football.home_goal_impact",
+    "news.football.away_goal_impact",
+)
+_NEWS_CLEAN_SHEET_IMPACT_FEATURES: tuple[str, ...] = (
+    "news.football.home_clean_sheet_impact",
+    "news.football.away_clean_sheet_impact",
+)
+_NEWS_BTTS_IMPACT_FEATURES: tuple[str, ...] = (
+    "news.football.home_btts_impact",
+    "news.football.away_btts_impact",
+)
+
 MARKETS: tuple[dict, ...] = (
     dict(
         market_key="football.both_teams_to_score",
@@ -146,7 +235,8 @@ MARKETS: tuple[dict, ...] = (
         target_type=TargetType.CLASSIFICATION,
         required_features=(
             "football.fixture.form_shots_on_target_diff_last5", "football.market.overround",
-            *_NEW_STAT_DIFFERENTIAL_FEATURES,
+            *_NEW_STAT_DIFFERENTIAL_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
+            *_NEWS_BTTS_IMPACT_FEATURES,
         ),
     ),
     dict(
@@ -155,7 +245,10 @@ MARKETS: tuple[dict, ...] = (
         category="totals",
         market_kind=MarketKind.TOTAL,
         target_type=TargetType.CLASSIFICATION,
-        required_features=_EXPECTED_GOALS_FEATURES,
+        required_features=(
+            *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
+            *_NEWS_GOAL_IMPACT_FEATURES,
+        ),
     ),
     dict(
         market_key="football.home_team_total_goals",
@@ -163,7 +256,10 @@ MARKETS: tuple[dict, ...] = (
         category="team_totals",
         market_kind=MarketKind.TEAM_TOTAL,
         target_type=TargetType.CLASSIFICATION,
-        required_features=_EXPECTED_GOALS_FEATURES,
+        required_features=(
+            *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
+            *_NEWS_GOAL_IMPACT_FEATURES,
+        ),
     ),
     dict(
         market_key="football.correct_score",
@@ -171,7 +267,10 @@ MARKETS: tuple[dict, ...] = (
         category="score",
         market_kind=MarketKind.CORRECT_SCORE,
         target_type=TargetType.CLASSIFICATION,
-        required_features=("football.fixture.expected_home_goals", "football.fixture.expected_away_goals"),
+        required_features=(
+            "football.fixture.expected_home_goals", "football.fixture.expected_away_goals",
+            *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
+        ),
     ),
     dict(
         # Audit fix (2026-08-02): a football half can end drawn, exactly like a full match — this
@@ -186,7 +285,15 @@ MARKETS: tuple[dict, ...] = (
         category="segment_winner",
         market_kind=MarketKind.HOME_DRAW_AWAY,
         target_type=TargetType.CLASSIFICATION,
-        required_features=("football.fixture.form_shots_on_target_diff_last5", *_NEW_STAT_DIFFERENTIAL_FEATURES),
+        required_features=(
+            "football.fixture.form_shots_on_target_diff_last5", *_NEW_STAT_DIFFERENTIAL_FEATURES,
+            *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
+        ),
+        # Milestone 8 — both feature sets map optional (is_required=False) here: this market is
+        # served live by a formula predictor, not a trained model, so an absent required feature
+        # would raise MissingRequiredFeatureError on every prediction today (0 fixtures have a
+        # non-null value for either feature yet). See STRUCTURED_INTEL_OPTIONAL_WEIGHTS's comment.
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES),
     ),
     # Milestone 9.2 Phase 3 — the genuine 3-way market `WeightedOrdinalPredictor` serves. Distinct
     # from every market above (all MarketKind.BINARY/TOTAL/TEAM_TOTAL/CORRECT_SCORE/SEGMENT_WINNER):
@@ -201,7 +308,7 @@ MARKETS: tuple[dict, ...] = (
             "football.fixture.form_shots_on_target_diff_last5",
             "football.market.implied_probability_home",
             "football.market.implied_probability_away",
-            *_NEW_STAT_DIFFERENTIAL_FEATURES,
+            *_NEW_STAT_DIFFERENTIAL_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
         ),
     ),
     # 2026-08-02 football market catalog expansion — twelve more real markets, all backed by the
@@ -216,7 +323,10 @@ MARKETS: tuple[dict, ...] = (
         category="totals",
         market_kind=MarketKind.TOTAL,
         target_type=TargetType.CLASSIFICATION,
-        required_features=_EXPECTED_GOALS_FEATURES,
+        required_features=(
+            *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
+            *_NEWS_GOAL_IMPACT_FEATURES,
+        ),
     ),
     dict(
         market_key="football.total_goals_over_under_1_5",
@@ -224,7 +334,10 @@ MARKETS: tuple[dict, ...] = (
         category="totals",
         market_kind=MarketKind.TOTAL,
         target_type=TargetType.CLASSIFICATION,
-        required_features=_EXPECTED_GOALS_FEATURES,
+        required_features=(
+            *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
+            *_NEWS_GOAL_IMPACT_FEATURES,
+        ),
     ),
     dict(
         market_key="football.total_goals_over_under_3_5",
@@ -232,7 +345,10 @@ MARKETS: tuple[dict, ...] = (
         category="totals",
         market_kind=MarketKind.TOTAL,
         target_type=TargetType.CLASSIFICATION,
-        required_features=_EXPECTED_GOALS_FEATURES,
+        required_features=(
+            *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
+            *_NEWS_GOAL_IMPACT_FEATURES,
+        ),
     ),
     dict(
         market_key="football.total_goals_over_under_4_5",
@@ -240,7 +356,10 @@ MARKETS: tuple[dict, ...] = (
         category="totals",
         market_kind=MarketKind.TOTAL,
         target_type=TargetType.CLASSIFICATION,
-        required_features=_EXPECTED_GOALS_FEATURES,
+        required_features=(
+            *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
+            *_NEWS_GOAL_IMPACT_FEATURES,
+        ),
     ),
     dict(
         market_key="football.away_team_total_goals",
@@ -248,7 +367,10 @@ MARKETS: tuple[dict, ...] = (
         category="team_totals",
         market_kind=MarketKind.TEAM_TOTAL,
         target_type=TargetType.CLASSIFICATION,
-        required_features=_EXPECTED_GOALS_FEATURES,
+        required_features=(
+            *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
+            *_NEWS_GOAL_IMPACT_FEATURES,
+        ),
     ),
     dict(
         market_key="football.home_clean_sheet",
@@ -256,7 +378,10 @@ MARKETS: tuple[dict, ...] = (
         category="clean_sheet",
         market_kind=MarketKind.BINARY,
         target_type=TargetType.CLASSIFICATION,
-        required_features=_EXPECTED_GOALS_FEATURES,
+        required_features=(
+            *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
+            *_NEWS_CLEAN_SHEET_IMPACT_FEATURES,
+        ),
     ),
     dict(
         market_key="football.away_clean_sheet",
@@ -264,7 +389,10 @@ MARKETS: tuple[dict, ...] = (
         category="clean_sheet",
         market_kind=MarketKind.BINARY,
         target_type=TargetType.CLASSIFICATION,
-        required_features=_EXPECTED_GOALS_FEATURES,
+        required_features=(
+            *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
+            *_NEWS_CLEAN_SHEET_IMPACT_FEATURES,
+        ),
     ),
     dict(
         market_key="football.home_win_to_nil",
@@ -272,7 +400,10 @@ MARKETS: tuple[dict, ...] = (
         category="win_to_nil",
         market_kind=MarketKind.BINARY,
         target_type=TargetType.CLASSIFICATION,
-        required_features=_EXPECTED_GOALS_FEATURES,
+        required_features=(
+            *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
+            *_NEWS_CLEAN_SHEET_IMPACT_FEATURES,
+        ),
     ),
     dict(
         market_key="football.away_win_to_nil",
@@ -280,7 +411,10 @@ MARKETS: tuple[dict, ...] = (
         category="win_to_nil",
         market_kind=MarketKind.BINARY,
         target_type=TargetType.CLASSIFICATION,
-        required_features=_EXPECTED_GOALS_FEATURES,
+        required_features=(
+            *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
+            *_NEWS_CLEAN_SHEET_IMPACT_FEATURES,
+        ),
     ),
     dict(
         # Same audit fix as football.first_half_winner above — a second half can end drawn too.
@@ -289,7 +423,15 @@ MARKETS: tuple[dict, ...] = (
         category="segment_winner",
         market_kind=MarketKind.HOME_DRAW_AWAY,
         target_type=TargetType.CLASSIFICATION,
-        required_features=("football.fixture.form_shots_on_target_diff_last5", *_NEW_STAT_DIFFERENTIAL_FEATURES),
+        required_features=(
+            "football.fixture.form_shots_on_target_diff_last5", *_NEW_STAT_DIFFERENTIAL_FEATURES,
+            *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
+        ),
+        # Milestone 8 — both feature sets map optional (is_required=False) here: this market is
+        # served live by a formula predictor, not a trained model, so an absent required feature
+        # would raise MissingRequiredFeatureError on every prediction today (0 fixtures have a
+        # non-null value for either feature yet). See STRUCTURED_INTEL_OPTIONAL_WEIGHTS's comment.
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES),
     ),
     dict(
         market_key="football.first_half_goals",
@@ -297,7 +439,15 @@ MARKETS: tuple[dict, ...] = (
         category="totals",
         market_kind=MarketKind.TOTAL,
         target_type=TargetType.CLASSIFICATION,
-        required_features=("football.fixture.form_shots_on_target_diff_last5", *_NEW_STAT_DIFFERENTIAL_FEATURES),
+        required_features=(
+            "football.fixture.form_shots_on_target_diff_last5", *_NEW_STAT_DIFFERENTIAL_FEATURES,
+            *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
+        ),
+        # Milestone 8 — both feature sets map optional (is_required=False) here: this market is
+        # served live by a formula predictor, not a trained model, so an absent required feature
+        # would raise MissingRequiredFeatureError on every prediction today (0 fixtures have a
+        # non-null value for either feature yet). See STRUCTURED_INTEL_OPTIONAL_WEIGHTS's comment.
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES),
     ),
     dict(
         market_key="football.first_half_both_teams_to_score",
@@ -305,7 +455,15 @@ MARKETS: tuple[dict, ...] = (
         category="goals",
         market_kind=MarketKind.BINARY,
         target_type=TargetType.CLASSIFICATION,
-        required_features=("football.fixture.form_shots_on_target_diff_last5", *_NEW_STAT_DIFFERENTIAL_FEATURES),
+        required_features=(
+            "football.fixture.form_shots_on_target_diff_last5", *_NEW_STAT_DIFFERENTIAL_FEATURES,
+            *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
+        ),
+        # Milestone 8 — both feature sets map optional (is_required=False) here: this market is
+        # served live by a formula predictor, not a trained model, so an absent required feature
+        # would raise MissingRequiredFeatureError on every prediction today (0 fixtures have a
+        # non-null value for either feature yet). See STRUCTURED_INTEL_OPTIONAL_WEIGHTS's comment.
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES),
     ),
 )
 
@@ -318,6 +476,9 @@ class FootballMarketSeeder:
     windowed_calculator: RollingTeamStatAverageCalculator
     differential_calculators: tuple[FixtureFormDifferentialCalculator, ...]
     expected_goals_calculator: FixtureExpectedGoalsCalculator
+    lineup_continuity_calculators: tuple[LineupContinuityCalculator, LineupContinuityCalculator]
+    transfer_activity_calculators: tuple[TransferActivityCalculator, TransferActivityCalculator]
+    news_market_impact_engine: NewsMarketImpactEngine
 
     async def seed(self, now: datetime) -> None:
         await self._ensure_single_record_features_registered(now)
@@ -325,6 +486,11 @@ class FootballMarketSeeder:
         for calculator in self.differential_calculators:
             await calculator.ensure_registered(now)
         await self.expected_goals_calculator.ensure_registered(now)
+        for calculator in self.lineup_continuity_calculators:
+            await calculator.ensure_registered(now)
+        for calculator in self.transfer_activity_calculators:
+            await calculator.ensure_registered(now)
+        await self.news_market_impact_engine.ensure_registered(now)
 
         for spec in MARKETS:
             await self._seed_market(spec, now)
@@ -374,6 +540,14 @@ class FootballMarketSeeder:
         except MarketAlreadyRegisteredError:
             pass
 
+        # Milestone 8 — a market-specific opt-out, distinct from `_NEW_STAT_DIFFERENTIAL_FEATURES`'s
+        # global one: `home/away_lineup_continuity`/`transfer_activity` must stay required=True on
+        # the 14 trained markets (Milestones 6/7 — a training dataset should demand the pre-match
+        # feature exist) but optional on these four live-formula-served markets specifically (see
+        # `STRUCTURED_INTEL_OPTIONAL_WEIGHTS`'s comment above). Absent on every other market's spec,
+        # so `spec.get(...)` defaults to an empty tuple and behavior there is unchanged.
+        market_optional_features = spec.get("optional_features", ())
+
         for feature_key in spec["required_features"]:
             try:
                 await self.mappings.map_feature(
@@ -387,8 +561,13 @@ class FootballMarketSeeder:
                     # the entire "fine-tune when available" point of adding them;
                     # resolve_feature_snapshot already silently omits a missing optional feature
                     # rather than raising, exactly the behavior these need.
-                    is_required=feature_key not in _NEW_STAT_DIFFERENTIAL_FEATURES,
-                    weight=NEW_STAT_FEATURE_WEIGHTS.get(feature_key, 1.0),
+                    is_required=(
+                        feature_key not in _NEW_STAT_DIFFERENTIAL_FEATURES
+                        and feature_key not in market_optional_features
+                    ),
+                    weight=NEW_STAT_FEATURE_WEIGHTS.get(
+                        feature_key, STRUCTURED_INTEL_OPTIONAL_WEIGHTS.get(feature_key, 1.0)
+                    ),
                 )
             except MappingAlreadyExistsError:
                 continue

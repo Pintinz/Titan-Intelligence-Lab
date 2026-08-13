@@ -18,6 +18,7 @@ catboost_info/
 
 # Local dev database
 dev.db
+dev.db.bak-*
 
 # Env / secrets
 .env

@@ -130,6 +130,21 @@ def test_sync_source_rejects_malformed_id(client):
     assert response.status_code == 422
 
 
+def test_admin_sync_uses_admin_manual_trigger_never_live_scheduled(client):
+    """Milestone 10 §3/§20 — the admin endpoint must never spoof the scheduled-only
+    LIVE_SCHEDULED trigger; only a genuine Celery Beat firing may ever produce it."""
+    register_response = client.post(
+        "/api/v1/admin/news/sources", json={"name": "Unreachable", "url": "http://127.0.0.1:1/feed.xml"}
+    )
+    source_id = register_response.json()["data"]["id"]
+
+    response = client.post(f"/api/v1/admin/news/sources/{source_id}/sync")
+
+    run = response.json()["data"]
+    assert run["trigger"] == "admin_manual"
+    assert run["trigger"] != "live_scheduled"
+
+
 def test_sync_source_against_unreachable_feed_marks_run_failed_not_a_crash(client):
     """Proves the real end-to-end wire — endpoint -> NewsIngestionService -> RssNewsProvider ->
     a real (failing) HTTP attempt — without depending on a live external feed: connecting to a
@@ -147,3 +162,87 @@ def test_sync_source_against_unreachable_feed_marks_run_failed_not_a_crash(clien
     assert run["status"] == "failed"
     assert run["error_message"] is not None
     assert run["channel_key"] == source_id
+
+
+def test_backfill_dry_run_validates_and_reports_a_plan_with_no_side_effects(client):
+    """Milestone 12 — dry-run (the default and primary verification mode) through the real
+    endpoint: no live RSS call, no persistence, no Gemini call — just a validated, bounded plan."""
+    from uuid import uuid4
+
+    register_response = client.post(
+        "/api/v1/admin/news/sources", json={"name": "BBC Sport", "url": "https://feeds.bbci.co.uk/sport/rss.xml"}
+    )
+    source_id = register_response.json()["data"]["id"]
+
+    response = client.post(
+        "/api/v1/admin/news/backfill",
+        json={
+            "source_id": source_id, "season_id": str(uuid4()),
+            "since": "2026-06-01T00:00:00Z", "dry_run": True,
+        },
+    )
+
+    assert response.status_code == 200
+    summary = response.json()["data"]
+    assert summary["dry_run"] is True
+    assert summary["sync_run_id"] is None
+    assert summary["articles_seen"] == 0
+    assert summary["plan"]["source_id"] == source_id
+    assert summary["plan"]["max_articles"] > 0
+
+
+def test_backfill_rejects_unknown_source_with_422(client):
+    from uuid import uuid4
+
+    response = client.post(
+        "/api/v1/admin/news/backfill",
+        json={"source_id": str(uuid4()), "season_id": str(uuid4()), "since": "2026-06-01T00:00:00Z"},
+    )
+
+    assert response.status_code == 422
+    assert "Unknown news source" in response.json()["detail"]
+
+
+def test_backfill_rejects_until_before_since_with_422(client):
+    from uuid import uuid4
+
+    register_response = client.post(
+        "/api/v1/admin/news/sources", json={"name": "BBC Sport", "url": "https://feeds.bbci.co.uk/sport/rss.xml"}
+    )
+    source_id = register_response.json()["data"]["id"]
+
+    response = client.post(
+        "/api/v1/admin/news/backfill",
+        json={
+            "source_id": source_id, "season_id": str(uuid4()),
+            "since": "2026-06-01T00:00:00Z", "until": "2026-05-01T00:00:00Z",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "cannot be earlier than" in response.json()["detail"]
+
+
+def test_backfill_real_run_is_refused_while_disabled_by_default(client):
+    """NEWS_BACKFILL_ENABLED defaults false everywhere — a non-dry-run request through the real
+    endpoint must be refused, never silently downgraded to a dry-run."""
+    from uuid import uuid4
+
+    register_response = client.post(
+        "/api/v1/admin/news/sources", json={"name": "BBC Sport", "url": "https://feeds.bbci.co.uk/sport/rss.xml"}
+    )
+    source_id = register_response.json()["data"]["id"]
+
+    response = client.post(
+        "/api/v1/admin/news/backfill",
+        json={
+            "source_id": source_id, "season_id": str(uuid4()),
+            "since": "2026-06-01T00:00:00Z", "dry_run": False,
+        },
+    )
+
+    assert response.status_code == 200
+    summary = response.json()["data"]
+    assert summary["dry_run"] is False
+    assert summary["sync_run_id"] is None
+    assert any("NEWS_BACKFILL_ENABLED" in e for e in summary["errors"])

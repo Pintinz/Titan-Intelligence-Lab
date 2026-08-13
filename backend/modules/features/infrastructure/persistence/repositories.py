@@ -105,6 +105,26 @@ class SqlAlchemyFeatureValueRepository:
         model = (await self.session.execute(stmt)).scalar_one_or_none()
         return mappers.value_to_domain(model) if model else None
 
+    async def get_as_of(
+        self, feature_key: FeatureKey, entity_type: EntityType, entity_id: str, as_of: datetime
+    ) -> FeatureValue | None:
+        """Milestone 4 point-in-time retrieval (see the port's own docstring). The only
+        difference from `get_latest` is the `as_of <= :cutoff` bound — a value recorded after
+        the cutoff is invisible here even if it is the newest row that exists."""
+        stmt = (
+            select(FeatureValueModel)
+            .where(
+                FeatureValueModel.feature_key == feature_key.value,
+                FeatureValueModel.entity_type == entity_type.value,
+                FeatureValueModel.entity_id == entity_id,
+                FeatureValueModel.as_of <= as_of,
+            )
+            .order_by(FeatureValueModel.as_of.desc())
+            .limit(1)
+        )
+        model = (await self.session.execute(stmt)).scalar_one_or_none()
+        return mappers.value_to_domain(model) if model else None
+
     async def list_history(
         self, feature_key: FeatureKey, entity_type: EntityType, entity_id: str, limit: int = 100
     ) -> list[FeatureValue]:

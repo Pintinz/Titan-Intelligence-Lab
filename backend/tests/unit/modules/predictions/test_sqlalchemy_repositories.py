@@ -5,6 +5,14 @@ from uuid import uuid4
 
 import pytest
 
+from modules.predictions.domain.dataset import (
+    Dataset,
+    DatasetId,
+    DatasetLineage,
+    DatasetQualityIssue,
+    DatasetStatistics,
+    DatasetStatus,
+)
 from modules.predictions.domain.entities import (
     ConfidenceBreakdown,
     Experiment,
@@ -35,6 +43,7 @@ from modules.predictions.domain.value_objects import (
     TargetType,
 )
 from modules.predictions.infrastructure.persistence.repositories import (
+    SqlAlchemyDatasetRepository,
     SqlAlchemyExperimentRepository,
     SqlAlchemyFeatureMarketMappingRepository,
     SqlAlchemyMarketRepository,
@@ -44,6 +53,7 @@ from modules.predictions.infrastructure.persistence.repositories import (
     SqlAlchemyPredictionOutcomeRepository,
     SqlAlchemyPredictionRepository,
 )
+from modules.predictions.ports.ml_model import TrainingSample
 
 T0 = datetime(2026, 7, 26, tzinfo=timezone.utc)
 
@@ -569,3 +579,129 @@ async def test_prediction_audit_repository_list_recent_with_since_filter(sqlite_
 
     assert since_future == []
     assert len(since_past) == 1
+
+
+def _dataset(market_id, version=1, status=DatasetStatus.DRAFT, **overrides) -> Dataset:
+    samples = [
+        TrainingSample(
+            features={"core.feature_a": float(i)}, label=float(i % 2),
+            reference_time=T0.replace(hour=i % 24, minute=0, second=0, microsecond=0),
+        )
+        for i in range(5)
+    ]
+    defaults = dict(
+        id=DatasetId(uuid4()),
+        market_id=market_id,
+        version=version,
+        content_hash="deadbeef" * 8,
+        samples=samples,
+        statistics=DatasetStatistics(
+            sample_count=5, feature_count=1, positive_rate=0.4,
+            missing_rate={"core.feature_a": 0.0}, mean={"core.feature_a": 2.0}, std={"core.feature_a": 1.4},
+        ),
+        lineage=DatasetLineage(
+            market_id=market_id, source_prediction_ids=("p1", "p2"), feature_keys=("core.feature_a",),
+            built_at=T0, class_labels=("HOME_WIN", "DRAW", "AWAY_WIN"),
+        ),
+        quality_issues=(DatasetQualityIssue.TOO_FEW_SAMPLES,),
+        status=status,
+        created_at=T0,
+    )
+    defaults.update(overrides)
+    return Dataset(**defaults)
+
+
+@pytest.mark.asyncio
+async def test_dataset_repository_round_trip_preserves_samples_and_lineage(sqlite_session):
+    """Milestone 20: the M19-identified `dataset_provenance_persisted` gap — a `Dataset` (with
+    real `TrainingSample.reference_time` values, the Milestone 18 temporal-safety field) must
+    survive a genuine SQL round trip, not just live in a process-local dict."""
+    markets = SqlAlchemyMarketRepository(session=sqlite_session)
+    datasets = SqlAlchemyDatasetRepository(session=sqlite_session)
+    market = _market(market_key="football.dataset_repo_market")
+    await markets.upsert(market)
+    dataset = _dataset(market.id)
+
+    await datasets.upsert(dataset)
+    await sqlite_session.commit()
+
+    reloaded = await datasets.get(dataset.id)
+    assert reloaded is not None
+    assert reloaded.market_id == market.id
+    assert reloaded.content_hash == dataset.content_hash
+    assert reloaded.status is DatasetStatus.DRAFT
+    assert len(reloaded.samples) == 5
+    assert reloaded.samples[3].features == {"core.feature_a": 3.0}
+    assert reloaded.samples[3].label == 1.0
+    assert reloaded.samples[3].reference_time == dataset.samples[3].reference_time
+    assert reloaded.lineage.class_labels == ("HOME_WIN", "DRAW", "AWAY_WIN")
+    assert reloaded.lineage.source_prediction_ids == ("p1", "p2")
+    assert reloaded.lineage.built_at == T0
+    assert reloaded.statistics.sample_count == 5
+    assert reloaded.statistics.positive_rate == 0.4
+    assert DatasetQualityIssue.TOO_FEW_SAMPLES in reloaded.quality_issues
+
+
+@pytest.mark.asyncio
+async def test_dataset_repository_get_latest_version(sqlite_session):
+    markets = SqlAlchemyMarketRepository(session=sqlite_session)
+    datasets = SqlAlchemyDatasetRepository(session=sqlite_session)
+    market = _market(market_key="football.dataset_repo_latest_market")
+    await markets.upsert(market)
+    await datasets.upsert(_dataset(market.id, version=1))
+    await datasets.upsert(_dataset(market.id, version=2, status=DatasetStatus.VALIDATED))
+    await sqlite_session.commit()
+
+    latest = await datasets.get_latest_version(market.id)
+
+    assert latest.version == 2
+    assert latest.status is DatasetStatus.VALIDATED
+
+
+@pytest.mark.asyncio
+async def test_dataset_repository_list_by_market_orders_newest_first(sqlite_session):
+    markets = SqlAlchemyMarketRepository(session=sqlite_session)
+    datasets = SqlAlchemyDatasetRepository(session=sqlite_session)
+    market = _market(market_key="football.dataset_repo_list_market")
+    await markets.upsert(market)
+    for v in (1, 2, 3):
+        await datasets.upsert(_dataset(market.id, version=v))
+    await sqlite_session.commit()
+
+    results = await datasets.list_by_market(market.id)
+
+    assert [d.version for d in results] == [3, 2, 1]
+
+
+@pytest.mark.asyncio
+async def test_dataset_repository_upsert_updates_existing_row_not_duplicates(sqlite_session):
+    """Mirrors `DatasetRegistryService.validate()`/`approve()` — get, mutate status in place,
+    upsert again with the same id must update the row, not insert a second one."""
+    markets = SqlAlchemyMarketRepository(session=sqlite_session)
+    datasets = SqlAlchemyDatasetRepository(session=sqlite_session)
+    market = _market(market_key="football.dataset_repo_update_market")
+    await markets.upsert(market)
+    dataset = _dataset(market.id)
+    await datasets.upsert(dataset)
+    await sqlite_session.commit()
+
+    dataset.status = DatasetStatus.APPROVED
+    dataset.approved_by = "ops-admin"
+    dataset.approved_at = T0
+    await datasets.upsert(dataset)
+    await sqlite_session.commit()
+
+    reloaded = await datasets.get(dataset.id)
+    all_versions = await datasets.list_by_market(market.id)
+    assert reloaded.status is DatasetStatus.APPROVED
+    assert reloaded.approved_by == "ops-admin"
+    assert len(all_versions) == 1
+
+
+@pytest.mark.asyncio
+async def test_dataset_repository_get_unknown_id_returns_none(sqlite_session):
+    datasets = SqlAlchemyDatasetRepository(session=sqlite_session)
+
+    assert await datasets.get(DatasetId(uuid4())) is None
+    assert await datasets.get_latest_version(MarketId(uuid4())) is None
+    assert await datasets.list_by_market(MarketId(uuid4())) == []

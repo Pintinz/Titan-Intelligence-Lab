@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+from datetime import datetime
+from uuid import UUID
+
+from modules.predictions.domain.dataset import (
+    Dataset,
+    DatasetId,
+    DatasetLineage,
+    DatasetQualityIssue,
+    DatasetStatistics,
+    DatasetStatus,
+)
 from modules.predictions.domain.entities import (
     ConfidenceBreakdown,
     Experiment,
@@ -30,6 +41,7 @@ from modules.predictions.domain.value_objects import (
     TargetType,
 )
 from modules.predictions.infrastructure.persistence.models import (
+    DatasetModel,
     ExperimentModel,
     FeatureMarketMappingModel,
     MarketDefinitionModel,
@@ -39,6 +51,7 @@ from modules.predictions.infrastructure.persistence.models import (
     PredictionModel,
     PredictionOutcomeModel,
 )
+from modules.predictions.ports.ml_model import TrainingSample
 
 
 def market_to_domain(model: MarketDefinitionModel) -> MarketDefinition:
@@ -149,6 +162,7 @@ def model_definition_to_domain(model: ModelDefinitionModel) -> ModelDefinition:
         artifact_ref=model.artifact_ref,
         deployment_mode=model.deployment_mode,
         trained_at=model.trained_at,
+        provenance_status=model.provenance_status,
     )
 
 
@@ -177,6 +191,7 @@ def model_definition_to_model(
     model.artifact_ref = entity.artifact_ref
     model.deployment_mode = entity.deployment_mode
     model.trained_at = entity.trained_at
+    model.provenance_status = entity.provenance_status
     return model
 
 
@@ -365,4 +380,103 @@ def prediction_audit_to_model(
     model.market_id = entity.market_id.value if entity.market_id is not None else None
     model.model_id = entity.model_id.value if entity.model_id is not None else None
     model.details = dict(entity.details)
+    return model
+
+
+# --- Milestone 20: Dataset Platform durable persistence (closes the M19-identified
+# `dataset_provenance_persisted` gap — `DatasetModel`/the `datasets` table have existed since
+# Milestone 4/9, unused until now) ------------------------------------------------------------
+
+
+def _training_sample_to_dict(sample: TrainingSample) -> dict:
+    return {
+        "features": dict(sample.features),
+        "label": sample.label,
+        "reference_time": sample.reference_time.isoformat() if sample.reference_time else None,
+    }
+
+
+def _training_sample_from_dict(data: dict) -> TrainingSample:
+    reference_time = data.get("reference_time")
+    return TrainingSample(
+        features=dict(data["features"]),
+        label=data["label"],
+        reference_time=datetime.fromisoformat(reference_time) if reference_time else None,
+    )
+
+
+def _dataset_statistics_to_dict(statistics: DatasetStatistics) -> dict:
+    return {
+        "sample_count": statistics.sample_count,
+        "feature_count": statistics.feature_count,
+        "positive_rate": statistics.positive_rate,
+        "missing_rate": dict(statistics.missing_rate),
+        "mean": dict(statistics.mean),
+        "std": dict(statistics.std),
+    }
+
+
+def _dataset_statistics_from_dict(data: dict) -> DatasetStatistics:
+    return DatasetStatistics(
+        sample_count=data.get("sample_count", 0),
+        feature_count=data.get("feature_count", 0),
+        positive_rate=data.get("positive_rate"),
+        missing_rate=dict(data.get("missing_rate", {})),
+        mean=dict(data.get("mean", {})),
+        std=dict(data.get("std", {})),
+    )
+
+
+def _dataset_lineage_to_dict(lineage: DatasetLineage) -> dict:
+    return {
+        "market_id": str(lineage.market_id),
+        "source_prediction_ids": list(lineage.source_prediction_ids),
+        "feature_keys": list(lineage.feature_keys),
+        "built_at": lineage.built_at.isoformat() if lineage.built_at else None,
+        "class_labels": list(lineage.class_labels),
+    }
+
+
+def _dataset_lineage_from_dict(data: dict, fallback_market_id: UUID) -> DatasetLineage:
+    built_at = data.get("built_at")
+    market_id_raw = data.get("market_id")
+    return DatasetLineage(
+        market_id=MarketId(UUID(market_id_raw) if market_id_raw else fallback_market_id),
+        source_prediction_ids=tuple(data.get("source_prediction_ids", ())),
+        feature_keys=tuple(data.get("feature_keys", ())),
+        built_at=datetime.fromisoformat(built_at) if built_at else None,
+        class_labels=tuple(data.get("class_labels", ())),
+    )
+
+
+def dataset_to_domain(model: DatasetModel) -> Dataset:
+    return Dataset(
+        id=DatasetId(model.id),
+        market_id=MarketId(model.market_id),
+        version=model.version,
+        content_hash=model.content_hash,
+        samples=[_training_sample_from_dict(s) for s in (model.samples or [])],
+        statistics=_dataset_statistics_from_dict(model.statistics or {}),
+        lineage=_dataset_lineage_from_dict(model.lineage or {}, fallback_market_id=model.market_id),
+        quality_issues=tuple(DatasetQualityIssue(v) for v in (model.quality_issues or [])),
+        status=DatasetStatus(model.status),
+        created_at=model.created_at,
+        approved_by=model.approved_by,
+        approved_at=model.approved_at,
+    )
+
+
+def dataset_to_model(entity: Dataset, model: DatasetModel | None = None) -> DatasetModel:
+    model = model or DatasetModel(id=entity.id.value)
+    model.market_id = entity.market_id.value
+    model.version = entity.version
+    model.content_hash = entity.content_hash
+    model.samples = [_training_sample_to_dict(s) for s in entity.samples]
+    model.statistics = _dataset_statistics_to_dict(entity.statistics)
+    model.lineage = _dataset_lineage_to_dict(entity.lineage)
+    model.quality_issues = [issue.value for issue in entity.quality_issues]
+    model.status = entity.status.value
+    model.created_at = entity.created_at
+    model.approved_by = entity.approved_by
+    model.approved_at = entity.approved_at
     return model

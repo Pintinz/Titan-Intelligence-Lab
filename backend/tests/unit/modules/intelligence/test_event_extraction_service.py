@@ -78,7 +78,15 @@ async def test_extract_and_record_returns_empty_for_no_events(combined_session):
     assert recorded == []
 
 
-async def test_extract_and_record_merges_resolved_kg_refs_into_affected_entities(combined_session):
+async def test_extract_and_record_keeps_affected_entity_refs_resolved_only(combined_session):
+    """Milestone 9 fix: `affected_entity_refs` must never leak an unresolved provider-side entity
+    mention (e.g. MockGeminiAdapter.extract_events's literal "mock_player"/"mock_team" tags,
+    which come from a separate NLP call than entity resolution and were never actually resolved
+    against the Knowledge Graph) — only genuinely KG-resolved refs belong there. `resolved_entities`
+    is the new status-aware field, populated exclusively from `EntityExtractionService.extract_and_link`
+    (real NER + alias resolution), independent of `extract_events`'s raw entity tags."""
+    from modules.intelligence.domain.value_objects import EntityResolutionStatus
+
     service, population = _service(combined_session)
     await population.upsert_node(NodeType.TEAM, "man_city", now=T0, aliases=["Manchester City"])
     await combined_session.commit()
@@ -90,9 +98,17 @@ async def test_extract_and_record_merges_resolved_kg_refs_into_affected_entities
     await combined_session.commit()
 
     transfer_event = next(e for e in recorded if e.event_type == NewsEventType.TRANSFER)
-    # the raw mock entities ("mock_player","mock_team") plus the resolved Manchester City node id
-    assert "mock_player" in transfer_event.affected_entity_refs
-    assert any(ref not in ("mock_player", "mock_team", "Manchester City") for ref in transfer_event.affected_entity_refs)
+    # The raw, never-KG-resolved mock entity tags must NOT appear anywhere on the event — they
+    # never enter the resolution pipeline at all now, not even as UNRESOLVED.
+    assert "mock_player" not in transfer_event.affected_entity_refs
+    assert "mock_team" not in transfer_event.affected_entity_refs
+    assert all(e.ref not in ("mock_player", "mock_team") for e in transfer_event.resolved_entities)
+
+    # The real NER hit ("Manchester City", resolved via alias) is the only entry, and it's RESOLVED.
+    assert len(transfer_event.resolved_entities) == 1
+    resolved_entity = transfer_event.resolved_entities[0]
+    assert resolved_entity.status is EntityResolutionStatus.RESOLVED
+    assert transfer_event.affected_entity_refs == (resolved_entity.ref,)
 
 
 async def test_extract_and_record_skips_unrecognized_event_type(combined_session):

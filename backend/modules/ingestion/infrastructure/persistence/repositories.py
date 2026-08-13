@@ -159,7 +159,17 @@ class SqlAlchemyProviderRefIndexRepository:
             ProviderRefIndexModel.entity_kind == entity_kind.value,
         )
         model = (await self.session.execute(stmt)).scalar_one_or_none()
-        return model.entity_id if model else None
+        if model is None:
+            return None
+        # Milestone 4: this is the read path `EntityReconciliationService._resolve()` actually
+        # calls in production — it previously returned `model.entity_id` raw, skipping the same
+        # `_canonical_entity_id` normalization `upsert()`/`ref_index_to_domain()` already apply.
+        # Harmless for any consumer that only re-parses the value through `uuid.UUID()` (hyphen-
+        # agnostic), but `_notify_fixture_status_change`'s favorite-team alert lookup compares
+        # this return value as a *string* against `WatchlistEntry.entity_ref` (always hyphenated)
+        # — a legacy hex-stored row would silently fail that comparison. Routed through the same
+        # mapper function so both read paths agree.
+        return mappers.ref_index_to_domain(model).entity_id
 
     async def upsert(self, entry: ProviderRefIndexEntry) -> ProviderRefIndexEntry:
         stmt = select(ProviderRefIndexModel).where(

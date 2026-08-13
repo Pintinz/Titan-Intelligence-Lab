@@ -125,6 +125,21 @@ class ModelDefinition:
     artifact_ref: str | None = None  # ModelArtifactStorePort ref for the serialized PredictionModelPort payload
     deployment_mode: str | None = None  # "shadow" | "canary" | "live" | None — finer-grained than `status`
     trained_at: datetime | None = None  # when fit() actually ran, distinct from `created_at` (registration time)
+    # Milestone 4 provenance foundation — "PROVENANCE_VERIFIED" | "PROVENANCE_UNVERIFIED".
+    provenance_status: str = "PROVENANCE_UNVERIFIED"
+
+    def is_genuinely_trained(self) -> bool:
+        """Milestone 4 status honesty (Rule 13): a handful of markets (e.g.
+        `football.first_half_winner`) only have a placeholder Champion — model_key like
+        "*.heuristic_logistic", `algorithm="heuristic_logistic_v1"`, `artifact_ref=None`,
+        `trained_at=None` — registered solely to unblock `PredictionContextBuilder` (which raises
+        `NoChampionModelError` only when a market has *no* Champion at all) rather than a genuinely
+        fit-and-validated model. `artifact_ref is not None` is the existing, already-load-bearing
+        signal for "was this actually trained": `PredictionEngine._resolve_predictor` already
+        requires it before using a trained model instead of falling back to the generic formula
+        predictor. Reused here rather than adding a new field, since it already partitions the 19
+        current football Champions into exactly the real 14 vs. the placeholder 5."""
+        return self.artifact_ref is not None
 
 
 @dataclass

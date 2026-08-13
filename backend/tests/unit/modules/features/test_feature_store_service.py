@@ -208,3 +208,111 @@ def _write_value_stub():
         as_of=T0,
         value=0.5,
     )
+
+
+class TestPointInTimeLeakagePrevention:
+    """Milestone 4 item 11 — the 7 named leakage-prevention scenarios (A-G), exercised against
+    `FeatureStoreService.read_as_of()`: the real production entry point for point-in-time reads
+    (backtesting, training-dataset assembly, reconstructing what a past prediction should have
+    seen). `read_as_of` deliberately bypasses `online` (see its own docstring — the cache has no
+    as-of dimension), so these tests go through `service.read_as_of`, not a raw repository call,
+    to prove the actual served path is leak-safe, not just the repository underneath it.
+
+    All 7 scenarios reduce to one real mechanism — `FeatureValueModel.as_of <= cutoff` filtering
+    — since `as_of` is the Feature Store schema's only temporal-validity dimension today (it's
+    NOT NULL, so "unknown timestamp" cannot literally occur in this table; see test C's docstring
+    for where that concept actually lives instead). Naming each scenario after the milestone
+    spec's own vocabulary (kickoff/post-match/future-fixture/versioned/late-ingested) rather than
+    collapsing them into one generic test, so a future regression in any one of these framings is
+    caught and named accurately, even though today they share one code path."""
+
+    KICKOFF = T0 + timedelta(hours=2)
+
+    @pytest.mark.asyncio
+    async def test_a_pre_kickoff_value_is_included(self, service, definition_repo):
+        await definition_repo.upsert(_definition())
+        await service.write("football.team.possession_pct", EntityType.TEAM, "team-1", 0.55, T0)
+
+        read = await service.read_as_of("football.team.possession_pct", EntityType.TEAM, "team-1", self.KICKOFF)
+
+        assert read is not None
+        assert read.value == pytest.approx(0.55)
+
+    @pytest.mark.asyncio
+    async def test_b_post_kickoff_value_is_excluded(self, service, definition_repo):
+        await definition_repo.upsert(_definition())
+        await service.write("football.team.possession_pct", EntityType.TEAM, "team-1", 0.61, self.KICKOFF + timedelta(minutes=45))
+
+        read = await service.read_as_of("football.team.possession_pct", EntityType.TEAM, "team-1", self.KICKOFF)
+
+        assert read is None
+
+    async def test_c_unknown_timestamp_has_no_representation_in_the_feature_store(self):
+        """`FeatureValueModel.as_of` is `Mapped[datetime]` (NOT NULL) — a Feature Store value
+        genuinely cannot exist without a timestamp, so "unknown-timestamp excluded by default"
+        isn't a Feature Store behavior to test here. The real analogue lives in the *structured*
+        intelligence domain (injuries/transfers/lineups), where `availability_classification`
+        defaults to `UNKNOWN_AVAILABILITY_TIME` for exactly this reason — covered by
+        tests/unit/modules/ingestion/test_entity_reconciliation_service.py's injury/transfer
+        reconciliation tests and confirmed for every existing dev.db row in the Milestone 4
+        verification report. Documented here (not skipped silently) so this scenario's absence
+        from the Feature Store suite is a deliberate, explained finding, not an oversight."""
+
+    @pytest.mark.asyncio
+    async def test_d_post_match_stat_value_is_excluded_at_a_pre_match_cutoff(self, service, definition_repo):
+        """Same mechanism as scenario B, named for the milestone spec's own "post-match stats"
+        framing: a full-time statistic (e.g. final possession %) written with `as_of=full_time`
+        must not leak into a prediction context built at kickoff."""
+        await definition_repo.upsert(_definition())
+        full_time = self.KICKOFF + timedelta(minutes=95)
+        await service.write("football.team.possession_pct", EntityType.TEAM, "team-1", 0.58, full_time)
+
+        read = await service.read_as_of("football.team.possession_pct", EntityType.TEAM, "team-1", self.KICKOFF)
+
+        assert read is None
+
+    @pytest.mark.asyncio
+    async def test_e_future_fixture_has_no_stats_available_at_an_earlier_cutoff(self, service, definition_repo):
+        """A fixture that hasn't happened yet has no feature values with `as_of` at or before the
+        query cutoff at all — `read_as_of` must return None outright, not a stale/wrong value."""
+        await definition_repo.upsert(_definition())
+        far_future_match = self.KICKOFF + timedelta(days=30)
+        await service.write("football.team.possession_pct", EntityType.TEAM, "team-1", 0.5, far_future_match)
+
+        read = await service.read_as_of("football.team.possession_pct", EntityType.TEAM, "team-1", self.KICKOFF)
+
+        assert read is None
+
+    @pytest.mark.asyncio
+    async def test_f_versioned_historical_retrieval_returns_the_value_true_at_that_cutoff(self, service, definition_repo):
+        """Multiple `as_of` versions exist for the same entity/feature (form index recomputed
+        after each fixture) — `read_as_of` at a mid-history cutoff must return the version that
+        was current *then*, not the latest version overall (which would leak future recomputation
+        into a historical reconstruction) and not the oldest (which would understate what was
+        actually known by that point)."""
+        await definition_repo.upsert(_definition())
+        await service.write("football.team.possession_pct", EntityType.TEAM, "team-1", 0.40, T0)
+        mid_cutoff = T0 + timedelta(days=10)
+        await service.write("football.team.possession_pct", EntityType.TEAM, "team-1", 0.45, mid_cutoff)
+        await service.write("football.team.possession_pct", EntityType.TEAM, "team-1", 0.70, mid_cutoff + timedelta(days=20))
+
+        read = await service.read_as_of("football.team.possession_pct", EntityType.TEAM, "team-1", mid_cutoff + timedelta(days=1))
+
+        assert read.value == pytest.approx(0.45)
+
+    @pytest.mark.asyncio
+    async def test_g_late_ingested_value_with_an_early_as_of_is_still_included(self, service, definition_repo, value_repo):
+        """Ingestion order must never substitute for temporal validity: a value whose *real-world*
+        `as_of` predates the cutoff is included even if it was the last one written to the store
+        (e.g. a delayed sync catching up on older data) — proving `read_as_of` filters strictly by
+        `as_of`, never by insertion order or `list`/row position."""
+        await definition_repo.upsert(_definition())
+        # Write the *later* real-world value first, then backfill an *earlier* one — insertion
+        # order is the reverse of chronological order, and the query result must not care.
+        await service.write("football.team.possession_pct", EntityType.TEAM, "team-1", 0.65, T0 + timedelta(days=5))
+        await service.write("football.team.possession_pct", EntityType.TEAM, "team-1", 0.50, T0)
+        assert value_repo.store[-1].as_of == T0  # sanity: the early value really was written last
+
+        read = await service.read_as_of("football.team.possession_pct", EntityType.TEAM, "team-1", T0 + timedelta(hours=1))
+
+        assert read.value == pytest.approx(0.50)

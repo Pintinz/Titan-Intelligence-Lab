@@ -376,6 +376,18 @@ class SqlAlchemyLineupRepository:
         await self.session.flush()
         return mappers.lineup_to_domain(model)
 
+    async def list_recent_by_team(self, team_id: TeamId, before: datetime, limit: int = 10) -> list[Lineup]:
+        stmt = (
+            select(LineupModel)
+            .join(MatchModel, MatchModel.id == LineupModel.match_id)
+            .join(FixtureModel, FixtureModel.id == MatchModel.fixture_id)
+            .where(LineupModel.team_id == team_id.value, FixtureModel.scheduled_at < before)
+            .order_by(FixtureModel.scheduled_at.desc())
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return [mappers.lineup_to_domain(row) for row in result.scalars().all()]
+
 
 @dataclass
 class SqlAlchemyInjuryRepository:

@@ -267,6 +267,18 @@ class Lineup:
     slots: tuple[LineupSlot, ...] = field(default_factory=tuple)
     version: int = 1
     provider_refs: tuple[ProviderRef, ...] = field(default_factory=tuple)
+    availability_classification: str = "UNKNOWN_AVAILABILITY_TIME"
+    information_available_at: datetime | None = None
+    # Milestone 5 (Verified Pre-Match Data Availability) — when the provider response was
+    # retrieved, recorded unconditionally on every successful fetch regardless of provenance
+    # (distinct from `information_available_at`, populated only when the fetch also satisfies
+    # the pre-match provenance rule — see modules.ingestion.application.provenance).
+    fetched_at: datetime | None = None
+    # Traceability to the exact SyncRun that produced this record (Milestone 5 §11 — "why does
+    # TitanIQ believe this was available before kickoff must be reconstructable from stored
+    # provenance"). Stored as a plain str (SyncRunId.value) to avoid a domain-layer dependency
+    # from modules.sports on modules.ingestion's value objects.
+    sync_run_id: str | None = None
 
     def starters(self) -> tuple[LineupSlot, ...]:
         return tuple(s for s in self.slots if s.role is LineupRole.STARTER)
@@ -291,6 +303,14 @@ class Injury:
     source_ref: ProviderRef | None = None
     version: int = 1
     provider_refs: tuple[ProviderRef, ...] = field(default_factory=tuple)
+    # Milestone 4 provenance foundation — see InjuryModel's docstring (persistence/models.py)
+    # for why `reported_at` above must never be treated as proof this was known pre-kickoff.
+    # "VERIFIED_PRE_MATCH" | "VERIFIED_POST_MATCH" | "UNKNOWN_AVAILABILITY_TIME"; defaults
+    # honestly to unknown, never auto-classified as pre-match.
+    availability_classification: str = "UNKNOWN_AVAILABILITY_TIME"
+    information_available_at: datetime | None = None
+    fetched_at: datetime | None = None
+    sync_run_id: str | None = None
 
 
 @dataclass
@@ -300,6 +320,10 @@ class Suspension:
     reason: str
     start_date: datetime
     end_date: datetime | None = None
+    availability_classification: str = "UNKNOWN_AVAILABILITY_TIME"
+    information_available_at: datetime | None = None
+    fetched_at: datetime | None = None
+    sync_run_id: str | None = None
 
 
 @dataclass
@@ -317,6 +341,10 @@ class Transfer:
     transfer_type: str | None = None
     version: int = 1
     provider_refs: tuple[ProviderRef, ...] = field(default_factory=tuple)
+    availability_classification: str = "UNKNOWN_AVAILABILITY_TIME"
+    information_available_at: datetime | None = None
+    fetched_at: datetime | None = None
+    sync_run_id: str | None = None
 
 
 @dataclass

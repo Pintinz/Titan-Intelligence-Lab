@@ -31,6 +31,23 @@ SCHEDULED_RETRAINING_CHECK_INTERVAL_SECONDS = 6 * 3600
 # to retraining — an hourly cadence (matching STANDINGS_INTERVAL_SECONDS) keeps calibrated
 # confidence tracking newly-completed fixtures promptly without the training-pipeline cost.
 SCHEDULED_CALIBRATION_CHECK_INTERVAL_SECONDS = 3600
+# Milestone 5 (Verified Pre-Match Data Availability) — matches PROVIDER_POLL_INTERVAL_SECONDS's
+# free-tier-safe cadence (same 10 req/min budget every other football-data.org-class entry
+# respects). At 15 minutes, a fixture's LINEUP_PREMATCH_WINDOW_MINUTES (default 90) is checked
+# roughly 6 times before it closes — several real chances to catch official lineups once the
+# provider actually publishes them, without polling aggressively enough to burn quota on fixtures
+# that are still hours from kickoff. Injuries/transfers ride the same schedule (Milestone 5 §1
+# scopes them to "fixtures within the relevant prediction window," not a separate cadence) —
+# splitting them onto their own interval would add a second config knob for no real behavioral
+# gain, since `sync_upcoming_structured_intelligence` already dedupes team-level syncs per run.
+STRUCTURED_INTEL_INTERVAL_SECONDS = 900
+# Milestone 10 — the scheduled news sync task's own interval, matching
+# `modules.intelligence.application.news_sync_config.NEWS_SYNC_INTERVAL_SECONDS`'s default (900s).
+# Defined locally rather than imported, same posture this file already takes for
+# SCHEDULED_RETRAINING_CHECK_INTERVAL_SECONDS/SCHEDULED_CALIBRATION_CHECK_INTERVAL_SECONDS below
+# (both predictions-owned tasks, neither constant imported from modules.predictions either) — this
+# module is the one place every Beat interval lives, regardless of which module's task it drives.
+NEWS_SYNC_SCHEDULE_INTERVAL_SECONDS = 900
 
 
 def compute_adaptive_interval(base_interval_seconds: int, quota_remaining_pct: float) -> int:
@@ -148,5 +165,30 @@ BEAT_SCHEDULE = {
     "check-scheduled-calibration": {
         "task": "predictions.check_scheduled_calibration",
         "schedule": timedelta(seconds=SCHEDULED_CALIBRATION_CHECK_INTERVAL_SECONDS),
+    },
+    # Milestone 5 — the only real caller of `SyncOrchestrator.sync_upcoming_structured_intelligence`,
+    # and therefore the only path that can ever produce `SyncTrigger.LIVE_SCHEDULED` (see that
+    # task's own docstring). Football/EPL only: injuries/transfers/lineups reconciliation exists
+    # today only for football (docs/milestone3_historical_data_audit.md), matching every other
+    # sport-scoped entry above. season_id is EPL's real, already-configured value (same one
+    # "sync-standings-football-epl"/"sync-live-fixtures-football-epl" already use).
+    "sync-upcoming-structured-intelligence-football-epl": {
+        "task": "ingestion.sync_upcoming_structured_intelligence",
+        "schedule": timedelta(seconds=STRUCTURED_INTEL_INTERVAL_SECONDS),
+        "args": ("football", "21521495-4dd4-4c50-a41d-d88642322804"),
+    },
+    # Milestone 10 — the scheduled news sync entry point. Always registered (Beat's schedule is
+    # evaluated once at worker startup, so a runtime env-var toggle can't be expressed by
+    # conditionally omitting this dict entry) — the task itself checks
+    # `news_sync_config.NEWS_SYNC_ENABLED` first and no-ops (no provider call, no Gemini call)
+    # whenever it's False, which it always defaults to. Same EPL season_id every other football
+    # entry above already uses. `NEWS_SYNC_INTERVAL_SECONDS` (default 900s) is intelligence's own
+    # config constant, not one of the ingestion-module intervals above — read here only for the
+    # schedule's own interval value, matching this module's already-established local-duplication
+    # posture for anything intelligence-owned.
+    "sync-scheduled-news-football-epl": {
+        "task": "intelligence.sync_scheduled_news",
+        "schedule": timedelta(seconds=NEWS_SYNC_SCHEDULE_INTERVAL_SECONDS),
+        "args": ("football", "21521495-4dd4-4c50-a41d-d88642322804"),
     },
 }

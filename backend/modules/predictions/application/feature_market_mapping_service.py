@@ -29,6 +29,12 @@ class FeatureNotApprovedError(ValueError):
     pass
 
 
+class FeatureLeakageRiskError(ValueError):
+    """Milestone 4 Rule 8: a feature classified POST_MATCH_ONLY must never enter a market's
+    live prediction/training feature set — raised before the mapping is ever created, not
+    caught later at training time."""
+
+
 class MappingAlreadyExistsError(ValueError):
     pass
 
@@ -63,6 +69,11 @@ class FeatureMarketMappingService:
         if definition is None or not definition.is_consumable():
             raise FeatureNotApprovedError(
                 f"feature '{feature_key}' is not an ACTIVE registered feature — cannot map it to a market"
+            )
+        if not definition.is_market_safe():
+            raise FeatureLeakageRiskError(
+                f"feature '{feature_key}' is classified {definition.leakage_classification} — "
+                "POST_MATCH_ONLY features can never back a prediction/training feature set"
             )
 
         existing = await self.mappings.list_by_market(market.id)

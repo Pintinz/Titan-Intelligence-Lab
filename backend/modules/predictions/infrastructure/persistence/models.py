@@ -89,6 +89,12 @@ class ModelDefinitionModel(Base):
     feature_importance_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
     artifact_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
     deployment_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Milestone 4 provenance foundation (docs/milestone4_verification_report.md) — "PROVENANCE_
+    # VERIFIED" | "PROVENANCE_UNVERIFIED". Defaults every existing and future row to unverified;
+    # a model earns PROVENANCE_VERIFIED only after an explicit trace (dataset -> feature version
+    # -> training run -> model) confirms its training data's point-in-time provenance. Never
+    # silently upgraded — see scripts/trace_football_champion_provenance.py.
+    provenance_status: Mapped[str] = mapped_column(String(24), default="PROVENANCE_UNVERIFIED")
     trained_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
@@ -155,8 +161,8 @@ class PredictionAuditModel(Base):
     actor: Mapped[str] = mapped_column(String(200))
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     prediction_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("predictions.id"), nullable=True, index=True)
-    market_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("prediction_markets.id"), nullable=True)
-    model_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("models.id"), nullable=True)
+    market_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("prediction_markets.id"), nullable=True, index=True)
+    model_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("models.id"), nullable=True, index=True)
     details: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
