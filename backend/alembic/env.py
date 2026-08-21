@@ -9,7 +9,7 @@ import asyncio
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import pool
+from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
@@ -42,6 +42,18 @@ def run_migrations_offline() -> None:
 
 
 def _do_run_migrations(connection: Connection) -> None:
+    # Bootstrap gap found running this against a genuinely fresh Postgres for the first time
+    # (2026-08-21): Alembic creates its own `version_table_schema` bookkeeping table BEFORE
+    # invoking any real migration — including 0001, the one that would otherwise create this
+    # schema. On a brand-new database with no schemas at all, that's a chicken-and-egg failure
+    # (`InvalidSchemaNameError: schema "sports" does not exist`) no migration script can fix,
+    # since none of them get a chance to run first. `alembic_version` staying inside `sports`
+    # (not `public`) is deliberate — see 0010_row_level_security.py's RLS coverage and
+    # tests/integration/test_database.py's own assertion — so the fix is ensuring the schema
+    # exists here, before Alembic's bootstrap, not relocating the table.
+    if connection.dialect.name == "postgresql":
+        connection.execute(text("CREATE SCHEMA IF NOT EXISTS sports"))
+
     context.configure(
         connection=connection,
         target_metadata=target_metadata,
@@ -57,7 +69,15 @@ async def run_migrations_online() -> None:
     configuration["sqlalchemy.url"] = get_url()
     connectable = async_engine_from_config(configuration, prefix="sqlalchemy.", poolclass=pool.NullPool)
 
-    async with connectable.connect() as connection:
+    # `.connect()` (not `.begin()`) does NOT commit on a clean async context-manager exit — found
+    # live (2026-08-22) running this against real Postgres for the first time: every migration
+    # logged as successful, the process exited 0, and yet nothing was ever actually persisted
+    # (re-querying the database afterward showed the schema completely unchanged). `.begin()`
+    # commits automatically on success and rolls back on exception, which is what this needs —
+    # Alembic's own `context.begin_transaction()` manages a transaction *within* this connection's
+    # scope, but someone still has to commit the connection's own transaction at the end, and
+    # nothing here ever did.
+    async with connectable.begin() as connection:
         await connection.run_sync(_do_run_migrations)
 
     await connectable.dispose()
