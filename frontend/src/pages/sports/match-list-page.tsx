@@ -2,9 +2,9 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { CalendarX, CalendarClock } from 'lucide-react'
-import { sportsApi, SPORT_OPTIONS, type SportCode } from '@/lib/api/sports'
+import { sportsApi, type SportCode } from '@/lib/api/sports'
 import { marketsApi } from '@/lib/api/markets'
-import { useSportParam } from '@/lib/hooks/use-sport'
+import { useAvailableSports, useSportParam } from '@/lib/hooks/use-sport'
 import { useWatchlist } from '@/lib/hooks/use-watchlist'
 import { fixtureScores } from '@/lib/sports-status'
 import { todayRange, tomorrowRange, thisWeekRange } from '@/lib/sports-date-ranges'
@@ -28,6 +28,7 @@ const SECTIONS: Array<{ scope: MatchesScope; title: string; range: { from: strin
 
 export default function MatchListPage() {
   const sport = useSportParam()
+  const availableSports = useAvailableSports()
   const navigate = useNavigate()
   const watchlist = useWatchlist()
   const [search, setSearch] = useState('')
@@ -129,7 +130,7 @@ export default function MatchListPage() {
       />
 
       <div className="flex flex-wrap gap-1.5">
-        {SPORT_OPTIONS.map((opt) => (
+        {availableSports.map((opt) => (
           <button
             key={opt.code}
             type="button"

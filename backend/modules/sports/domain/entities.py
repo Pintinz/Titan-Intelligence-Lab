@@ -22,6 +22,8 @@ from modules.sports.domain.value_objects import (
     FixtureStatus,
     LineupId,
     LineupRole,
+    MarketLineId,
+    MarketLineType,
     MatchId,
     PlayerId,
     ProviderRef,
@@ -229,6 +231,41 @@ class PlayerStatistics:
     match_id: MatchId
     player_id: PlayerId
     stat_set: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class MarketLine:
+    """POST-M24 Phase 6 — one real, provider-independent sportsbook quote for one fixture.
+
+    Canonical, not provider-specific: a bookmaker's raw bet name/shape is normalized into
+    `market_type`/`selection`/`line`/`price` at the adapter boundary (see `provider_gateway
+    .ProviderMarketLineRecord`) before it ever reaches this entity — no `ApiBasketballOdds` or
+    `ApiBaseballOdds` subtype exists, per the phase's explicit "provider-specific data belongs
+    behind adapters" rule.
+
+    `line` is `None` for `MarketLineType.MONEYLINE` (price-only, no point/run adjustment) and a
+    real number for SPREAD/TOTAL/TEAM_TOTAL. `observed_at` is the bookmaker's own quote
+    timestamp when the provider genuinely supplies one; `fetched_at` is always TitanIQ's own
+    retrieval time and is never substituted for `observed_at` when the provider's timestamp is
+    missing — a `None` `observed_at` means "temporal provenance unknown," not "just now."
+    """
+
+    id: MarketLineId
+    fixture_id: FixtureId
+    sport_code: str
+    provider: str
+    bookmaker: str
+    market_type: MarketLineType
+    selection: str
+    line: float | None
+    price: float
+    fetched_at: datetime
+    observed_at: datetime | None = None
+    # Which side this line is quoted for — meaningful (and required to resolve) only for
+    # TEAM_TOTAL, whose real shape is two independent OVER/UNDER markets, one per team; `None`
+    # for MONEYLINE/SPREAD/TOTAL, whose `selection` alone is already unambiguous.
+    team_side: str | None = None
+    version: int = 1
 
 
 @dataclass

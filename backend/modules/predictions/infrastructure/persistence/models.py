@@ -130,6 +130,68 @@ class PredictionOutcomeModel(Base):
     actual_value: Mapped[str] = mapped_column(String(200))
     error: Mapped[float | None] = mapped_column(Float, nullable=True)
     evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    raw_home_goals: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    raw_away_goals: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class PredictionContextReviewModel(Base):
+    """Gemini Prediction Reasoning Engine — one persisted `ContextualReview` per prediction
+    (`unique=True` on `prediction_id`: a fresh `review()` call overwrites the prior row for the
+    same prediction rather than accumulating history, matching this being a "current assessment"
+    concept, not an append-only audit log like `PredictionAuditModel`)."""
+
+    __tablename__ = "prediction_context_reviews"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    prediction_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("predictions.id"), unique=True, index=True)
+    market_key: Mapped[str] = mapped_column(String(200), index=True)
+    base_selection: Mapped[str] = mapped_column(String(200))
+    base_probability: Mapped[float] = mapped_column(Float)
+    model_version: Mapped[str] = mapped_column(String(32))
+    statistical_baseline: Mapped[dict] = mapped_column(JSON, default=dict)
+    review_status: Mapped[str] = mapped_column(String(32))
+    overall_assessment: Mapped[str] = mapped_column(Text, default="")
+    contextual_assessment: Mapped[dict] = mapped_column(JSON, default=dict)
+    supporting_factors: Mapped[list] = mapped_column(JSON, default=list)
+    risk_factors: Mapped[list] = mapped_column(JSON, default=list)
+    missing_context: Mapped[list] = mapped_column(JSON, default=list)
+    reconsideration_direction: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    reconsideration_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    material_change: Mapped[bool] = mapped_column(Boolean, default=False)
+    context_confidence_level: Mapped[str] = mapped_column(String(16))
+    context_confidence_score: Mapped[float] = mapped_column(Float)
+    evidence_quality: Mapped[dict] = mapped_column(JSON, default=dict)
+    source_ids: Mapped[list] = mapped_column(JSON, default=list)
+    prediction_cutoff: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    prompt_version: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class FootballExplanationModel(Base):
+    """Sports-Analyst Explainability — one persisted `FootballExplanation` per prediction
+    (`unique=True` on `prediction_id`, same "current assessment, overwritten on re-explain"
+    posture as `PredictionContextReviewModel`)."""
+
+    __tablename__ = "prediction_football_explanations"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    prediction_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("predictions.id"), unique=True, index=True)
+    market_key: Mapped[str] = mapped_column(String(200), index=True)
+    status: Mapped[str] = mapped_column(String(32))
+    prediction_value: Mapped[str] = mapped_column(String(200))
+    probability: Mapped[float] = mapped_column(Float)
+    model_algorithm: Mapped[str] = mapped_column(String(64), default="")
+    attribution_method: Mapped[str] = mapped_column(String(32))
+    key_reasons: Mapped[list] = mapped_column(JSON, default=list)
+    counter_signals: Mapped[list] = mapped_column(JSON, default=list)
+    context: Mapped[list] = mapped_column(JSON, default=list)
+    verdict: Mapped[str] = mapped_column(Text, default="")
+    match_profile: Mapped[str] = mapped_column(Text, default="")
+    confidence_explanation: Mapped[str] = mapped_column(Text, default="")
+    bottom_line: Mapped[str] = mapped_column(Text, default="")
+    unavailable_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prompt_version: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ModelEvaluationModel(Base):
@@ -228,6 +290,43 @@ class CalibrationReportModel(Base):
     brier_score: Mapped[float] = mapped_column(Float)
     reliability_curve: Mapped[dict] = mapped_column(JSON, default=dict)
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class CalibrationParametersModel(Base):
+    """Phase 3 audit fix — `PlattScalingCalibrator` was an in-memory-only, per-process singleton:
+    a `fit()` call in one process (e.g. a Celery worker) never reached another process's own
+    calibrator instance (e.g. the API server), silently leaving live inference on the unfitted
+    identity transform. One row per model — the durable store `calibrate()` now reads through on
+    a cache miss, and `fit()` now writes to, so a fit reaches every process regardless of which
+    one ran it."""
+
+    __tablename__ = "calibration_parameters"
+
+    model_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("models.id"), primary_key=True)
+    a: Mapped[float] = mapped_column(Float, default=1.0)
+    b: Mapped[float] = mapped_column(Float, default=0.0)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    fitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ChallengerEvaluationModel(Base):
+    """Continuous Outcome Learning Engine — one row per `ChallengerEvaluationService.evaluate()`
+    call. Phase 3 audit finding: this record previously lived only in
+    `InMemoryModelComparisonRepository`, wiped on every worker restart, unlike every other
+    experiment/comparison artifact in this schema — this table closes that gap."""
+
+    __tablename__ = "challenger_evaluations"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    market_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("prediction_markets.id"), index=True)
+    challenger_model_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("models.id"))
+    champion_model_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("models.id"), nullable=True)
+    challenger_metrics: Mapped[dict] = mapped_column(JSON, default=dict)
+    champion_metrics: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    verdict: Mapped[str] = mapped_column(String(32))
+    decisive_metric: Mapped[str] = mapped_column(String(64))
+    holdout_sample_count: Mapped[int] = mapped_column(Integer)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class FeatureImportanceReportModel(Base):

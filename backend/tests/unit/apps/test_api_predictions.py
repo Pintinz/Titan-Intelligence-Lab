@@ -3,11 +3,15 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
+import fakeredis
 import pytest
 import pytest_asyncio
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+import apps.api.composition as composition
+import apps.api.main as main_module
 from apps.api.composition import get_jwt_validator, get_session
 from apps.api.main import app
 from modules.features.domain.entities import FeatureDefinition, FeatureValue
@@ -70,11 +74,29 @@ async def db_session_factory():
 
 
 @pytest.fixture
-def client(db_session_factory):
+def client(db_session_factory, monkeypatch):
     async def override_get_session():
         async with db_session_factory() as session:
             yield session
             await session.commit()
+
+    # Same pattern as test_api_ingestion.py's `client` fixture: generating/reading a prediction
+    # goes through build_prediction_cache_service -> build_prediction_engine ->
+    # build_explainability_engine -> get_redis_sync_cache() -> get_redis_client(), and that
+    # function is @lru_cache'd process-wide — without clearing + patching it here, whichever test
+    # in the whole session happens to run first determines whether every other test gets a real
+    # (missing-env-var) failure or a stale cached client, regardless of what this test itself does.
+    from modules.admin.infrastructure.vault import get_vault_settings
+
+    fake_client = fakeredis.FakeAsyncRedis(decode_responses=True)
+    composition.get_redis_client.cache_clear()
+    composition.get_redis_lock.cache_clear()
+    composition.get_redis_sync_cache.cache_clear()
+    monkeypatch.setattr(composition, "get_redis_client", lambda: fake_client)
+    monkeypatch.setattr(main_module, "get_redis_client", lambda: fake_client)
+
+    monkeypatch.setenv("TITANIQ_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    get_vault_settings.cache_clear()
 
     app.dependency_overrides[get_session] = override_get_session
     app.dependency_overrides[get_jwt_validator] = lambda: MockJWTValidator()
@@ -297,7 +319,10 @@ def test_generate_prediction_for_untrained_market_returns_insufficient_data(clie
     )
 
     assert response.status_code == 409
-    assert "insufficient historical data" in response.json()["detail"].lower()
+    detail = response.json()["detail"]
+    assert detail["prediction_status"] == "BLOCKED"
+    assert detail["reason_code"] == "NO_CHAMPION_MODEL"
+    assert "insufficient historical data" in detail["message"].lower()
 
 
 def test_generate_prediction_unknown_market_returns_404(client):
@@ -591,4 +616,142 @@ def test_generate_prediction_missing_required_feature_returns_409_not_500(client
     )
 
     assert response.status_code == 409
-    assert "news.football.home_btts_impact" in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert detail["prediction_status"] == "BLOCKED"
+    assert detail["reason_code"] == "MISSING_REQUIRED_FEATURE"
+    assert "news.football.home_btts_impact" in detail["message"]
+
+
+def test_generate_prediction_omits_contextual_review_key_when_not_requested(client, db_session_factory):
+    """Backward compatibility (Gemini Prediction Reasoning Engine, Part 2g) — every existing
+    caller that never sends `include_contextual_review` must see `contextual_review: null` and
+    nothing else about the response shape change."""
+    headers = _auth_headers(client)
+    import asyncio
+
+    asyncio.run(_seed_production_market(db_session_factory, "football.api_no_review_market", "football.api_no_review_feature"))
+
+    response = client.post(
+        "/api/v1/predictions/generate",
+        json={
+            "market_key": "football.api_no_review_market",
+            "entity_type": "fixture",
+            "entity_id": "fixture-1",
+            "subject_ref": "fixture-1",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["contextual_review"] is None
+
+
+def test_generate_prediction_with_contextual_review_flag_returns_a_review(client, db_session_factory, monkeypatch):
+    """The opt-in flag must never break or degrade the base prediction response — an
+    `INSUFFICIENT_CONTEXT` review (the honest outcome with no real evidence/Gemini credential
+    wired up in this test environment) is still a fully-shaped, non-null `contextual_review`
+    object. `TITANIQ_REDIS_URL` only needs to resolve to a well-formed URL here, not a reachable
+    server — `RedisSyncCache`'s own get/set failures are already caught and degrade to a cache
+    miss inside `ContextualReasoningService.review()`."""
+    monkeypatch.setenv("TITANIQ_REDIS_URL", "redis://localhost:6399/0")
+    from modules.features.infrastructure.online.redis_feature_store import get_redis_settings
+
+    get_redis_settings.cache_clear()
+    headers = _auth_headers(client)
+    import asyncio
+
+    asyncio.run(
+        _seed_production_market(db_session_factory, "football.api_with_review_market", "football.api_with_review_feature")
+    )
+
+    response = client.post(
+        "/api/v1/predictions/generate",
+        json={
+            "market_key": "football.api_with_review_market",
+            "entity_type": "fixture",
+            "entity_id": "fixture-1",
+            "subject_ref": "fixture-1",
+            "include_contextual_review": True,
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["probability"] == data["probability"]  # base prediction untouched either way
+    review = data["contextual_review"]
+    assert review is not None
+    assert review["review_status"] in {
+        "SUPPORTED", "WEAKLY_SUPPORTED", "NEUTRAL", "CHALLENGED", "STRONGLY_CHALLENGED", "INSUFFICIENT_CONTEXT",
+    }
+    assert "confidence_score" in review
+    assert "statistical_baseline" in review
+
+
+def test_generate_prediction_contextual_review_failure_never_breaks_base_response(client, db_session_factory, monkeypatch):
+    """Absolute rule: a hard failure anywhere in the contextual-reasoning path must never turn
+    into a 500 or otherwise break the base prediction — `contextual_review` degrades to `None`."""
+    headers = _auth_headers(client)
+    import asyncio
+
+    from apps.api.routers import prediction_router
+
+    def _broken_service(session):
+        raise RuntimeError("simulated contextual reasoning wiring failure")
+
+    monkeypatch.setattr(prediction_router, "build_contextual_reasoning_service", _broken_service)
+
+    asyncio.run(
+        _seed_production_market(db_session_factory, "football.api_broken_review_market", "football.api_broken_review_feature")
+    )
+
+    response = client.post(
+        "/api/v1/predictions/generate",
+        json={
+            "market_key": "football.api_broken_review_market",
+            "entity_type": "fixture",
+            "entity_id": "fixture-1",
+            "subject_ref": "fixture-1",
+            "include_contextual_review": True,
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["status"] == "published"
+    assert data["contextual_review"] is None
+
+
+def test_generate_prediction_football_explanation_carries_model_and_prediction_identity(client, db_session_factory):
+    """Phase 3 audit fix (spec §17 "every attribution must include ... model ID, model version,
+    prediction ID") — `football_explanation` previously omitted all three even though the base
+    prediction response carries them; they must now be present and match the base prediction's
+    own `model_id`/`model_version`/`id` exactly (same fixed prediction, not a different one)."""
+    headers = _auth_headers(client)
+    import asyncio
+
+    asyncio.run(
+        _seed_production_market(db_session_factory, "football.api_with_explanation_market", "football.api_with_explanation_feature")
+    )
+
+    response = client.post(
+        "/api/v1/predictions/generate",
+        json={
+            "market_key": "football.api_with_explanation_market",
+            "entity_type": "fixture",
+            "entity_id": "fixture-1",
+            "subject_ref": "fixture-1",
+            "include_football_explanation": True,
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    explanation = data["football_explanation"]
+    assert explanation is not None
+    assert explanation["model_id"] == data["model_id"]
+    assert explanation["model_version"] == data["model_version"]
+    assert explanation["prediction_id"] == data["id"]

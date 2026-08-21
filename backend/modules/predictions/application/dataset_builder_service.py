@@ -189,7 +189,14 @@ class DatasetBuilder:
             # Milestone 17 defect's root cause).
             samples.append(
                 TrainingSample(
-                    features=dict(prediction.feature_snapshot), label=label, reference_time=outcome.evaluated_at
+                    features=dict(prediction.feature_snapshot),
+                    label=label,
+                    reference_time=outcome.evaluated_at,
+                    # Statistical-baseline charter, Phase 3 — unconditional copy-through, harmlessly
+                    # None for every market except football's 12 goals/score markets (see
+                    # PredictionOutcome.raw_home_goals/raw_away_goals's own docstring).
+                    raw_home_goals=outcome.raw_home_goals,
+                    raw_away_goals=outcome.raw_away_goals,
                 )
             )
             source_prediction_ids.append(str(prediction.id))

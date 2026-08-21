@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react'
 import { useQueries } from '@tanstack/react-query'
 import { Radio, Star, Trophy } from 'lucide-react'
-import { sportsApi, SPORT_OPTIONS, type SportCode } from '@/lib/api/sports'
-import { SPORT_SLUGS } from '@/lib/hooks/use-sport'
+import { sportsApi, type SportCode } from '@/lib/api/sports'
+import { useAvailableSports } from '@/lib/hooks/use-sport'
 import { useWatchlist } from '@/lib/hooks/use-watchlist'
 import { marketsApi } from '@/lib/api/markets'
 import { fixtureScores } from '@/lib/sports-status'
@@ -32,7 +32,11 @@ export default function LivePage() {
   const [sportFilter, setSportFilter] = useState<SportCode | 'all'>('all')
   const [secondaryFilter, setSecondaryFilter] = useState<SecondaryFilter>('all')
 
-  const activeSports = sportFilter === 'all' ? SPORT_SLUGS : SPORT_SLUGS.filter((s) => s.code === sportFilter)
+  // Basketball/Baseball/Table Tennis are still under development — regular users only see
+  // Football here (both the filter chips below and the underlying queries), matching the same
+  // gate the backend enforces server-side.
+  const availableSports = useAvailableSports()
+  const activeSports = sportFilter === 'all' ? availableSports : availableSports.filter((s) => s.code === sportFilter)
 
   const fixtureQueries = useQueries({
     queries: activeSports.map((sport) => ({
@@ -87,7 +91,7 @@ export default function LivePage() {
           <FilterChip active={sportFilter === 'all'} onClick={() => setSportFilter('all')}>
             All sports
           </FilterChip>
-          {SPORT_OPTIONS.map((opt) => (
+          {availableSports.map((opt) => (
             <FilterChip key={opt.code} active={sportFilter === opt.code} onClick={() => setSportFilter(opt.code)}>
               {opt.label}
             </FilterChip>

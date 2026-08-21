@@ -14,6 +14,7 @@ from modules.predictions.application.model_registry_service import ModelRegistry
 from modules.predictions.application.model_selection_service import AutomaticModelSelectionService
 from modules.predictions.application.scheduled_retraining_orchestrator import (
     MIN_TRAINING_POOL_AFTER_HOLDOUT,
+    POISSON_ELIGIBLE_MARKETS,
     SYSTEM_APPROVER,
     ScheduledRetrainingOrchestrator,
 )
@@ -204,6 +205,96 @@ def orchestrator_with_comparison(market_repo, model_repo, dataset_repo, predicti
     )
 
 
+@dataclass
+class _FakePreflight:
+    """Duck-types `TrainingPreflightService.check()` without needing its real port dependencies
+    (mappings/feature_definitions/dataset_repo) — the orchestrator only ever calls `.check(...)`,
+    so a fake matching that one method is sufficient to test the gating behavior in isolation."""
+
+    ready: bool
+
+    async def check(self, market_key: str, now: datetime):
+        from modules.predictions.application.training_preflight_service import PreflightCheck, TrainingPreflightReport
+
+        checks = (
+            (PreflightCheck("market_exists", True, "ok"),)
+            if self.ready
+            else (PreflightCheck("sufficient_labeled_observations", False, "only 3 labeled observations, need 30"),)
+        )
+        return TrainingPreflightReport(market_key=market_key, ready=self.ready, checks=checks)
+
+
+def _orchestrator_with_preflight(market_repo, model_repo, dataset_repo, prediction_repo, prediction_outcome_repo, preflight):
+    dataset_registry = DatasetRegistryService(datasets=dataset_repo)
+    return ScheduledRetrainingOrchestrator(
+        markets=market_repo,
+        models=model_repo,
+        scheduler=RetrainingScheduler(dataset_registry=dataset_registry),
+        dataset_builder=DatasetBuilder(markets=market_repo, predictions=prediction_repo, outcomes=prediction_outcome_repo),
+        dataset_registry=dataset_registry,
+        model_selection=AutomaticModelSelectionService(
+            training_pipeline=TrainingPipelineService(),
+            model_registry=ModelRegistryService(models=model_repo),
+            experiments=ExperimentTrackingService(experiments=_ExperimentRepoFake()),
+            artifact_store=_InMemoryArtifactStore(),
+        ),
+        preflight=preflight,
+    )
+
+
+class TestScheduledRetrainingOrchestratorPreflight:
+    async def test_failing_preflight_skips_training_without_calling_model_selection(
+        self, market_repo, model_repo, dataset_repo, prediction_repo, prediction_outcome_repo
+    ):
+        market = await market_repo.upsert(_market())
+        await _seed_champion(model_repo, market)
+        await dataset_repo.upsert(_stale_dataset(market.id, T0))
+        await _seed_outcomes(market, prediction_repo, prediction_outcome_repo, n=MIN_TRAINING_POOL_AFTER_HOLDOUT + 20)
+        orchestrator = _orchestrator_with_preflight(
+            market_repo, model_repo, dataset_repo, prediction_repo, prediction_outcome_repo, _FakePreflight(ready=False)
+        )
+
+        outcomes = await orchestrator.run(T0, candidates=FAST_CANDIDATES)
+
+        assert len(outcomes) == 1
+        result = outcomes[0]
+        assert result.challenger is None
+        assert result.skipped_reason is not None
+        assert "preflight failed" in result.skipped_reason
+        assert "sufficient_labeled_observations" in result.skipped_reason
+
+    async def test_passing_preflight_lets_training_proceed(
+        self, market_repo, model_repo, dataset_repo, prediction_repo, prediction_outcome_repo
+    ):
+        market = await market_repo.upsert(_market())
+        await _seed_champion(model_repo, market)
+        await dataset_repo.upsert(_stale_dataset(market.id, T0))
+        await _seed_outcomes(market, prediction_repo, prediction_outcome_repo, n=MIN_TRAINING_POOL_AFTER_HOLDOUT + 20)
+        orchestrator = _orchestrator_with_preflight(
+            market_repo, model_repo, dataset_repo, prediction_repo, prediction_outcome_repo, _FakePreflight(ready=True)
+        )
+
+        outcomes = await orchestrator.run(T0, candidates=FAST_CANDIDATES)
+
+        assert len(outcomes) == 1
+        assert outcomes[0].challenger is not None
+        assert outcomes[0].skipped_reason is None
+
+    async def test_preflight_not_wired_defaults_to_none_and_skips_the_check(
+        self, orchestrator, market_repo, model_repo, dataset_repo, prediction_repo, prediction_outcome_repo
+    ):
+        """The plain `orchestrator` fixture never sets `preflight` — confirms the field truly
+        defaults to `None` and every existing caller is unaffected by this addition."""
+        market = await market_repo.upsert(_market())
+        await _seed_champion(model_repo, market)
+        await dataset_repo.upsert(_stale_dataset(market.id, T0))
+        await _seed_outcomes(market, prediction_repo, prediction_outcome_repo, n=MIN_TRAINING_POOL_AFTER_HOLDOUT + 20)
+
+        outcomes = await orchestrator.run(T0, candidates=FAST_CANDIDATES)
+
+        assert outcomes[0].challenger is not None
+
+
 class TestScheduledRetrainingOrchestrator:
     async def test_stale_market_with_enough_real_outcomes_produces_a_registered_challenger(
         self, orchestrator, market_repo, model_repo, dataset_repo, prediction_repo, prediction_outcome_repo
@@ -352,6 +443,86 @@ class TestScheduledRetrainingOrchestrator:
         assert result.should_retrain is True
         assert result.bootstrapped is True
         assert await model_repo.get_champion(market.id) is not None
+
+
+# -- Statistical-baseline charter: live Poisson candidate wiring (Gemini Reasoning Engine) ------
+
+
+class TestPoissonEligibleMarketWiring:
+    """`POISSON_ELIGIBLE_MARKETS` is the single source of truth both this orchestrator and
+    `StatisticalBaselineProvider` read — a typo in `market_shape`/`line`/`team` here would
+    silently mistrain or silently break live baseline lookups, so its exact contents are
+    verified directly rather than only indirectly through a full training run."""
+
+    def test_covers_exactly_the_twelve_documented_markets(self):
+        assert set(POISSON_ELIGIBLE_MARKETS.keys()) == {
+            "football.total_goals_over_under",
+            "football.total_goals_over_under_0_5",
+            "football.total_goals_over_under_1_5",
+            "football.total_goals_over_under_3_5",
+            "football.total_goals_over_under_4_5",
+            "football.home_team_total_goals",
+            "football.away_team_total_goals",
+            "football.correct_score",
+            "football.home_clean_sheet",
+            "football.away_clean_sheet",
+            "football.home_win_to_nil",
+            "football.away_win_to_nil",
+        }
+
+    def test_every_entry_uses_the_poisson_goals_framework_and_is_marked_baseline(self):
+        for spec in POISSON_ELIGIBLE_MARKETS.values():
+            assert spec.framework is MLFramework.POISSON_GOALS
+            assert spec.algorithm is MLAlgorithm.POISSON_GOALS_MODEL
+            assert spec.is_baseline is True
+
+    def test_total_threshold_markets_carry_the_correct_line(self):
+        expected_lines = {
+            "football.total_goals_over_under": 2.5,
+            "football.total_goals_over_under_0_5": 0.5,
+            "football.total_goals_over_under_1_5": 1.5,
+            "football.total_goals_over_under_3_5": 3.5,
+            "football.total_goals_over_under_4_5": 4.5,
+        }
+        for market_key, line in expected_lines.items():
+            spec = POISSON_ELIGIBLE_MARKETS[market_key]
+            assert spec.params["market_shape"] == "total_threshold"
+            assert spec.params["line"] == line
+
+    def test_team_scoped_markets_carry_the_correct_team(self):
+        expected_team = {
+            "football.home_team_total_goals": "home",
+            "football.away_team_total_goals": "away",
+            "football.home_clean_sheet": "home",
+            "football.away_clean_sheet": "away",
+            "football.home_win_to_nil": "home",
+            "football.away_win_to_nil": "away",
+        }
+        for market_key, team in expected_team.items():
+            assert POISSON_ELIGIBLE_MARKETS[market_key].params["team"] == team
+
+    def test_correct_score_has_no_line_or_team(self):
+        spec = POISSON_ELIGIBLE_MARKETS["football.correct_score"]
+        assert spec.params["market_shape"] == "correct_score"
+        assert "line" not in spec.params
+        assert "team" not in spec.params
+
+    async def test_eligible_market_bootstrap_does_not_error_when_candidates_left_default(
+        self, orchestrator, market_repo, dataset_repo, prediction_repo, prediction_outcome_repo
+    ):
+        """The real regression risk of this wiring: does injecting a 12th candidate into a
+        market's roster (when `candidates=None`) break the sweep? A market outside
+        `POISSON_ELIGIBLE_MARKETS` (`football.both_teams_to_score`, exercised by every
+        pre-existing test above) already proves the unaffected path; this proves the affected
+        path completes without raising for a genuinely eligible market."""
+        market = await market_repo.upsert(_market(market_key="football.total_goals_over_under"))
+        await dataset_repo.upsert(_fresh_dataset(market.id, T0))
+        await _seed_outcomes(market, prediction_repo, prediction_outcome_repo, n=60)
+
+        outcomes = await orchestrator.run(T0)  # candidates=None -> real default + Poisson injection
+
+        assert len(outcomes) == 1
+        assert outcomes[0].skipped_reason is None
 
 
 # -- Continuous Outcome Learning Engine: Challenger-vs-Champion comparison (2026-08-08) ---------

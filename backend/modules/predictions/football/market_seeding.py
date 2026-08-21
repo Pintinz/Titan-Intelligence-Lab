@@ -238,6 +238,15 @@ MARKETS: tuple[dict, ...] = (
             *_NEW_STAT_DIFFERENTIAL_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
             *_NEWS_BTTS_IMPACT_FEATURES,
         ),
+        # Post-M24 Phase 17 audit (docs/post_m24_phase17_football_prediction_recovery_report.md):
+        # lineup_continuity/transfer_activity/news-impact are structurally unpopulated for every
+        # fixture in this platform's real history (their only writers fire near real kickoff or on
+        # live news ingestion, which this dev environment's data has never exercised) — declaring
+        # them required blocked every one of the 14 genuinely-trained markets below at both
+        # training_inference_feature_parity preflight and live inference, even though a real
+        # Champion existed. Demoted to optional here, same pattern Milestone 8 already established
+        # for the 4 heuristic markets — never deleted, still wired the moment real coverage exists.
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_BTTS_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.total_goals_over_under",
@@ -249,6 +258,8 @@ MARKETS: tuple[dict, ...] = (
             *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
             *_NEWS_GOAL_IMPACT_FEATURES,
         ),
+        # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_GOAL_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.home_team_total_goals",
@@ -260,6 +271,8 @@ MARKETS: tuple[dict, ...] = (
             *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
             *_NEWS_GOAL_IMPACT_FEATURES,
         ),
+        # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_GOAL_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.correct_score",
@@ -270,6 +283,17 @@ MARKETS: tuple[dict, ...] = (
         required_features=(
             "football.fixture.expected_home_goals", "football.fixture.expected_away_goals",
             *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
+        ),
+        # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above. The DB also
+        # carries two orphaned required mappings for this market predating this spec
+        # (football.fixture.form_shots_on_target_diff_last5, football.market.implied_probability_home
+        # — neither appears in required_features above, so _seed_market's create-only seeding never
+        # touches them) — both are the same confirmed-unpopulated features documented in
+        # docs/feature_coverage_report.md (football's own team_form/odds families), so demoted here
+        # too rather than left as a silent, undeclared block on this market's real Champion.
+        optional_features=(
+            *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
+            "football.fixture.form_shots_on_target_diff_last5", "football.market.implied_probability_home",
         ),
     ),
     dict(
@@ -310,6 +334,8 @@ MARKETS: tuple[dict, ...] = (
             "football.market.implied_probability_away",
             *_NEW_STAT_DIFFERENTIAL_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
         ),
+        # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES),
     ),
     # 2026-08-02 football market catalog expansion — twelve more real markets, all backed by the
     # same already-registered features every market above uses (no new feature work required),
@@ -327,6 +353,8 @@ MARKETS: tuple[dict, ...] = (
             *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
             *_NEWS_GOAL_IMPACT_FEATURES,
         ),
+        # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_GOAL_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.total_goals_over_under_1_5",
@@ -338,6 +366,8 @@ MARKETS: tuple[dict, ...] = (
             *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
             *_NEWS_GOAL_IMPACT_FEATURES,
         ),
+        # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_GOAL_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.total_goals_over_under_3_5",
@@ -349,6 +379,8 @@ MARKETS: tuple[dict, ...] = (
             *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
             *_NEWS_GOAL_IMPACT_FEATURES,
         ),
+        # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_GOAL_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.total_goals_over_under_4_5",
@@ -360,6 +392,8 @@ MARKETS: tuple[dict, ...] = (
             *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
             *_NEWS_GOAL_IMPACT_FEATURES,
         ),
+        # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_GOAL_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.away_team_total_goals",
@@ -371,6 +405,8 @@ MARKETS: tuple[dict, ...] = (
             *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
             *_NEWS_GOAL_IMPACT_FEATURES,
         ),
+        # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_GOAL_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.home_clean_sheet",
@@ -382,6 +418,8 @@ MARKETS: tuple[dict, ...] = (
             *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
             *_NEWS_CLEAN_SHEET_IMPACT_FEATURES,
         ),
+        # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_CLEAN_SHEET_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.away_clean_sheet",
@@ -393,6 +431,8 @@ MARKETS: tuple[dict, ...] = (
             *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
             *_NEWS_CLEAN_SHEET_IMPACT_FEATURES,
         ),
+        # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_CLEAN_SHEET_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.home_win_to_nil",
@@ -404,6 +444,8 @@ MARKETS: tuple[dict, ...] = (
             *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
             *_NEWS_CLEAN_SHEET_IMPACT_FEATURES,
         ),
+        # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_CLEAN_SHEET_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.away_win_to_nil",
@@ -415,6 +457,8 @@ MARKETS: tuple[dict, ...] = (
             *_EXPECTED_GOALS_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
             *_NEWS_CLEAN_SHEET_IMPACT_FEATURES,
         ),
+        # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_CLEAN_SHEET_IMPACT_FEATURES),
     ),
     dict(
         # Same audit fix as football.first_half_winner above — a second half can end drawn too.

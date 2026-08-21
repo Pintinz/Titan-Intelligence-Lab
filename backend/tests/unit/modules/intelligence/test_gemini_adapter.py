@@ -10,6 +10,7 @@ import json
 import httpx
 import pytest
 
+from modules.intelligence.application.intelligence_monitoring_service import IntelligenceMetricsRecorder
 from modules.intelligence.infrastructure.gemini_adapter import GeminiAdapter, GeminiRequestError
 
 
@@ -255,4 +256,98 @@ async def test_default_model_used_when_not_specified():
 
     await adapter.summarize("text")
 
-    assert "gemini-2.0-flash" in captured["url"]
+    assert "gemini-3.6-flash" in captured["url"]
+
+
+# -- POST-M24 Phase 2: gemini_call_count metric --------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_real_call_increments_the_metrics_recorder():
+    def handler(request):
+        return _gemini_text_response("A short summary.")
+
+    recorder = IntelligenceMetricsRecorder()
+    adapter = GeminiAdapter(get_api_key=_get_key, client=_client_for(handler), metrics_recorder=recorder)
+
+    await adapter.summarize("Some text.")
+
+    assert recorder.gemini_call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_every_public_method_increments_the_metric_once_per_call():
+    def handler(request):
+        return _gemini_text_response(json.dumps([]))
+
+    recorder = IntelligenceMetricsRecorder()
+    adapter = GeminiAdapter(get_api_key=_get_key, client=_client_for(handler), metrics_recorder=recorder)
+
+    await adapter.extract_events("text")
+    await adapter.extract_entities("text")
+    await adapter.classify_topics("text")
+
+    assert recorder.gemini_call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_a_failed_real_call_still_increments_the_metric():
+    """A failed real call still consumed quota/cost — it must still count, unlike a cache hit or
+    a reused analysis, which never reach the network at all."""
+    def handler(request):
+        return httpx.Response(500, text="server error")
+
+    recorder = IntelligenceMetricsRecorder()
+    adapter = GeminiAdapter(get_api_key=_get_key, client=_client_for(handler), metrics_recorder=recorder)
+
+    with pytest.raises(GeminiRequestError):
+        await adapter.summarize("Some text.")
+
+    assert recorder.gemini_call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_assess_prediction_context_returns_raw_gemini_text():
+    """The Gemini Prediction Reasoning Engine's adapter method stays a pure text-in/text-out
+    passthrough — the JSON payload it returns is validated by
+    `GeminiReasoningResponseSchema`/`ContextualReasoningService`, not the adapter itself."""
+    raw = '{"prediction_review": {"status": "SUPPORTED"}}'
+
+    def handler(request):
+        return _gemini_text_response(raw)
+
+    adapter = GeminiAdapter(get_api_key=_get_key, client=_client_for(handler))
+
+    result, source = await adapter.assess_prediction_context({"sport": "football", "context": {}})
+
+    assert result == raw
+    assert source == "gemini"
+
+
+@pytest.mark.asyncio
+async def test_assess_prediction_context_includes_the_payload_in_the_request():
+    captured = {}
+
+    def handler(request):
+        captured["body"] = json.loads(request.content)
+        return _gemini_text_response("{}")
+
+    adapter = GeminiAdapter(get_api_key=_get_key, client=_client_for(handler))
+
+    await adapter.assess_prediction_context({"sport": "football", "market": "football.match_winner"})
+
+    prompt_text = captured["body"]["contents"][0]["parts"][0]["text"]
+    assert "football.match_winner" in prompt_text
+    assert "NOT the primary statistical prediction model" in prompt_text
+
+
+@pytest.mark.asyncio
+async def test_no_recorder_configured_does_not_raise():
+    def handler(request):
+        return _gemini_text_response("ok")
+
+    adapter = GeminiAdapter(get_api_key=_get_key, client=_client_for(handler))  # no metrics_recorder
+
+    result = await adapter.summarize("text")
+
+    assert result == "ok"

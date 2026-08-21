@@ -26,6 +26,33 @@ export function humanizeFactorKey(key: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
+/** The real, closed vocabulary of `MLAlgorithm` (`backend/modules/predictions/domain/
+ * ml_value_objects.py`) mapped to its display name — Intelligence Center §35 "never label a model
+ * 'AI' as a substitute for its actual architecture, never infer it from the market name." An
+ * algorithm this map doesn't recognize (a future addition to the backend enum) falls back to a
+ * plain title-cased read of the raw value rather than a guessed or generic label. */
+const MODEL_ALGORITHM_LABELS: Record<string, string> = {
+  lightgbm_gbm: 'LightGBM Classifier',
+  xgboost_gbm: 'XGBoost Classifier',
+  catboost_gbm: 'CatBoost Classifier',
+  random_forest: 'Random Forest',
+  extra_trees: 'Extra Trees',
+  logistic_regression: 'Logistic Regression',
+  ridge: 'Ridge Regression',
+  elastic_net: 'Elastic Net',
+  svm: 'Support Vector Machine',
+  gaussian_nb: 'Gaussian Naive Bayes',
+  mlp: 'Multi-Layer Perceptron',
+  poisson_glm: 'Poisson Regression (GLM)',
+  tweedie_glm: 'Tweedie Regression (GLM)',
+  poisson_goals_model: 'Poisson Goal Distribution',
+}
+
+export function humanizeModelAlgorithm(algorithm: string | null | undefined): string | null {
+  if (!algorithm) return null
+  return MODEL_ALGORITHM_LABELS[algorithm] ?? algorithm.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
 type RiskLevel = 'Low risk' | 'Moderate risk' | 'High risk'
 
 /** A qualitative read on how much uncertainty this verdict carries — the inverse of overall

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useForm } from 'react-hook-form'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate, type Location } from 'react-router-dom'
 import { supabase, setRememberMe } from '@/lib/supabase'
 import { loginSchema, signupSchema, type LoginValues, type SignupValues } from '@/lib/validation/auth-schemas'
 import { Button } from '@/components/ui/button'
@@ -13,6 +13,17 @@ import { AuthFormHeader } from './auth-form-header'
 import { GoogleSignInButton } from './google-signin-button'
 import { cn } from '@/lib/cn'
 
+// Most Supabase auth errors carry a real, readable `.message` ("Invalid login credentials",
+// etc.), but a handful of server-side failure shapes (seen live: a 500 from a misconfigured SMTP
+// provider) leave the client SDK unable to extract one, and `.message` ends up as the literal
+// string "{}" — worse than no message at all, since it reads as a broken app rather than a real
+// error. Never show that (or an empty string) verbatim; fall back to something a visitor can act on.
+function readableAuthErrorMessage(error: { message?: string } | null | undefined, fallback: string): string {
+  const message = error?.message?.trim()
+  if (!message || message.startsWith('{') || message.startsWith('[')) return fallback
+  return message
+}
+
 type AuthMode = 'login' | 'signup'
 
 interface AuthFlowProps {
@@ -21,6 +32,14 @@ interface AuthFlowProps {
 
 export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
   const navigate = useNavigate()
+  const location = useLocation()
+  // Set by ProtectedRoute when it redirects an unauthenticated visit here (e.g. clicking "Get
+  // Pro" while logged out) — send them back to exactly where they were headed, query string and
+  // all. A plain, direct login/signup (no `from` — arrived at /login on its own, not redirected
+  // by a protected route) has nothing to return to, so it goes to the landing page, not checkout
+  // or the dashboard.
+  const from = (location.state as { from?: Location } | null)?.from
+  const returnTo = from ? `${from.pathname}${from.search}` : '/'
   const [mode, setMode] = useState<AuthMode>(initialMode)
   const [prevMode, setPrevMode] = useState<AuthMode>(initialMode)
   const [agree, setAgree] = useState(false)
@@ -29,17 +48,48 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
   const signupForm = useForm<SignupValues>({ resolver: zodResolver(signupSchema) })
 
   const [rememberMe, setRememberMeState] = useState(true)
+  const [googleLoading, setGoogleLoading] = useState(false)
+
+  async function handleGoogleSignIn() {
+    // OAuth is a real cross-origin redirect to Google and back, not client-side routing — the
+    // in-memory `returnTo` above would be lost, so it travels via the callback URL's query string
+    // instead (read back by AuthCallbackPage). Session persistence for an OAuth sign-in always
+    // behaves like "remember me" checked — there's no equivalent checkbox in Google's own consent
+    // flow to honor a "this device only" choice for.
+    setRememberMe(true)
+    setGoogleLoading(true)
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: `${window.location.origin}/auth/callback?returnTo=${encodeURIComponent(returnTo)}` },
+    })
+    if (error) {
+      setGoogleLoading(false)
+      toast.danger('Could not sign in with Google', readableAuthErrorMessage(error, 'Something went wrong starting Google sign-in. Try again.'))
+      return
+    }
+    // On success the browser navigates away to Google's consent screen immediately — nothing
+    // else to do here, and googleLoading intentionally never resets on this path (the page is
+    // about to unload).
+  }
 
   const isLoginMode = mode === 'login'
 
   async function handleLogin(values: LoginValues) {
     setRememberMe(rememberMe)
-    const { error } = await supabase.auth.signInWithPassword(values)
-    if (error) {
-      toast.danger('Could not sign in', error.message)
-      return
+    try {
+      const { error } = await supabase.auth.signInWithPassword(values)
+      if (error) {
+        toast.danger('Could not sign in', readableAuthErrorMessage(error, 'Something went wrong signing you in. Try again.'))
+        return
+      }
+      navigate(returnTo)
+    } catch {
+      // supabase.auth.* rejects (rather than returning {error}) on a genuine network failure —
+      // offline, DNS, the Supabase project unreachable. Without this, that case silently
+      // re-enables the button with zero feedback, the least helpful possible failure mode for
+      // exactly the "issues with login" this is meant to prevent.
+      toast.danger('Could not sign in', 'Check your connection and try again.')
     }
-    navigate('/app')
   }
 
   async function handleSignup(values: SignupValues) {
@@ -49,18 +99,33 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
     }
 
     setRememberMe(true)
-    const { error } = await supabase.auth.signUp({
-      email: values.email,
-      password: values.password,
-    })
+    try {
+      const { data, error } = await supabase.auth.signUp({
+        email: values.email,
+        password: values.password,
+      })
 
-    if (error) {
-      toast.danger('Could not create account', error.message)
-      return
+      if (error) {
+        toast.danger('Could not create account', readableAuthErrorMessage(error, 'Something went wrong creating your account. Try again in a moment.'))
+        return
+      }
+
+      if (data.session) {
+        // Email confirmation is off for this project — signUp already returns an active session.
+        toast.success('Account created successfully')
+        navigate(returnTo)
+        return
+      }
+
+      // Email confirmation is required — there's no session yet, so navigating into a protected
+      // route would just bounce straight back to /login with no explanation. Tell the visitor
+      // what to do instead, and drop them at login (which will carry the same `returnTo` forward
+      // once they actually have a session).
+      toast.success('Check your email to confirm your account', `We sent a confirmation link to ${values.email}.`)
+      toggleMode('login')
+    } catch {
+      toast.danger('Could not create account', 'Check your connection and try again.')
     }
-
-    toast.success('Account created successfully')
-    navigate('/app')
   }
 
   const toggleMode = (newMode: AuthMode) => {
@@ -174,7 +239,11 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
               </div>
             </div>
 
-            <GoogleSignInButton disabled={loginForm.formState.isSubmitting} />
+            <GoogleSignInButton
+              disabled={loginForm.formState.isSubmitting}
+              isLoading={googleLoading}
+              onClick={handleGoogleSignIn}
+            />
           </div>
 
           <p className="text-center text-sm text-text-secondary animate-field-stagger" style={{ animationDelay: '350ms' }}>
@@ -304,7 +373,11 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
               </div>
             </div>
 
-            <GoogleSignInButton disabled={signupForm.formState.isSubmitting} />
+            <GoogleSignInButton
+              disabled={signupForm.formState.isSubmitting}
+              isLoading={googleLoading}
+              onClick={handleGoogleSignIn}
+            />
           </div>
 
           <p className="text-center text-sm text-text-secondary animate-field-stagger" style={{ animationDelay: '350ms' }}>

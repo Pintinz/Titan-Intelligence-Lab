@@ -36,6 +36,14 @@ class DatasetNotTrainableError(ValueError):
     pass
 
 
+def _ensure_aware(dt: datetime, reference: datetime) -> datetime:
+    """Same fix as modules.ingestion.application.sync_orchestrator._ensure_aware and its other
+    duplicates — SQLite/aiosqlite drops tzinfo on read-back (docs/decisions.md ADR-007)."""
+    if dt.tzinfo is None and reference.tzinfo is not None:
+        return dt.replace(tzinfo=reference.tzinfo)
+    return dt
+
+
 @dataclass(frozen=True)
 class EvaluationMetrics:
     accuracy: float | None = None
@@ -232,7 +240,7 @@ class RetrainingScheduler:
             return {"should_retrain": False, "reason": "no dataset built yet"}
 
         drift = await self.dataset_registry.detect_drift(market_id)
-        age = now - latest.created_at if latest.created_at else None
+        age = now - _ensure_aware(latest.created_at, now) if latest.created_at else None
         is_stale = age is not None and age > self.max_dataset_age
 
         return {

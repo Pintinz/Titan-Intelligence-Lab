@@ -83,7 +83,7 @@ class BillingService:
         subject_id: str,
         plan_id: PlanId,
         now: datetime,
-        actor: UserId,
+        actor: UserId | None = None,
         current_period_end: datetime | None = None,
     ) -> Subscription:
         existing = await self.subscriptions.get_active_for_subject(subject_type, subject_id)

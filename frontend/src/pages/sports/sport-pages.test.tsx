@@ -1,13 +1,28 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { SportShell } from '@/components/layout/sport-shell'
 import { SPORT_SLUGS } from '@/lib/hooks/use-sport'
+import { useAuthStore } from '@/stores/auth-store'
 import SportHubPage from './sport-hub-page'
 import PredictionLabPage from './prediction-lab-page'
 import type { FixtureSummaryDto, PredictionDto, PredictionMarketDto } from '@/lib/api/types'
+
+// Basketball/Baseball/Table Tennis are gated to administrators only (still under development —
+// see SportShell's non-football guard). This suite verifies the sport-agnostic plumbing itself
+// works correctly across all 4 sports, which is exactly what an admin exercises while building/
+// QA-ing the other sports — so it runs as an admin, not the "regular user sees only Football"
+// default this test environment would otherwise have.
+beforeAll(() => {
+  useAuthStore.setState({
+    profile: {
+      id: 'test-admin', email: 'admin@titaniq.test', role: 'administrator', status: 'active',
+      email_verified: true, created_at: new Date().toISOString(), last_login_at: null,
+    },
+  })
+})
 
 vi.mock('@/lib/api/sports', async () => {
   const actual = await vi.importActual<typeof import('@/lib/api/sports')>('@/lib/api/sports')
@@ -83,6 +98,7 @@ const PREDICTION: PredictionDto = {
   probability_distribution: { Yes: 0.81, No: 0.19 },
   confidence_interval: null,
   expected_error: null,
+  contextual_review: null,
 }
 
 function renderAtSport(path: string, element: React.ReactNode) {
@@ -157,6 +173,8 @@ describe('PredictionLabPage', () => {
       entity_type: 'fixture',
       entity_id: 'fx-1',
       subject_ref: 'fx-1',
+      include_contextual_review: true,
+      include_football_explanation: true,
     })
   })
 })

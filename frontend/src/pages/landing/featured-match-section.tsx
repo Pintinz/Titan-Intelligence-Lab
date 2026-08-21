@@ -14,9 +14,9 @@ export function FeaturedMatchSection({
   if (!loading && picks.length === 0) return null
 
   return (
-    <Section className="border-b border-border-subtle">
+    <Section id="proof-of-mechanism" className="border-b border-border-subtle scroll-mt-20">
       <SectionHeading
-        eyebrow="Featured Match Intelligence"
+        eyebrow="Proof of Mechanism"
         title="The matches where TitanIQ has enough evidence to explain what matters"
         description="Ranked by real confidence — not every fixture, only the ones with the strongest evidence base right now."
       />

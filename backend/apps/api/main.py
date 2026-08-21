@@ -16,12 +16,16 @@ import os
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from apps.api.rate_limit import enforce_ip_rate_limit
 from apps.api.routers import (
     alerts_router,
     billing_router,
+    checkout_router,
     graph_router,
     identity_router,
     intelligence_router,
@@ -84,6 +88,7 @@ from modules.features.application.feature_quality_engine import (
     FeatureNotFoundError as FeatureQualityNotFoundError,
     FeatureQualitySnapshot,
 )
+from modules.features.domain.freshness import classify_freshness
 from modules.features.application.feature_registration_service import (
     FeatureAlreadyRegisteredError,
     FeatureNotFoundError as FeatureDefNotFoundError,
@@ -140,9 +145,13 @@ app.add_middleware(
 _DOCS_PATHS = {"/docs", "/redoc", "/openapi.json"}
 
 
+_ADMIN_PATH_PREFIX = "/api/v1/admin"
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
-    """Baseline response headers (Milestone: Enterprise Security & Compliance, Phase 11).
+    """Baseline response headers (Milestone: Enterprise Security & Compliance, Phase 11), plus a
+    global IP-based rate limit on every `/api/v1/admin/*` route.
 
     This is a JSON API with no server-rendered HTML, so a strict `default-src 'none'` CSP costs
     nothing on every real route — there is no first-party markup/script/style for it to break.
@@ -151,7 +160,21 @@ async def security_headers(request: Request, call_next):
     here rather than silently broken. HSTS is safe to send unconditionally: browsers only ever
     honor `Strict-Transport-Security` on a response actually received over HTTPS, so it's a no-op
     over the plain-HTTP connections local dev/tests use and takes effect automatically once this
-    sits behind TLS in production, without another change."""
+    sits behind TLS in production, without another change.
+
+    Admin routes are gated by `require_role(ADMINISTRATOR)` on every handler, but that check
+    alone has no throttle against scripted credential-stuffing/brute-force traffic hitting those
+    routes at volume (Production Readiness Audit §6). Admin routes are spread across `main.py`'s
+    inline handlers plus `ml_platform_router`/`prediction_admin_router` — all under the shared
+    `/api/v1/admin` prefix — so a single path-prefix check here covers every one of them, rather
+    than editing 30+ individual route signatures. `HTTPException` raised inside a
+    `@app.middleware("http")` function is NOT caught by FastAPI's own exception handlers (they
+    sit closer to routing than this middleware layer), so the 429 is built directly here."""
+    if request.url.path.startswith(_ADMIN_PATH_PREFIX):
+        try:
+            await enforce_ip_rate_limit(request, "admin_api", limit=120, window_seconds=60)
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
@@ -166,6 +189,7 @@ app.include_router(public_router.router)
 app.include_router(identity_router.router)
 app.include_router(tenancy_router.router)
 app.include_router(billing_router.router)
+app.include_router(checkout_router.router)
 app.include_router(webhooks_router.router)
 app.include_router(graph_router.router)
 app.include_router(intelligence_router.router)
@@ -319,7 +343,39 @@ async def _audit(
 
 @app.get("/api/v1/health")
 async def health():
+    """Lightweight liveness check — "is the process up and serving requests," nothing more. This
+    is the one Render's own health check / the Dockerfile's HEALTHCHECK should point at: a
+    dependency outage (DB/Redis down) must not make Render conclude the API process itself is
+    dead and start cycling it — that's exactly what /health/ready below is for instead."""
     return envelope(data={"status": "ok"})
+
+
+@app.get("/api/v1/health/ready")
+async def readiness(session: AsyncSession = Depends(get_session)):
+    """Deeper dependency check for real operator/debugging use (not Render's primary health
+    check target) — verifies the database and Redis are actually reachable, without leaking a
+    connection string, hostname, or any other infrastructure detail. Never fails the process:
+    a broken dependency here reports "not ready" (503), not a 500 crash."""
+    checks: dict[str, str] = {}
+
+    try:
+        await session.execute(text("SELECT 1"))
+        checks["database"] = "healthy"
+    except Exception:  # noqa: BLE001 — this endpoint's whole job is to report a failure, not raise one
+        checks["database"] = "unhealthy"
+
+    try:
+        redis_client = get_redis_client()
+        await redis_client.ping()
+        checks["redis"] = "healthy"
+    except Exception:  # noqa: BLE001
+        checks["redis"] = "unhealthy"
+
+    all_healthy = all(status == "healthy" for status in checks.values())
+    body = envelope(data={"status": "ready" if all_healthy else "not_ready", **checks})
+    if not all_healthy:
+        return JSONResponse(status_code=503, content=body)
+    return body
 
 
 @app.get("/api/v1/admin/providers")
@@ -1018,6 +1074,7 @@ def _serialize_quality(q: FeatureQualitySnapshot) -> dict:
         "invalid_pct": q.invalid_pct,
         "duplicate_pct": q.duplicate_pct,
         "coverage_pct": q.coverage_pct,
+        "freshness_status": q.freshness_status.value,
     }
 
 
@@ -1883,6 +1940,9 @@ async def get_ingestion_quality(sport_code: str, entity_kind: str, session: Asyn
             "validity_pct": report.validity_pct, "reliability_score": report.reliability_score,
             "coverage_pct": report.coverage_pct, "provider_quality_score": report.provider_quality_score,
             "quality_score": report.quality_score, "issues": list(report.issues),
+            # spec §26 "Context Freshness" — the real CURRENT/STALE/UNKNOWN verdict derived from
+            # `freshness_score` (never independently invented).
+            "freshness_status": classify_freshness(report.freshness_score).value,
         }
     )
 

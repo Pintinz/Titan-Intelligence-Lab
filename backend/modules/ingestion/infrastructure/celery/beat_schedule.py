@@ -31,6 +31,12 @@ SCHEDULED_RETRAINING_CHECK_INTERVAL_SECONDS = 6 * 3600
 # to retraining — an hourly cadence (matching STANDINGS_INTERVAL_SECONDS) keeps calibrated
 # confidence tracking newly-completed fixtures promptly without the training-pipeline cost.
 SCHEDULED_CALIBRATION_CHECK_INTERVAL_SECONDS = 3600
+
+# CalibrationValidationService's sklearn CalibratedClassifierCV comparison rebuilds a dataset and
+# fits multiple candidate calibrators per market — comparably heavy to a retrain, so it shares
+# SCHEDULED_RETRAINING_CHECK_INTERVAL_SECONDS's 6-hour cadence rather than the cheap Platt-only
+# fit's hourly one above.
+SCHEDULED_CALIBRATION_VALIDATION_CHECK_INTERVAL_SECONDS = 6 * 3600
 # Milestone 5 (Verified Pre-Match Data Availability) — matches PROVIDER_POLL_INTERVAL_SECONDS's
 # free-tier-safe cadence (same 10 req/min budget every other football-data.org-class entry
 # respects). At 15 minutes, a fixture's LINEUP_PREMATCH_WINDOW_MINUTES (default 90) is checked
@@ -165,6 +171,13 @@ BEAT_SCHEDULE = {
     "check-scheduled-calibration": {
         "task": "predictions.check_scheduled_calibration",
         "schedule": timedelta(seconds=SCHEDULED_CALIBRATION_CHECK_INTERVAL_SECONDS),
+    },
+    # Phase 3 audit fix — `CalibrationValidationService` (real sklearn `CalibratedClassifierCV`
+    # Platt/isotonic comparison, persisted `CalibrationReport`s, versioned calibrated challengers)
+    # existed since Phase 3 but had zero scheduled callers, reachable only via a manual script.
+    "check-scheduled-calibration-validation": {
+        "task": "predictions.check_scheduled_calibration_validation",
+        "schedule": timedelta(seconds=SCHEDULED_CALIBRATION_VALIDATION_CHECK_INTERVAL_SECONDS),
     },
     # Milestone 5 — the only real caller of `SyncOrchestrator.sync_upcoming_structured_intelligence`,
     # and therefore the only path that can ever produce `SyncTrigger.LIVE_SCHEDULED` (see that

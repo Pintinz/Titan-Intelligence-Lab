@@ -341,12 +341,14 @@ async def test_seed_pulls_real_outcome_contract_from_the_catalog(seeder, market_
     assert both_teams_to_score.resolver_key == "football.both_teams_to_score"
 
     # first_half_winner has a real catalog entry (2026-08-02 expansion) specifying its 3-way
-    # label space — but still no resolver_key, honestly: no sub-match score data is ingested yet
-    # to actually evaluate it.
+    # label space, and now (post-M24) a real resolver_key too — the resolver itself still
+    # honestly resolves nothing in production until a provider adapter starts parsing a football
+    # fixture's half-time score (see outcome_resolution_service.py's docs), but the seeding
+    # contract correctly reflects that the resolution *logic* now exists.
     first_half_winner = await market_repo.get_by_key("football.first_half_winner")
     assert first_half_winner.outcome_type is OutcomeType.HOME_DRAW_AWAY
     assert set(first_half_winner.allowed_values) == {"HOME_WIN", "DRAW", "AWAY_WIN"}
-    assert first_half_winner.resolver_key is None
+    assert first_half_winner.resolver_key == "football.first_half_winner"
 
     # home_clean_sheet has a real catalog entry AND a real resolver (computable from the final
     # score alone) — the 2026-08-02 expansion's fully-resolved shape.
@@ -395,13 +397,26 @@ async def test_seed_marks_structured_intel_features_optional_on_heuristic_market
 
 
 @pytest.mark.asyncio
-async def test_seed_keeps_structured_intel_features_required_on_trained_markets(
+async def test_seed_relaxes_structured_intel_features_to_optional_on_trained_markets(
     seeder, feature_mapping_repo, market_repo
 ):
-    """The same two feature sets must stay required=True everywhere else — Milestone 8's
-    market-specific opt-out must not leak into the 14 genuinely-trained markets' existing
-    Milestone 6/7 wiring, which deliberately demands the pre-match feature exist for a future
-    training dataset."""
+    """Superseded by Post-M24 Phase 17 (docs/post_m24_phase17_football_prediction_recovery_report.md).
+
+    Milestones 6/7 originally kept lineup_continuity/transfer_activity required=True on these 14
+    genuinely-trained markets ("a training dataset should demand the pre-match feature exist").
+    Milestone 16 later confirmed, for football.both_teams_to_score specifically, that this demand
+    can structurally never be met for backfilled historical fixtures (VERIFIED_PRE_MATCH is only
+    ever producible by a live LIVE_SCHEDULED sync) and deliberately chose to keep the requirement
+    and serve an honest 409 rather than relax it.
+
+    Phase 17 made the opposite, later call, for all 14 markets: every one of them already had a
+    real, empirically-selected Champion whose training data never saw these features either (0%
+    coverage in the persisted dataset, not just at inference) — the requirement was blocking a
+    Champion that was already trained without this signal, not protecting training-data integrity.
+    Relaxing to optional (the same pattern Milestone 8 already used for the 4 heuristic markets)
+    unblocks 12 real, working predictions; the features remain fully wired and will be consumed the
+    moment real pre-match coverage exists for a future fixture. This is a deliberate, evidence-backed
+    reversal of the M16 policy, not an oversight — see the Phase 17 report for the full trade-off."""
     from modules.predictions.football.market_seeding import _LINEUP_CONTINUITY_FEATURES, _TRANSFER_ACTIVITY_FEATURES
 
     await seeder.seed(T0)
@@ -417,7 +432,7 @@ async def test_seed_keeps_structured_intel_features_required_on_trained_markets(
         market = await market_repo.get_by_key(market_key)
         mappings = {m.feature_key: m.is_required for m in await feature_mapping_repo.list_by_market(market.id)}
         for feature_key in (*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES):
-            assert mappings[feature_key] is True, f"{feature_key} must stay required on {market_key}"
+            assert mappings[feature_key] is False, f"{feature_key} must be optional on {market_key} (Phase 17)"
 
 
 @pytest.mark.asyncio
@@ -440,12 +455,14 @@ async def test_seed_applies_conservative_weights_to_structured_intel_features_on
 
 
 @pytest.mark.asyncio
-async def test_seed_wires_news_goal_impact_features_as_required_on_goal_markets(
+async def test_seed_wires_news_goal_impact_features_as_optional_on_goal_markets(
     seeder, feature_mapping_repo, market_repo
 ):
-    """Milestone 9 — unlike Milestone 8's heuristic-market optional wiring, every news-impact
-    target market is among the 14 genuinely-trained markets, so these are required=True (the
-    seeder's default) — inert until a future retrain, exactly like Milestones 6/7."""
+    """Superseded by Post-M24 Phase 17 — see the sibling
+    test_seed_relaxes_structured_intel_features_to_optional_on_trained_markets docstring for the
+    full reasoning. news.football.*_goal_impact was required=True (Milestone 9's default) until
+    Phase 17 confirmed it, too, is 0%-populated in every persisted training sample for these
+    markets and relaxed it to optional alongside lineup/transfer."""
     from modules.predictions.football.market_seeding import _NEWS_GOAL_IMPACT_FEATURES
 
     await seeder.seed(T0)
@@ -459,13 +476,15 @@ async def test_seed_wires_news_goal_impact_features_as_required_on_goal_markets(
         market = await market_repo.get_by_key(market_key)
         mappings = {m.feature_key: m.is_required for m in await feature_mapping_repo.list_by_market(market.id)}
         for feature_key in _NEWS_GOAL_IMPACT_FEATURES:
-            assert mappings[feature_key] is True, f"{feature_key} must be required on {market_key}"
+            assert mappings[feature_key] is False, f"{feature_key} must be optional on {market_key} (Phase 17)"
 
 
 @pytest.mark.asyncio
-async def test_seed_wires_news_clean_sheet_impact_features_as_required_on_clean_sheet_markets(
+async def test_seed_wires_news_clean_sheet_impact_features_as_optional_on_clean_sheet_markets(
     seeder, feature_mapping_repo, market_repo
 ):
+    """Superseded by Post-M24 Phase 17 — see
+    test_seed_relaxes_structured_intel_features_to_optional_on_trained_markets for the reasoning."""
     from modules.predictions.football.market_seeding import _NEWS_CLEAN_SHEET_IMPACT_FEATURES
 
     await seeder.seed(T0)
@@ -478,7 +497,7 @@ async def test_seed_wires_news_clean_sheet_impact_features_as_required_on_clean_
         market = await market_repo.get_by_key(market_key)
         mappings = {m.feature_key: m.is_required for m in await feature_mapping_repo.list_by_market(market.id)}
         for feature_key in _NEWS_CLEAN_SHEET_IMPACT_FEATURES:
-            assert mappings[feature_key] is True, f"{feature_key} must be required on {market_key}"
+            assert mappings[feature_key] is False, f"{feature_key} must be optional on {market_key} (Phase 17)"
 
 
 @pytest.mark.asyncio
@@ -537,13 +556,25 @@ async def test_seed_registers_news_market_impact_feature_keys(seeder):
         assert definition.leakage_classification == "PRE_MATCH_SAFE"
 
 
-def test_both_teams_to_score_required_features_unchanged_by_milestone_16():
-    """Milestone 16 — docs/milestone16_preimplementation_audit.md found that
+def test_both_teams_to_score_structured_intel_features_relaxed_to_optional_by_phase_17():
+    """Milestone 16 (docs/milestone16_preimplementation_audit.md) found that
     football.both_teams_to_score's news + lineup-continuity + transfer-activity keys are required
     but never populated (root cause: VERIFIED_PRE_MATCH is only producible by a genuine
     LIVE_SCHEDULED sync, structurally impossible for the fixtures already backfilled into training
-    data). The fix applied was an honest 409 in prediction_router.py, NOT relaxing any of these six
-    keys to optional — this locks that decision down structurally against silent regression."""
+    data), and deliberately chose to keep all six required and serve an honest 409 from
+    prediction_router.py rather than relax them — a considered call locked down by this test's
+    original (now-superseded) assertion.
+
+    Post-M24 Phase 17 (docs/post_m24_phase17_football_prediction_recovery_report.md) made the
+    opposite call, explicitly and with full awareness of Milestone 16's reasoning: the same
+    six-feature blocker exists on 13 other genuinely-trained markets whose real Champions were
+    never trained with this signal either, and the product decision was to serve those 12 markets'
+    real predictions today (features remain fully wired, will populate the moment real pre-match
+    coverage exists) rather than hold every one of them to the same honest-409 standard Milestone
+    16 chose for this one market alone. This test now asserts the Phase 17 state, superseding the
+    Milestone 16 lock-down — not because Milestone 16 was wrong, but because a later, explicit
+    decision reweighted the same trade-off differently. Do not re-flip this test back to asserting
+    `required_features` without another equally explicit decision."""
     from modules.predictions.football.market_seeding import (
         _LINEUP_CONTINUITY_FEATURES,
         _NEWS_BTTS_IMPACT_FEATURES,
@@ -553,5 +584,5 @@ def test_both_teams_to_score_required_features_unchanged_by_milestone_16():
     spec = next(m for m in MARKETS if m["market_key"] == "football.both_teams_to_score")
 
     for feature_key in (*_NEWS_BTTS_IMPACT_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES):
-        assert feature_key in spec["required_features"]
-    assert "optional_features" not in spec  # never relaxed to optional for this trained market
+        assert feature_key in spec["required_features"]  # still declared — the mapping still exists
+        assert feature_key in spec["optional_features"]  # but Phase 17 relaxed is_required to False

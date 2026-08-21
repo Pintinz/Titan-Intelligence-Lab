@@ -1,7 +1,9 @@
 import { NavLink, Outlet, Link } from 'react-router-dom'
-import { Radio, CalendarDays, Users, User, Trophy } from 'lucide-react'
+import { Radio, CalendarDays, Users, User, Trophy, Hammer } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { useSportParam } from '@/lib/hooks/use-sport'
+import { useAuthStore } from '@/stores/auth-store'
+import { isAtLeast } from '@/lib/api/types'
 import { Button } from '@/components/ui/button'
 
 // Prediction Laboratory / News / Community stay real, routable pages (linked contextually from
@@ -21,6 +23,8 @@ const TABS = [
  */
 export function SportShell() {
   const sport = useSportParam()
+  const profile = useAuthStore((s) => s.profile)
+  const isAdmin = !!profile && isAtLeast(profile.role, 'administrator')
 
   if (!sport) {
     return (
@@ -29,6 +33,25 @@ export function SportShell() {
         <p className="text-sm text-text-secondary">TitanIQ covers Football, Basketball, Baseball, and Table Tennis.</p>
         <Button asChild variant="secondary" size="sm">
           <Link to="/app">Back to Dashboard</Link>
+        </Button>
+      </div>
+    )
+  }
+
+  // Basketball/Baseball/Table Tennis are still under active development — same gate the backend
+  // enforces server-side (sports_router.require_football_or_admin); a regular user reaching this
+  // route directly (typed URL, stale link) sees an honest "not open yet" state instead of a
+  // half-working shell whose data requests all silently 404.
+  if (sport.code !== 'football' && !isAdmin) {
+    return (
+      <div className="flex min-h-[50vh] flex-col items-center justify-center gap-3 text-center">
+        <Hammer className="size-8 text-text-muted" aria-hidden="true" />
+        <p className="font-display text-lg font-semibold text-text-primary">{sport.label} isn't open yet</p>
+        <p className="max-w-sm text-sm text-text-secondary">
+          We're still building out {sport.label} intelligence — Football is live today. Check back soon.
+        </p>
+        <Button asChild variant="secondary" size="sm">
+          <Link to="/app/football">Go to Football</Link>
         </Button>
       </div>
     )

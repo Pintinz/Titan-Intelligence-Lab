@@ -62,30 +62,32 @@ export default function MatchDetailPage() {
         entity_type: 'fixture',
         entity_id: matchId!,
         subject_ref: matchId!,
+        include_football_explanation: sport?.code === 'football',
+        include_contextual_review: true,
       }),
   })
 
   const fixture = fixtureQuery.data
 
   const homeFixturesQuery = useQuery({
-    queryKey: ['sports', 'team-fixtures', fixture?.home_team.id],
+    queryKey: ['sports', 'team-fixtures', fixture?.home_team?.id],
     queryFn: () => sportsApi.teamFixtures(fixture!.home_team.id, 5),
-    enabled: !!fixture,
+    enabled: !!fixture?.home_team,
   })
   const awayFixturesQuery = useQuery({
-    queryKey: ['sports', 'team-fixtures', fixture?.away_team.id],
+    queryKey: ['sports', 'team-fixtures', fixture?.away_team?.id],
     queryFn: () => sportsApi.teamFixtures(fixture!.away_team.id, 5),
-    enabled: !!fixture,
+    enabled: !!fixture?.away_team,
   })
   const homeInjuriesQuery = useQuery({
-    queryKey: ['sports', 'team', fixture?.home_team.id, 'injuries'],
+    queryKey: ['sports', 'team', fixture?.home_team?.id, 'injuries'],
     queryFn: () => sportsApi.teamInjuries(fixture!.home_team.id),
-    enabled: !!fixture,
+    enabled: !!fixture?.home_team,
   })
   const awayInjuriesQuery = useQuery({
-    queryKey: ['sports', 'team', fixture?.away_team.id, 'injuries'],
+    queryKey: ['sports', 'team', fixture?.away_team?.id, 'injuries'],
     queryFn: () => sportsApi.teamInjuries(fixture!.away_team.id),
-    enabled: !!fixture,
+    enabled: !!fixture?.away_team,
   })
 
   if (!sport) return null
@@ -104,6 +106,13 @@ export default function MatchDetailPage() {
   }
 
   if (!fixture) return null
+
+  // Some fixtures reference a team_id the backend can no longer resolve (e.g. after a team
+  // merge) and serialize home_team/away_team as null despite the DTO's non-null type — show an
+  // honest error rather than crashing on every downstream .name/.id/.logo_url access below.
+  if (!fixture.home_team || !fixture.away_team) {
+    return <ErrorState error={new Error('Team data is unavailable for this match.')} />
+  }
 
   const markets = marketsQuery.data ?? []
   const domain = sport.slug as Extract<DomainKey, 'football' | 'basketball' | 'baseball' | 'table-tennis'>

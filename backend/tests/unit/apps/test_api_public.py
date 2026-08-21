@@ -3,11 +3,14 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
+import fakeredis
 import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+import apps.api.composition as composition
+import apps.api.main as main_module
 from apps.api.composition import get_jwt_validator, get_session
 from apps.api.main import app
 from apps.api.routers import public_router
@@ -119,6 +122,16 @@ def client(db_session_factory, monkeypatch):
     # needs a real key present even though this test suite never stores a real credential.
     monkeypatch.setenv("TITANIQ_ENCRYPTION_KEY", Fernet.generate_key().decode())
     get_vault_settings.cache_clear()
+
+    # platform-summary/featured-intelligence go through build_prediction_cache_service's
+    # composition chain, which reaches get_redis_client() — @lru_cache'd process-wide, so this
+    # must be patched the same way test_api_ingestion.py's `client` fixture already does it.
+    fake_client = fakeredis.FakeAsyncRedis(decode_responses=True)
+    composition.get_redis_client.cache_clear()
+    composition.get_redis_lock.cache_clear()
+    composition.get_redis_sync_cache.cache_clear()
+    monkeypatch.setattr(composition, "get_redis_client", lambda: fake_client)
+    monkeypatch.setattr(main_module, "get_redis_client", lambda: fake_client)
 
     app.dependency_overrides[get_session] = override_get_session
     app.dependency_overrides[get_jwt_validator] = lambda: MockJWTValidator()

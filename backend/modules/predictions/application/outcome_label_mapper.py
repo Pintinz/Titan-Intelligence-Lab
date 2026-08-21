@@ -40,16 +40,30 @@ MARKET_OUTCOME_LABELS: dict[str, OutcomeLabelPair] = {
     "football.away_clean_sheet": OutcomeLabelPair("YES", "NO"),
     "football.home_win_to_nil": OutcomeLabelPair("YES", "NO"),
     "football.away_win_to_nil": OutcomeLabelPair("YES", "NO"),
-    # football.first_half_goals / football.first_half_both_teams_to_score are deliberately NOT
-    # here despite being real BINARY/TOTAL-shaped markets — this table doubles as the evaluation
-    # contract (test_generation_and_evaluation_label_tables_agree_on_every_binary_market requires
-    # every entry to have a real resolver_key in market_outcome_registry.py), and neither has one
-    # yet (both need sub-match score data this platform doesn't ingest). Adding a real label here
-    # without a resolver would let a prediction claim "OVER"/"YES" that can never be checked
-    # against what actually happened — same honest gap as football.first_half_winner before its
-    # resolver existed. They keep emitting the generic "positive"/"negative" until that lands.
+    # Post-M24: both now have a real resolver_key in market_outcome_registry.py
+    # (_first_half_goals_over_under_0_5 / _first_half_both_teams_to_score in
+    # outcome_resolution_service.py), so this table's evaluation contract is honestly satisfied —
+    # but neither will actually resolve any real outcome yet, since no provider adapter parses a
+    # football fixture's half-time score today (see outcome_resolution_service.py's docs). A
+    # generated prediction will claim "OVER"/"YES" here exactly as it does for every other market
+    # in this table; it simply won't have a checkable outcome until that separate ingestion gap
+    # closes — the same honest, not-yet-populated state as the gated pre-match intelligence
+    # features, not a fabricated evaluation.
+    "football.first_half_goals": OutcomeLabelPair("OVER", "UNDER"),
+    "football.first_half_both_teams_to_score": OutcomeLabelPair("YES", "NO"),
     "basketball.moneyline": OutcomeLabelPair("HOME", "AWAY"),
+    "basketball.game_total_points": OutcomeLabelPair("OVER", "UNDER"),
+    "basketball.game_total_points_199_5": OutcomeLabelPair("OVER", "UNDER"),
+    "basketball.game_total_points_209_5": OutcomeLabelPair("OVER", "UNDER"),
+    "basketball.game_total_points_229_5": OutcomeLabelPair("OVER", "UNDER"),
+    "basketball.game_total_points_239_5": OutcomeLabelPair("OVER", "UNDER"),
+    "basketball.first_half_total_points": OutcomeLabelPair("OVER", "UNDER"),
     "baseball.moneyline": OutcomeLabelPair("HOME_WIN", "AWAY_WIN"),
+    "baseball.total_runs": OutcomeLabelPair("OVER", "UNDER"),
+    "baseball.total_runs_6_5": OutcomeLabelPair("OVER", "UNDER"),
+    "baseball.total_runs_7_5": OutcomeLabelPair("OVER", "UNDER"),
+    "baseball.total_runs_9_5": OutcomeLabelPair("OVER", "UNDER"),
+    "baseball.total_runs_10_5": OutcomeLabelPair("OVER", "UNDER"),
     "table_tennis.match_winner": OutcomeLabelPair("HOME_WIN", "AWAY_WIN"),
 }
 

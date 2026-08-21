@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from modules.predictions.domain.ml_value_objects import MLAlgorithm, MLFramework
 from modules.predictions.domain.value_objects import ModelId, TargetType
 from modules.predictions.infrastructure.ml.catboost_adapter import CatBoostAdapter
+from modules.predictions.infrastructure.ml.football_goals_poisson_adapter import FootballGoalsPoissonAdapter
 from modules.predictions.infrastructure.ml.lightgbm_adapter import LightGBMAdapter
 from modules.predictions.infrastructure.ml.sklearn_adapter import SklearnAdapter
 from modules.predictions.infrastructure.ml.xgboost_adapter import XGBoostAdapter
@@ -35,6 +36,10 @@ def _empty_adapter(framework: str, algorithm: str, target_type: TargetType) -> P
         return CatBoostAdapter(target_type=target_type)
     if fw is MLFramework.SKLEARN:
         return SklearnAdapter(algorithm=MLAlgorithm(algorithm), target_type=target_type)
+    if fw is MLFramework.POISSON_GOALS:
+        # `params`/`class_labels`/`feature_order` all round-trip through `deserialize()` below —
+        # an empty adapter here only needs `target_type` to satisfy the constructor.
+        return FootballGoalsPoissonAdapter(target_type=target_type)
     raise UnknownModelFrameworkError(f"unknown framework '{framework}'")
 
 

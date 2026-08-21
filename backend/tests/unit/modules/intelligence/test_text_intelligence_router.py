@@ -66,6 +66,9 @@ class _RecordingRealAdapter:
     async def explain(self, context: dict) -> str:
         return "real explanation"
 
+    async def assess_prediction_context(self, payload: dict) -> tuple[str, str]:
+        return '{"prediction_review": {"status": "SUPPORTED"}}', "gemini"
+
 
 @dataclass
 class _FailingRealAdapter:
@@ -182,3 +185,31 @@ async def test_falls_back_to_mock_when_real_adapter_raises():
     result = await router.explain({})
 
     assert result == "This verdict is grounded in the match's available data — no single factor dominates it."
+
+
+@pytest.mark.asyncio
+async def test_assess_prediction_context_falls_back_to_mock_when_no_provider_registered():
+    router, _, _ = _build_router()
+
+    raw, source = await router.assess_prediction_context({"context": {}})
+
+    assert "INSUFFICIENT_CONTEXT" in raw
+    assert source == "mock"
+
+
+@pytest.mark.asyncio
+async def test_assess_prediction_context_uses_real_adapter_when_credentialed():
+    router, provider_repo, credential_repo = _build_router()
+    provider = ProviderDefinition(
+        id=ProviderId(uuid.uuid4()), key="gemini", name="Gemini API",
+        category=ProviderCategory.AI, status=ProviderStatus.ACTIVE,
+    )
+    await provider_repo.upsert(provider)
+    await credential_repo.upsert(
+        ProviderCredential(id=CredentialId(uuid.uuid4()), provider_id=provider.id, label="primary", encrypted_value="k")
+    )
+
+    raw, source = await router.assess_prediction_context({"context": {}})
+
+    assert raw == '{"prediction_review": {"status": "SUPPORTED"}}'
+    assert source == "gemini"

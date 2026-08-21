@@ -51,6 +51,7 @@ from modules.sports.infrastructure.persistence.repositories import (
     SqlAlchemyTransferRepository,
     SqlAlchemyVenueRepository,
 )
+from modules.sports.infrastructure.providers.api_sports_adapter import ProviderErrorKind, ProviderRequestError
 from modules.sports.ports.provider_gateway import (
     ProviderCoachRecord,
     ProviderCountryRecord,
@@ -867,6 +868,50 @@ async def test_sync_fixtures_rejects_records_referencing_unreconciled_teams(orch
 
 
 @pytest.mark.asyncio
+async def test_sync_fixtures_scope_key_isolates_by_season_never_sharing_a_checkpoint(orchestrator, session, router):
+    """POST-M24 Phase 7 — real season isolation: `_run_sync`'s checkpoint/lock is keyed by
+    `(sport_code, entity_kind, scope_key)` where `scope_key = f"{competition_ref}:{season_label}"`.
+    Syncing one season for a competition must never be treated as "already synced" (or otherwise
+    interfere with) a different season on the exact same competition — a real basketball/baseball
+    NBA/MLB scenario this phase hit directly (2024 vs. 2026 for the same league)."""
+    await _seed_sport(orchestrator, session)
+    season_2024, season_2026 = SeasonId(uuid4()), SeasonId(uuid4())
+
+    run_2024 = await orchestrator.sync_fixtures("football", "39", "2024", season_2024, T0)
+    await session.commit()
+    run_2026 = await orchestrator.sync_fixtures("football", "39", "2026", season_2026, T0)
+    await session.commit()
+
+    assert run_2024 is not None and run_2026 is not None
+    assert run_2024.scope_key == "39:2024"
+    assert run_2026.scope_key == "39:2026"
+    assert run_2024.scope_key != run_2026.scope_key
+
+
+@pytest.mark.asyncio
+async def test_sync_fixtures_surfaces_a_real_provider_rejection_as_a_failed_run(orchestrator, session, router):
+    """POST-M24 Phase 7 — the exact real behavior this phase's live current-season sync attempt
+    hit: the provider's own plan-tier rejection ("Free plans do not have access to this season")
+    must surface as a real FAILED SyncRun with the genuine error message preserved, never silently
+    swallowed or misreported as a successful empty result."""
+    await _seed_sport(orchestrator, session)
+    router.raise_on_fetch = ProviderRequestError(
+        "api_basketball request to /games rejected by provider: "
+        "{'plan': 'Free plans do not have access to this season, try from 2022 to 2024.'}",
+        kind=ProviderErrorKind.PERMANENT,
+    )
+
+    run = await orchestrator.sync_fixtures("basketball", "12", "2026-2027", SeasonId(uuid4()), T0)
+    await session.commit()
+
+    assert run is not None
+    assert run.status is SyncStatus.FAILED
+    assert "Free plans do not have access to this season" in run.error_message
+    assert run.records_fetched == 0
+    assert run.records_created == 0
+
+
+@pytest.mark.asyncio
 async def test_sync_odds_writes_features_when_a_writer_is_registered(orchestrator_with_odds_writer, router, odds_writer):
     fixture_ref = ProviderRef("mock", "fx1")
     router.odds_to_return = ProviderOddsRecord(fixture_ref=fixture_ref, home_win=2.1, draw=3.4, away_win=3.6)
@@ -1174,10 +1219,10 @@ async def test_sync_upcoming_structured_intelligence_end_to_end(orchestrator, se
     exactly this method (see `sync_upcoming_structured_intelligence_task`'s own docstring) with
     `trigger` left at its default, so this test exercises the real default, not an override, all
     the way down to persisted `SyncRun` rows. Proves: (1) a fixture within the structured-intel
-    window gets both teams' injuries+transfers synced exactly once each (deduped), (2) its
-    lineups sync only fires because it's also within the kickoff-proximity window, (3) every
-    resulting SyncRun carries `SyncTrigger.LIVE_SCHEDULED` — the one trigger `classify_availability`
-    ever honors."""
+    window gets both teams' injuries+transfers+coaching-staff synced exactly once each (deduped),
+    (2) its lineups sync only fires because it's also within the kickoff-proximity window, (3)
+    every resulting SyncRun carries `SyncTrigger.LIVE_SCHEDULED` — the one trigger
+    `classify_availability` ever honors."""
     sport, _ = await orchestrator.reconciler.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
     await session.commit()
     home, _ = await orchestrator.reconciler.reconcile_team(
@@ -1205,23 +1250,26 @@ async def test_sync_upcoming_structured_intelligence_end_to_end(orchestrator, se
     router.lineups_to_return = []
     router.injuries_to_return = []
     router.transfers_to_return = []
+    router.coach_to_return = None
 
     runs = await orchestrator.sync_upcoming_structured_intelligence("football", season_id, T0)
     await session.commit()
 
-    # 2 teams x (injuries + transfers) + 1 lineup sync for the one fixture = 5 SyncRuns
-    assert len(runs) == 5
+    # 2 teams x (injuries + transfers + coaching staff) + 1 lineup sync for the one fixture = 7 SyncRuns
+    assert len(runs) == 7
     assert all(r.trigger is SyncTrigger.LIVE_SCHEDULED for r in runs)
     assert sum(1 for r in runs if r.entity_kind is EntityKind.LINEUP) == 1
     assert sum(1 for r in runs if r.entity_kind is EntityKind.INJURY) == 2
     assert sum(1 for r in runs if r.entity_kind is EntityKind.TRANSFER) == 2
+    assert sum(1 for r in runs if r.entity_kind is EntityKind.COACHING_STAFF) == 2
 
 
 @pytest.mark.asyncio
 async def test_sync_upcoming_structured_intelligence_skips_lineups_outside_kickoff_window(orchestrator, session, router):
     """A fixture within the broader structured-intel window but NOT yet within the narrower
-    lineup pre-match window still gets injuries/transfers synced (not fixture-bound, per spec §7)
-    but no lineup sync attempt at all — the provider itself won't have lineups that early."""
+    lineup pre-match window still gets injuries/transfers/coaching-staff synced (not fixture-bound,
+    per spec §7) but no lineup sync attempt at all — the provider itself won't have lineups that
+    early."""
     sport, _ = await orchestrator.reconciler.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
     await session.commit()
     await orchestrator.reconciler.reconcile_team(
@@ -1249,5 +1297,5 @@ async def test_sync_upcoming_structured_intelligence_skips_lineups_outside_kicko
     runs = await orchestrator.sync_upcoming_structured_intelligence("football", season_id, T0)
     await session.commit()
 
-    assert len(runs) == 4  # 2 teams x (injuries + transfers), no lineup run
+    assert len(runs) == 6  # 2 teams x (injuries + transfers + coaching staff), no lineup run
     assert all(r.entity_kind is not EntityKind.LINEUP for r in runs)

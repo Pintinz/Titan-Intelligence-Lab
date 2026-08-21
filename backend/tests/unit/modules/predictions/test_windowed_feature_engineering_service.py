@@ -11,7 +11,9 @@ from modules.features.application.feature_registration_service import FeatureReg
 from modules.features.application.feature_store_service import FeatureStoreService
 from modules.predictions.application.windowed_feature_engineering_service import (
     TRANSFER_ACTIVITY_WINDOW_DAYS,
+    baseball_fixture_form_differential_calculator,
     baseball_form_calculator,
+    basketball_fixture_form_differential_calculator,
     basketball_form_calculator,
     football_fixture_expected_goals_calculator,
     football_fixture_form_differential_calculator,
@@ -273,6 +275,47 @@ async def test_baseball_form_calculator_averages_runs(registration, store, team_
     value = await calculator.compute_and_write(team_id, T0.replace(day=25))
 
     assert value.value == pytest.approx(5.0)
+
+
+@pytest.mark.asyncio
+async def test_basketball_fixture_form_differential_joins_home_and_away_team_form(
+    registration, store, team_statistics_repo
+):
+    """POST-M24 Phase 5A — `basketball.fixture.form_points_diff_last5`, the fixture-scoped feature
+    `basketball.moneyline`/etc. actually require (a team-scoped feature, per
+    `FixtureFormDifferentialCalculator`'s own docstring, is structurally invisible to a
+    fixture-scoped market prediction request)."""
+    calculator = basketball_fixture_form_differential_calculator(registration, store, team_statistics_repo, window=2)
+    home_id, away_id = TeamId(uuid4()), TeamId(uuid4())
+    team_statistics_repo.add(home_id, {"points": 100}, T0.replace(day=20))
+    team_statistics_repo.add(home_id, {"points": 110}, T0.replace(day=21))
+    team_statistics_repo.add(away_id, {"points": 90}, T0.replace(day=20))
+    team_statistics_repo.add(away_id, {"points": 80}, T0.replace(day=21))
+
+    await calculator.ensure_registered(T0)
+    value = await calculator.compute_and_write("fixture-1", home_id, away_id, T0.replace(day=25))
+
+    assert value.value == pytest.approx(105.0 - 85.0)
+    assert value.entity_type == EntityType.FIXTURE
+    assert value.feature_key.value == "basketball.fixture.form_points_diff_last2"
+
+
+@pytest.mark.asyncio
+async def test_baseball_fixture_form_differential_joins_home_and_away_team_form(
+    registration, store, team_statistics_repo
+):
+    calculator = baseball_fixture_form_differential_calculator(registration, store, team_statistics_repo, window=2)
+    home_id, away_id = TeamId(uuid4()), TeamId(uuid4())
+    team_statistics_repo.add(home_id, {"runs": 3}, T0.replace(day=20))
+    team_statistics_repo.add(home_id, {"runs": 7}, T0.replace(day=21))
+    team_statistics_repo.add(away_id, {"runs": 2}, T0.replace(day=20))
+    team_statistics_repo.add(away_id, {"runs": 2}, T0.replace(day=21))
+
+    await calculator.ensure_registered(T0)
+    value = await calculator.compute_and_write("fixture-1", home_id, away_id, T0.replace(day=25))
+
+    assert value.value == pytest.approx(5.0 - 2.0)
+    assert value.feature_key.value == "baseball.fixture.form_runs_diff_last2"
 
 
 @pytest.mark.asyncio

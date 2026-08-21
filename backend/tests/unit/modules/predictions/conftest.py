@@ -99,6 +99,10 @@ class InMemoryModelRepository:
     async def list_by_status(self, market_id, status):
         return [m for m in self.store.values() if m.market_id == market_id and m.status == status]
 
+    async def get_by_market_and_algorithm(self, market_id, algorithm):
+        candidates = [m for m in self.store.values() if m.market_id == market_id and m.algorithm == algorithm]
+        return max(candidates, key=lambda m: m.version) if candidates else None
+
     async def upsert(self, model: ModelDefinition) -> ModelDefinition:
         self.store[(model.model_key, model.version)] = model
         return model
@@ -175,6 +179,11 @@ class InMemoryPredictionOutcomeRepository:
     async def list_by_market(self, market_id, limit=500):
         return self.store[:limit]
 
+    async def count_by_market(self, market_id):
+        # Mirrors list_by_market's pre-existing simplification: this fake never filters by
+        # market_id (tests only ever populate one market per test), so this is just len(store).
+        return len(self.store)
+
 
 @dataclass
 class InMemoryModelEvaluationRepository:
@@ -227,6 +236,12 @@ class InMemoryPredictionRepository:
     async def get_latest_for_subject(self, subject_ref, market_id):
         matches = await self.list_by_subject(subject_ref, market_id)
         return matches[0] if matches else None
+
+    async def count_by_market(self, market_id, status=None):
+        matches = [p for p in self.store.values() if p.market_id == market_id]
+        if status is not None:
+            matches = [p for p in matches if p.status == status]
+        return len(matches)
 
 
 @pytest.fixture
@@ -397,3 +412,32 @@ class InMemoryDatasetRepository:
 @pytest.fixture
 def dataset_repo():
     return InMemoryDatasetRepository()
+
+
+@dataclass
+class InMemoryExperimentRepository:
+    """Promoted from test_experiment_tracking_service.py's local `_InMemoryExperimentRepository`
+    once test_predictive_signal_audit_service.py needed the same fake, to avoid a second source
+    of truth for it."""
+
+    store: dict = field(default_factory=dict)
+
+    async def get(self, experiment_id):
+        return self.store.get(experiment_id)
+
+    async def record(self, experiment):
+        self.store[experiment.id] = experiment
+        return experiment
+
+    async def update(self, experiment):
+        self.store[experiment.id] = experiment
+        return experiment
+
+    async def list_by_market(self, market_id, limit=50):
+        matches = [e for e in self.store.values() if e.market_id == market_id]
+        return matches[:limit]
+
+
+@pytest.fixture
+def experiment_repo():
+    return InMemoryExperimentRepository()

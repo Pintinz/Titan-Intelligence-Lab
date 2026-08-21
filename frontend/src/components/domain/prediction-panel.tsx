@@ -1,4 +1,6 @@
 import { ConfidenceTelemetry } from '@/components/domain/confidence-telemetry'
+import { ContextualReviewPanel } from '@/components/domain/contextual-review-panel'
+import { FootballExplanationPanel } from '@/components/domain/football-explanation-panel'
 import { Card } from '@/components/ui/card'
 import type { ConfidenceBreakdownDto, PredictionDto } from '@/lib/api/types'
 
@@ -181,6 +183,10 @@ export function PredictionPanel({
           <p className="mt-2 text-sm text-text-secondary">{explanation.ai_explanation}</p>
         </Card>
       )}
+
+      <FootballExplanationPanel explanation={prediction.football_explanation} />
+
+      <ContextualReviewPanel review={prediction.contextual_review} />
     </div>
   )
 }

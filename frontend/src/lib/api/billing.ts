@@ -1,8 +1,22 @@
 import { api } from '@/lib/api/client'
-import type { BillingPeriod, PlanDto, PlanTier, SubscriptionDto } from '@/lib/api/types'
+import type {
+  BillingPeriod,
+  ChargeResultDto,
+  CheckoutCardInput,
+  CheckoutCustomerInput,
+  PlanDto,
+  PlanTier,
+  SubscriptionDto,
+} from '@/lib/api/types'
 
 export const billingApi = {
   listPlans: () => api.get<PlanDto[]>('/api/v1/billing/plans'),
+  checkout: (input: {
+    plan_key: string
+    card: CheckoutCardInput
+    customer: CheckoutCustomerInput
+    redirect_url: string
+  }) => api.post<ChargeResultDto>('/api/v1/billing/checkout', input),
   createPlan: (input: { key: string; name: string; tier: PlanTier; billing_period?: BillingPeriod; price_cents?: number }) =>
     api.post<PlanDto>('/api/v1/billing/plans', input),
   setEntitlement: (planKey: string, featureKey: string, limitValue: number | null) =>

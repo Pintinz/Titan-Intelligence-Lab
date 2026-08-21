@@ -96,7 +96,7 @@ export interface InvitationDto {
 
 // -- billing --------------------------------------------------------------------------------
 
-export type PlanTier = 'free' | 'rewarded' | 'premium'
+export type PlanTier = 'free' | 'rewarded' | 'pro' | 'premium' | 'enterprise'
 export type BillingPeriod = 'monthly' | 'annual'
 
 export interface PlanDto {
@@ -116,6 +116,37 @@ export interface SubscriptionDto {
   status: string
   started_at: string
   canceled_at: string | null
+}
+
+// -- checkout ---------------------------------------------------------------------------------
+
+export interface CheckoutCardInput {
+  number: string
+  expiry_month: string
+  expiry_year: string
+  cvv: string
+}
+
+export interface CheckoutCustomerInput {
+  email: string
+  first_name: string
+  last_name: string
+  middle_name?: string
+  phone_country_code: string
+  phone_number: string
+  address_line1: string
+  city: string
+  state: string
+  postal_code: string
+  country: string
+}
+
+export type ChargeStatus = 'pending' | 'succeeded' | 'failed'
+
+export interface ChargeResultDto {
+  status: ChargeStatus
+  redirect_url: string | null
+  message: string
 }
 
 // -- webhooks -------------------------------------------------------------------------------
@@ -341,10 +372,156 @@ export interface ExplanationBundleDto {
   ai_explanation: string | null
 }
 
+/** Matches `_serialize_contextual_review` (prediction_router.py) — the Gemini Prediction
+ * Reasoning Engine's structured assessment of the base prediction against verified pre-cutoff
+ * evidence. `confidence_score`/`confidence_level` here are Gemini's confidence *in this
+ * contextual assessment itself*, never an outcome probability — never render either alongside or
+ * instead of `PredictionDto.probability` (see `ContextualReviewPanel`'s own docstring). */
+export interface ContextualReviewDto {
+  review_status:
+    | 'SUPPORTED'
+    | 'WEAKLY_SUPPORTED'
+    | 'NEUTRAL'
+    | 'CHALLENGED'
+    | 'STRONGLY_CHALLENGED'
+    | 'INSUFFICIENT_CONTEXT'
+  overall_assessment: string
+  confidence_level: 'VERY_LOW' | 'LOW' | 'MEDIUM' | 'HIGH' | 'VERY_HIGH'
+  confidence_score: number
+  statistical_baseline: {
+    applicable: boolean
+    available: boolean
+    algorithm: string | null
+    probabilities: Record<string, number> | null
+    reason: string | null
+  }
+  contextual_assessment: Record<
+    string,
+    { impact: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL' | 'MIXED' | 'UNKNOWN'; strength: string; score: number; reason: string }
+  >
+  supporting_factors: Array<{
+    factor: string
+    impact: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL' | 'MIXED' | 'UNKNOWN'
+    strength: string
+    evidence: string
+    source_ids: string[]
+  }>
+  risk_factors: Array<{
+    factor: string
+    impact: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL' | 'MIXED' | 'UNKNOWN'
+    strength: string
+    evidence: string
+    source_ids: string[]
+  }>
+  missing_context: string[]
+  reconsideration: {
+    direction: 'SUPPORTS_BASE_PREDICTION' | 'WEAKENS_BASE_PREDICTION' | 'MIXED' | 'NO_MATERIAL_CHANGE' | 'INSUFFICIENT_EVIDENCE'
+    material_change: boolean
+    reason: string
+  } | null
+  evidence_quality: {
+    overall: 'VERY_LOW' | 'LOW' | 'MEDIUM' | 'HIGH' | 'VERY_HIGH'
+    source_count: number
+    timestamp_valid: boolean
+    pre_event_only: boolean
+    conflicting_information: boolean
+  } | null
+  source_ids: string[]
+  prediction_cutoff: string | null
+  prompt_version: string
+  generated_at: string | null
+}
+
+/** Matches `_serialize_football_explanation` (prediction_router.py) — the Sports-Analyst
+ * Explainability pipeline's attribution-grounded "why did the model predict this" read.
+ * `key_reasons`/`counter_signals`/`context` carry real, computed values (`feature`,
+ * `football_concept`, `team`, `direction`, `contribution`, `role`) that TitanIQ itself derived
+ * from the model's attribution — `analysis` within each is Gemini's narration of that already-
+ * fixed number, never a replacement for it. Football-specific by design (module name, semantic
+ * mapping); requesting it for a non-football market degrades to `UNAVAILABLE` rather than
+ * fabricating football language for a market that has none. */
+export interface FootballExplanationDto {
+  /** Sourced from the same `Prediction` this explanation was generated for (spec §17: "every
+   * attribution must include feature/value/contribution/model ID/model version/prediction ID"). */
+  model_id: string
+  model_version: string
+  prediction_id: string
+  status: 'available' | 'unavailable' | 'validation_failed'
+  attribution_method: 'linear_coefficient' | 'shap' | 'heuristic_importance' | 'unavailable'
+  key_reasons: Array<{
+    rank: number
+    feature: string
+    football_concept: string
+    team: string | null
+    direction: 'supports' | 'opposes'
+    contribution: number
+    evidence: string
+    analysis: string
+  }>
+  counter_signals: Array<{
+    feature: string
+    football_concept: string
+    contribution: number
+    analysis: string
+  }>
+  context: Array<{
+    type: string
+    description: string
+    model_contribution: number
+    role: 'model_driver' | 'supporting_context' | 'context_only'
+  }>
+  verdict: string
+  match_profile: string
+  confidence_explanation: string
+  bottom_line: string
+  /** Sports-Analyst Explainability Upgrade — market-aware summary (spec §1), grounded only in
+   * the real key_reasons/counter_signals already computed. Empty string when unavailable. */
+  market_analysis: string
+  /** Correct-Score-only deep reasoning (spec §2/§3/§4) — `null` for every other market. Every
+   * numeric field is real (`Prediction.probability_distribution`/`feature_snapshot`); only the
+   * four prose fields are narrated. */
+  scoreline_reasoning: {
+    selected_score: string
+    selected_probability: number
+    expected_home_goals: number | null
+    expected_away_goals: number | null
+    alternatives: Array<{ score: string; probability: number }>
+    home_goal_case: string
+    away_goal_case: string
+    alternative_comparison: string
+  } | null
+  /** One real, verified evidence item (spec §5/§6/§17) per array entry, `source_id` traceable to
+   * a real backend item — never a Gemini-invented source. `analysis` is empty when the item
+   * wasn't narrated but is still real, verified evidence and still rendered. */
+  injury_evidence: Array<NarratedEvidenceDto>
+  news_evidence: Array<NarratedEvidenceDto>
+  lineup_evidence: Array<NarratedEvidenceDto>
+  context_quality: string
+  unavailable_reason: string | null
+  prompt_version: string
+  generated_at: string | null
+}
+
+export interface NarratedEvidenceDto {
+  source_id: string
+  category: string
+  summary: string
+  entity_ref: string | null
+  source_name: string | null
+  published_at: string | null
+  analysis: string
+}
+
 export interface PredictionDto {
   id: string
   market_id: string
   model_id: string
+  /** Real `ModelDefinition.algorithm`/`.framework` for the model that produced this prediction
+   * (e.g. `"xgboost_gbm"`/`"xgboost"`, `"poisson_goals_model"`/`"poisson_goals"`) — `null` only if
+   * the model lookup itself failed, never a stand-in for "unknown". Humanize via
+   * `humanizeModelAlgorithm` before display; never infer architecture from the market name. */
+  model_algorithm: string | null
+  model_framework: string | null
   subject_ref: string
   value: string | number
   probability: number
@@ -365,6 +542,26 @@ export interface PredictionDto {
   /** Historical mean absolute error for this market — populated only for a regression-shaped
    * market, and only once it has evaluated outcome history to derive it from. */
   expected_error: number | null
+  /** Present only when the request set `include_contextual_review: true` — `null` otherwise
+   * (existing callers see no shape change) and also `null` on any Gemini Reasoning Engine
+   * failure (never breaks this response). */
+  contextual_review: ContextualReviewDto | null
+  /** Present only when the request set `include_football_explanation: true` — `null` otherwise,
+   * and also `null` on any Sports-Analyst Explainability pipeline failure (never breaks this
+   * response). Distinct from `contextual_review`: this explains what the model itself weighed;
+   * `contextual_review` assesses that prediction against fresh evidence. */
+  football_explanation: FootballExplanationDto | null
+  /** Always `"READY"` on a successful response — a blocked/insufficient-data generation returns
+   * a non-2xx status with a structured `{prediction_status: "BLOCKED", reason_code, failed_gates}`
+   * body instead of this shape (see `ApiError`/prediction_router.py `_blocked_detail`). */
+  prediction_status: 'READY'
+  /** Always `"ACTIVE"` on a successful response — reaching this point means a real Champion
+   * model was used (a missing Champion blocks generation before a response is ever built). */
+  champion_status: 'ACTIVE'
+  /** Whether the always-on `ExplainabilityEngine` narrative (`explanation.ai_explanation`) was
+   * produced — distinct from `contextual_review`/`football_explanation`, which carry their own
+   * status fields for the two opt-in explanation subsystems. */
+  explanation_status: 'GENERATED' | 'UNAVAILABLE'
 }
 
 /** Matches `_serialize_summary` (prediction_analytics_router.py) — the shape actually returned by
@@ -478,6 +675,10 @@ export interface FixtureSummaryDto {
    * `null` for football (not fetched by that adapter) or before the provider has reported any
    * periods for this fixture yet. */
   period_scores: { kind: 'quarter' | 'inning'; home: Array<number | null>; away: Array<number | null> } | null
+  /** Real possession/shots/corners/fouls/cards for a completed match, keyed exactly like the
+   * backend's `team_statistics.stat_set` — `null` whenever nothing was ever recorded for this
+   * fixture (most historical matches today), never a fabricated placeholder. */
+  stats: { home: Record<string, number | null> | null; away: Record<string, number | null> | null } | null
 }
 
 export interface StandingRowDto {
@@ -672,9 +873,9 @@ export interface OverconfidenceSummaryDto {
 
 // -- Provider Registry (Milestone 11B) ----------------------------------------------------------
 
-export type ProviderCategory = 'sports_data' | 'ai' | 'news' | 'odds' | 'general'
+export type ProviderCategory = 'sports_data' | 'ai' | 'news' | 'odds' | 'payment' | 'advertising' | 'general'
 export type ProviderStatus = 'active' | 'inactive' | 'maintenance'
-export type ProviderAuthType = 'bearer' | 'api_key_header' | 'api_key_query' | 'basic'
+export type ProviderAuthType = 'bearer' | 'api_key_header' | 'api_key_query' | 'basic' | 'oauth2_client_credentials'
 export type ConnectionTestStatus =
   | 'healthy'
   | 'warning'
@@ -860,6 +1061,10 @@ export interface PublicKgPreviewNodeDto {
   id: string
   type: string
   entity_ref: string
+  /** Real display name resolved from the relational table `entity_ref` points at (team short
+   * name, "Home vs Away" for a match, etc.) — null, never a guess, when no resolver exists yet
+   * for this node type. Falls back to `type` when rendering. */
+  label: string | null
 }
 
 /** `entity_ref`/`node_type` only, deliberately not resolved to a display name — no per-node-type

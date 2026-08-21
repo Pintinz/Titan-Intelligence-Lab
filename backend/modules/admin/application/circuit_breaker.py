@@ -15,6 +15,13 @@ from datetime import datetime, timedelta
 from modules.admin.domain.value_objects import CircuitState
 
 
+def _ensure_aware(dt: datetime, reference: datetime) -> datetime:
+    """SQLite/aiosqlite drops tzinfo on read-back (docs/decisions.md ADR-007)."""
+    if dt.tzinfo is None and reference.tzinfo is not None:
+        return dt.replace(tzinfo=reference.tzinfo)
+    return dt
+
+
 @dataclass
 class _BreakerState:
     state: CircuitState = CircuitState.CLOSED
@@ -40,9 +47,12 @@ class CircuitBreaker:
         if state.state is CircuitState.CLOSED:
             return True
         if state.state is CircuitState.OPEN:
-            if state.opened_at is not None and now - state.opened_at >= self.recovery_timeout:
-                state.state = CircuitState.HALF_OPEN
-                return True
+            if state.opened_at is not None:
+                opened_at = _ensure_aware(state.opened_at, now)
+                aware_now = _ensure_aware(now, opened_at)
+                if aware_now - opened_at >= self.recovery_timeout:
+                    state.state = CircuitState.HALF_OPEN
+                    return True
             return False
         return True  # HALF_OPEN: allow exactly one trial request through
 

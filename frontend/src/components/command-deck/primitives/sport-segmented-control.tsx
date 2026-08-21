@@ -1,4 +1,4 @@
-import { SPORT_SLUGS, type SportMeta } from '@/lib/hooks/use-sport'
+import { useAvailableSports, type SportMeta } from '@/lib/hooks/use-sport'
 import { CD_DOMAIN_COLOR_VAR, domainTint, sportDomainFor } from './domain'
 
 /**
@@ -11,6 +11,7 @@ import { CD_DOMAIN_COLOR_VAR, domainTint, sportDomainFor } from './domain'
  * shrinking text, so four segments never clip off-screen on narrow viewports.
  */
 export function SportSegmentedControl({ sport, onSportChange }: { sport: SportMeta; onSportChange: (sport: SportMeta) => void }) {
+  const availableSports = useAvailableSports()
   return (
     <div
       role="tablist"
@@ -18,7 +19,7 @@ export function SportSegmentedControl({ sport, onSportChange }: { sport: SportMe
       className="-mx-1 flex w-fit max-w-full gap-1 overflow-x-auto rounded-[var(--cd-radius-md)] border p-1 backdrop-blur-md"
       style={{ borderColor: 'var(--cd-border-default)', backgroundColor: 'color-mix(in srgb, var(--cd-surface-2) 70%, transparent)' }}
     >
-      {SPORT_SLUGS.map((s) => {
+      {availableSports.map((s) => {
         const active = s.slug === sport.slug
         const domain = sportDomainFor(s.slug)
         const color = active && domain ? CD_DOMAIN_COLOR_VAR[domain] : active ? 'var(--cd-text-inverse)' : 'var(--cd-text-secondary)'

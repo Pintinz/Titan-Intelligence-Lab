@@ -19,7 +19,10 @@ provenance, so accepting a trigger argument here would let a caller spoof it. Th
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+import functools
+import logging
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 from uuid import UUID
@@ -27,6 +30,32 @@ from uuid import UUID
 from modules.ingestion.infrastructure.celery.celery_app import celery_app
 from modules.intelligence.application.scheduled_news_sync_service import ScheduledNewsSyncService
 from modules.sports.domain.value_objects import SeasonId
+
+logger = logging.getLogger("titaniq.intelligence.tasks")
+
+
+def _logged(task_name: str):
+    """See `modules.ingestion.infrastructure.celery.tasks._logged` — identical structured
+    start/success/failure logging, duplicated per-module per this codebase's existing
+    `_RETRY_KWARGS` convention."""
+
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(self, *args, **kwargs):
+            task_id = getattr(self.request, "id", None)
+            logger.info("celery_task.started", extra={"task": task_name, "task_id": task_id})
+            try:
+                result = fn(self, *args, **kwargs)
+            except Exception:
+                logger.error("celery_task.failed", extra={"task": task_name, "task_id": task_id}, exc_info=True)
+                raise
+            logger.info("celery_task.succeeded", extra={"task": task_name, "task_id": task_id})
+            return result
+
+        return wrapper
+
+    return decorator
+
 
 _ScheduledNewsSyncServiceFactory = Callable[[], Awaitable[ScheduledNewsSyncService]]
 _scheduled_news_sync_service_factory: _ScheduledNewsSyncServiceFactory | None = None
@@ -37,13 +66,28 @@ def set_scheduled_news_sync_service_factory(factory: _ScheduledNewsSyncServiceFa
     _scheduled_news_sync_service_factory = factory
 
 
-async def _get_scheduled_news_sync_service() -> ScheduledNewsSyncService:
+@asynccontextmanager
+async def _get_scheduled_news_sync_service() -> AsyncIterator[ScheduledNewsSyncService]:
+    """Milestone 24 §3/1(b): closes the worker session tagged onto the service by the production
+    factory (`bootstrap.py`'s `_worker_session` attribute) before this task's `asyncio.run()` call
+    tears down its event loop — see `modules.ingestion.infrastructure.celery.tasks._get_orchestrator`
+    for the full rationale, identical here."""
     if _scheduled_news_sync_service_factory is None:
         raise RuntimeError(
             "scheduled news sync service factory not configured — "
             "call set_scheduled_news_sync_service_factory() at worker startup"
         )
-    return await _scheduled_news_sync_service_factory()
+    service = await _scheduled_news_sync_service_factory()
+    try:
+        yield service
+    finally:
+        session = getattr(service, "_worker_session", None)
+        if session is not None:
+            await session.close()
+        redis_client = getattr(service, "_worker_redis_client", None)
+        if redis_client is not None:
+            await redis_client.aclose()
+        await asyncio.sleep(0)
 
 
 def _resolve_now(now_iso: str | None) -> datetime:
@@ -60,11 +104,12 @@ def _summary_dict(summary) -> dict:
 _RETRY_KWARGS = {"autoretry_for": (Exception,), "retry_backoff": True, "retry_backoff_max": 300, "max_retries": 3}
 
 
-@celery_app.task(name="intelligence.sync_scheduled_news", bind=True, queue="default", **_RETRY_KWARGS)
+@celery_app.task(name="intelligence.sync_scheduled_news", bind=True, **_RETRY_KWARGS)
+@_logged("intelligence.sync_scheduled_news")
 def sync_scheduled_news_task(self, sport_code: str, season_id_str: str, now_iso: str | None = None) -> dict:
     async def _do() -> dict:
-        service = await _get_scheduled_news_sync_service()
-        summary = await service.run(sport_code, SeasonId(UUID(season_id_str)), _resolve_now(now_iso))
-        return _summary_dict(summary)
+        async with _get_scheduled_news_sync_service() as service:
+            summary = await service.run(sport_code, SeasonId(UUID(season_id_str)), _resolve_now(now_iso))
+            return _summary_dict(summary)
 
     return asyncio.run(_do())

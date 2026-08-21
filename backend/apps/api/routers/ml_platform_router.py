@@ -31,14 +31,15 @@ from apps.api.composition import (
     build_dataset_builder,
     build_dataset_registry_service,
     build_experiment_tracking_service,
+    build_goal_generative_comparison_service,
     build_market_registry_service,
     build_backtest_service,
     build_error_memory_service,
     build_model_monitoring_service,
     build_model_registry_service,
     build_model_version_resolver,
+    build_model_comparison_repo,
     build_retraining_scheduler,
-    get_model_comparison_repo,
     get_model_loader_service,
     get_session,
     get_shap_explainer_service,
@@ -54,6 +55,9 @@ from modules.predictions.application.dataset_registry_service import (
 from modules.predictions.application.experiment_tracking_service import (
     ExperimentNotFoundError,
     InvalidExperimentDecisionError,
+)
+from modules.predictions.application.goal_generative_comparison_service import (
+    MarketNotEligibleError as GoalGenerativeMarketNotEligibleError,
 )
 from modules.predictions.application.model_registry_service import (
     InvalidDeploymentModeError,
@@ -576,7 +580,7 @@ async def latest_challenger_comparison(
     retrain with enough samples for a comparison holdout, or comparisons aren't wired in this
     deployment — an honest gap, not an error."""
     market_id = await _require_market_id(session, market_key)
-    comparison = await get_model_comparison_repo().get_latest(market_id)
+    comparison = await build_model_comparison_repo(session).get_latest(market_id)
     return envelope(data=_serialize_comparison(comparison) if comparison else None)
 
 
@@ -601,6 +605,34 @@ def _serialize_comparison(comparison) -> dict:
         "holdout_sample_count": comparison.holdout_sample_count,
         "evaluated_at": comparison.evaluated_at.isoformat(),
     }
+
+
+@router.post("/retraining/{market_key}/goal-generative-comparison")
+async def compare_goal_generative_baseline(
+    market_key: str, session: AsyncSession = Depends(get_session), _user: User = Depends(require_role(Role.ADMINISTRATOR))
+):
+    """Spec §9 "Cross-Architecture Validation" — empirically compares the derived Poisson
+    baseline against `market_key`'s own direct-classifier Champion, using real resolved outcome
+    history. Only `football.match_winner`/`football.both_teams_to_score` have a goal-generative
+    derivation to compare against (422 otherwise). Records the result as an `Experiment`; never
+    auto-promotes or auto-ensembles — spec §9's own instruction is that an ensemble is introduced
+    only once an experiment like this one demonstrates real improved out-of-sample performance."""
+    market_id = await _require_market_id(session, market_key)
+    service = build_goal_generative_comparison_service(session)
+    try:
+        result = await service.compare(market_id, market_key, _now())
+    except GoalGenerativeMarketNotEligibleError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    return envelope(
+        data={
+            "market_key": result.market_key,
+            "sample_count": result.sample_count,
+            "classifier_log_loss": result.classifier_log_loss,
+            "goal_generative_log_loss": result.goal_generative_log_loss,
+            "goal_generative_wins": result.goal_generative_wins,
+            "reason": result.reason,
+        }
+    )
 
 
 # --- Evaluation -------------------------------------------------------------------------------

@@ -346,3 +346,43 @@ async def test_backfill_trigger_persists_unknown_availability_through_the_real_p
 
     value = await orchestrator.feature_store.store.online.get(FeatureKey("intelligence.injury_impact"), EntityType.PLAYER, str(player.id))
     assert value is None
+
+
+async def test_second_enrich_call_for_the_same_article_reuses_events_without_a_second_gemini_call(combined_session):
+    """POST-M24 Phase 2: `enrich_article` has no lookup-before-call guard of its own before this
+    fix — a second call for an already-enriched article (overlapping backfill/scheduled sync, a
+    retry after partial downstream failure) would re-extract via Gemini. Confirms the fix reuses
+    the article's already-recorded `NewsEvent`s (via `NewsEventRepositoryPort.list_for_article`)
+    instead of calling the text-intelligence adapter's `extract_events` a second time."""
+    nodes = SqlAlchemyKGNodeRepository(session=combined_session)
+    edges = SqlAlchemyKGEdgeRepository(session=combined_session)
+    population = KnowledgeGraphPopulationService(nodes=nodes, edges=edges)
+    player = await population.upsert_node(NodeType.PLAYER, "player-1", now=T0, aliases=["Test Player"])
+    await combined_session.commit()
+
+    orchestrator = await _build_orchestrator(
+        combined_session, "injury", (str(player.id),), mention_text="Test Player", mention_type="player"
+    )
+    call_count = {"value": 0}
+    real_adapter = orchestrator.event_extraction.text_intelligence
+
+    class _CountingAdapter(_FixedEventAdapter):
+        async def extract_events(self, text):
+            call_count["value"] += 1
+            return await real_adapter.extract_events(text)
+
+    counting = _CountingAdapter(event_type="injury", entities=(str(player.id),), mention_text="Test Player", mention_type="player")
+    orchestrator.event_extraction.text_intelligence = counting
+    orchestrator.event_extraction.entity_extraction.text_intelligence = counting
+
+    _source, article = await _seed_source_and_article(combined_session, "Star striker suffers injury in training.")
+
+    first = await orchestrator.enrich_article(article, T0, trigger=SyncTrigger.LIVE_SCHEDULED)
+    await combined_session.commit()
+    second = await orchestrator.enrich_article(article, T0, trigger=SyncTrigger.LIVE_SCHEDULED)
+    await combined_session.commit()
+
+    assert call_count["value"] == 1  # the second call reused the persisted event, no second Gemini call
+    assert len(first) == 1
+    assert len(second) == 1
+    assert first[0].impact_score == second[0].impact_score

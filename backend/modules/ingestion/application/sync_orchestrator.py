@@ -672,12 +672,14 @@ class SyncOrchestrator:
         given (matching every other Beat-driven sync method's existing per-competition/season
         scoping, e.g. `sync_standings`), not the entire fixture catalog.
 
-        Injuries/transfers are synced once per distinct team across the whole run (a team playing
-        multiple upcoming fixtures in the window is not re-synced per fixture) — lineups are
-        synced per fixture, gated by `sync_lineups`/`reconcile_lineup`'s own kickoff-proximity
-        check, so calling this well before kickoff is safe: `reconcile_lineup` itself declines to
-        mark anything `VERIFIED_PRE_MATCH` outside the window, it just won't have real lineup data
-        yet either (the provider itself typically has none to return that early)."""
+        Injuries/transfers/coaching staff are synced once per distinct team across the whole run
+        (a team playing multiple upcoming fixtures in the window is not re-synced per fixture) —
+        lineups are synced per fixture, gated by `sync_lineups`/`reconcile_lineup`'s own kickoff-
+        proximity check, so calling this well before kickoff is safe: `reconcile_lineup` itself
+        declines to mark anything `VERIFIED_PRE_MATCH` outside the window, it just won't have
+        real lineup data yet either (the provider itself typically has none to return that
+        early). `sync_coaching_staff` has no such gate — a team's current head coach is safe to
+        confirm at any point before kickoff, matching injuries/transfers."""
         fixtures = await self.reconciler.fixtures.list_by_season(season_id)
         window_end = now + timedelta(hours=structured_intel_window_hours)
         upcoming = [
@@ -699,7 +701,8 @@ class SyncOrchestrator:
                 team_ref = team.provider_refs[0]
                 injury_run = await self.sync_injuries(sport_code, team_ref, now, trigger=trigger, force=force)
                 transfer_run = await self.sync_transfers(sport_code, team_ref, now, trigger=trigger, force=force)
-                runs.extend(r for r in (injury_run, transfer_run) if r is not None)
+                coach_run = await self.sync_coaching_staff(sport_code, team_ref, now, trigger=trigger, force=force)
+                runs.extend(r for r in (injury_run, transfer_run, coach_run) if r is not None)
 
             if not fixture.provider_refs:
                 continue

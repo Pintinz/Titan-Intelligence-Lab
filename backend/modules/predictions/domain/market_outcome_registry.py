@@ -27,9 +27,16 @@ equality — HOME_WIN/DRAW/AWAY_WIN has no affirmative/negative side to check po
 **Football market catalog expansion (2026-08-02)** added nine more real resolvers, all computable
 from a fixture's full-time score alone (four more total-goals lines, away team goals, home/away
 clean sheet, home/away win-to-nil) — sixteen resolver_key entries total now. Also added, correctly
-left unresolved: first-half goals, first-half BTTS, and second-half winner all need sub-match
-score data this platform doesn't ingest yet (the same honest gap `football.first_half_winner`
-already had); Double Chance and Goal Range are deliberately NOT seeded as live markets at all —
+left unresolved at the time: first-half goals, first-half BTTS, first-half winner, and second-half
+winner all needed sub-match score data this platform didn't ingest yet.
+
+**Post-M24 half-result resolvers** gave all four of those a real `resolver_key` (twenty total now)
+— but this reflects the *resolution logic* existing, not the underlying data existing yet: no
+provider adapter parses a football fixture's half-time score today, so every one of these four
+still resolves nothing in production until that separate, not-yet-authorized ingestion change
+lands (see `outcome_resolution_service.py` and `entity_reconciliation_service._extract_half_time_scores`
+for the exact honest chain). Double Chance and Goal Range are deliberately NOT seeded as live
+markets at all —
 Double Chance is mathematically derived from `football.match_winner`'s own HOME_DRAW_AWAY
 distribution (P(1X) = P(H)+P(D), etc.), not an independently-trained model, and building that
 derivation is separate Derived-Intelligence work; Goal Range (4-way score-bucket classification)
@@ -164,22 +171,30 @@ MARKET_OUTCOME_CATALOG: dict[str, MarketOutcomeSpec] = {
         "football.away_win_to_nil", "football", "Away Win To Nil", OutcomeType.BINARY_YES_NO, ("YES", "NO"),
         resolver_key="football.away_win_to_nil",
     ),
-    # No resolver: needs first/second-half sub-match score data this platform doesn't ingest yet
-    # (same documented gap as football.first_half_winner, seeded but unresolved for the same reason).
+    # Resolver exists (post-M24 half-result work) but currently resolves nothing in production:
+    # every one of these reads `Fixture.period_scores` (kind="half"), which no provider adapter
+    # populates yet for football (confirmed: neither ApiFootballAdapter nor FootballDataOrgAdapter
+    # parses their real API's half-time score field today — a separate, not-yet-authorized
+    # ingestion change). Every currently-completed fixture correctly resolves to "unresolved" for
+    # these four markets, not a fabricated result — see outcome_resolution_service.py's
+    # _first_half_winner/_second_half_winner/_first_half_goals_over_under_0_5/
+    # _first_half_both_teams_to_score and _extract_half_time_scores in
+    # entity_reconciliation_service.py for the full honest chain.
     "football.first_half_winner": MarketOutcomeSpec(
         "football.first_half_winner", "football", "First Half Winner", OutcomeType.HOME_DRAW_AWAY,
-        ("HOME_WIN", "DRAW", "AWAY_WIN"),
+        ("HOME_WIN", "DRAW", "AWAY_WIN"), resolver_key="football.first_half_winner",
     ),
     "football.second_half_winner": MarketOutcomeSpec(
         "football.second_half_winner", "football", "Second Half Winner", OutcomeType.HOME_DRAW_AWAY,
-        ("HOME_WIN", "DRAW", "AWAY_WIN"),
+        ("HOME_WIN", "DRAW", "AWAY_WIN"), resolver_key="football.second_half_winner",
     ),
     "football.first_half_goals": MarketOutcomeSpec(
         "football.first_half_goals", "football", "First Half Goals Over/Under 0.5", _OU, _OVER_UNDER_VALUES,
+        resolver_key="football.first_half_goals",
     ),
     "football.first_half_both_teams_to_score": MarketOutcomeSpec(
         "football.first_half_both_teams_to_score", "football", "First Half Both Teams To Score",
-        OutcomeType.BINARY_YES_NO, ("YES", "NO"),
+        OutcomeType.BINARY_YES_NO, ("YES", "NO"), resolver_key="football.first_half_both_teams_to_score",
     ),
     # Specification-only, deliberately not seeded as a live market (see module docstring): a
     # 4-way score-bucket classification with no existing MarketKind predictor strategy to serve it.
@@ -203,11 +218,80 @@ MARKET_OUTCOME_CATALOG: dict[str, MarketOutcomeSpec] = {
     "basketball.totals": MarketOutcomeSpec(
         "basketball.totals", "basketball", "Totals", _OU, _OVER_UNDER_VALUES,
     ),
+    # The actually-seeded market_key (basketball/market_seeding.py) behind the generic "totals"
+    # entry above — real resolver: `_total_points_over_under_219_5` against
+    # `Fixture.home_score + away_score`, line grounded in this platform's own 1,708-fixture median
+    # (see outcome_resolution_service.py), same pattern as football.total_goals_over_under.
+    "basketball.game_total_points": MarketOutcomeSpec(
+        "basketball.game_total_points", "basketball", "Game Total Points Over/Under 219.5", _OU, _OVER_UNDER_VALUES,
+        resolver_key="basketball.game_total_points",
+    ),
+    # Four more lines bracketing the median (real dev.db percentiles: p25=199, median=220,
+    # p75=237), same "spread of fixed lines around the real central tendency" shape as football's
+    # total_goals_over_under_0_5/1_5/3_5/4_5 around 2.5 — see outcome_resolution_service.py.
+    "basketball.game_total_points_199_5": MarketOutcomeSpec(
+        "basketball.game_total_points_199_5", "basketball", "Game Total Points Over/Under 199.5",
+        _OU, _OVER_UNDER_VALUES, resolver_key="basketball.game_total_points_199_5",
+    ),
+    "basketball.game_total_points_209_5": MarketOutcomeSpec(
+        "basketball.game_total_points_209_5", "basketball", "Game Total Points Over/Under 209.5",
+        _OU, _OVER_UNDER_VALUES, resolver_key="basketball.game_total_points_209_5",
+    ),
+    "basketball.game_total_points_229_5": MarketOutcomeSpec(
+        "basketball.game_total_points_229_5", "basketball", "Game Total Points Over/Under 229.5",
+        _OU, _OVER_UNDER_VALUES, resolver_key="basketball.game_total_points_229_5",
+    ),
+    "basketball.game_total_points_239_5": MarketOutcomeSpec(
+        "basketball.game_total_points_239_5", "basketball", "Game Total Points Over/Under 239.5",
+        _OU, _OVER_UNDER_VALUES, resolver_key="basketball.game_total_points_239_5",
+    ),
+    # New market — basketball's genuine half-time (Q1+Q2) point total, real resolver:
+    # `_first_half_points_over_under_109_5` against `Fixture.period_scores` (kind="quarter"),
+    # 100%-covered for completed basketball fixtures unlike football's still-unwired half-time
+    # ingestion — see outcome_resolution_service.py.
+    "basketball.first_half_total_points": MarketOutcomeSpec(
+        "basketball.first_half_total_points", "basketball", "First Half Total Points Over/Under 109.5",
+        _OU, _OVER_UNDER_VALUES, resolver_key="basketball.first_half_total_points",
+    ),
     "basketball.quarter_winner": MarketOutcomeSpec(
         "basketball.quarter_winner", "basketball", "Quarter Winner", OutcomeType.HOME_AWAY, ("HOME", "AWAY"),
     ),
     "basketball.half_winner": MarketOutcomeSpec(
         "basketball.half_winner", "basketball", "Half Winner", OutcomeType.HOME_AWAY, ("HOME", "AWAY"),
+    ),
+    # The actually-seeded market_key (basketball/market_seeding.py) behind the resolver above —
+    # same shape, kept as its own entry for the same reason baseball.moneyline is (see below).
+    # HOME_DRAW_AWAY (HOME_WIN/AWAY_WIN/DRAW), not HOME_AWAY: a tied halftime score is a real,
+    # common basketball outcome (resolved via THREE_WAY_MARKET_RESOLVERS, reusing football's own
+    # `_first_half_winner` — see outcome_resolution_service.py).
+    "basketball.first_half_winner": MarketOutcomeSpec(
+        "basketball.first_half_winner", "basketball", "First Half Winner", OutcomeType.HOME_DRAW_AWAY,
+        ("HOME_WIN", "AWAY_WIN", "DRAW"), resolver_key="basketball.first_half_winner",
+    ),
+    # POST-M24 Phase 5B — new period-winner markets. Data audit confirmed all 1,708 completed
+    # basketball fixtures carry complete, real per-quarter scores (Fixture.period_scores,
+    # kind="quarter", no nulls) — genuinely IMPLEMENTABLE, not speculative. second_half_winner
+    # reuses the existing generic `_second_half_winner` resolver unchanged (full-time minus
+    # half-time, and basketball's half-time is genuinely Q1+Q2) — no duplicate resolver written.
+    "basketball.second_half_winner": MarketOutcomeSpec(
+        "basketball.second_half_winner", "basketball", "Second Half Winner", OutcomeType.HOME_DRAW_AWAY,
+        ("HOME_WIN", "AWAY_WIN", "DRAW"), resolver_key="basketball.second_half_winner",
+    ),
+    "basketball.q1_winner": MarketOutcomeSpec(
+        "basketball.q1_winner", "basketball", "1st Quarter Winner", OutcomeType.HOME_DRAW_AWAY,
+        ("HOME_WIN", "AWAY_WIN", "DRAW"), resolver_key="basketball.q1_winner",
+    ),
+    "basketball.q2_winner": MarketOutcomeSpec(
+        "basketball.q2_winner", "basketball", "2nd Quarter Winner", OutcomeType.HOME_DRAW_AWAY,
+        ("HOME_WIN", "AWAY_WIN", "DRAW"), resolver_key="basketball.q2_winner",
+    ),
+    "basketball.q3_winner": MarketOutcomeSpec(
+        "basketball.q3_winner", "basketball", "3rd Quarter Winner", OutcomeType.HOME_DRAW_AWAY,
+        ("HOME_WIN", "AWAY_WIN", "DRAW"), resolver_key="basketball.q3_winner",
+    ),
+    "basketball.q4_winner": MarketOutcomeSpec(
+        "basketball.q4_winner", "basketball", "4th Quarter Winner", OutcomeType.HOME_DRAW_AWAY,
+        ("HOME_WIN", "AWAY_WIN", "DRAW"), resolver_key="basketball.q4_winner",
     ),
 
     # -- Baseball ---------------------------------------------------------------------------------
@@ -226,8 +310,46 @@ MARKET_OUTCOME_CATALOG: dict[str, MarketOutcomeSpec] = {
         "baseball.run_line", "baseball", "Run Line",
         OutcomeType.HOME_COVER_AWAY_COVER, ("HOME_COVER", "AWAY_COVER"),
     ),
+    # POST-M24 Phase 5A — the actually-seeded market_key (baseball/market_seeding.py) for
+    # baseball's real "First Five Innings" prop-betting segment. HOME_DRAW_AWAY: a tie after five
+    # innings is a real, common outcome (resolved via THREE_WAY_MARKET_RESOLVERS'
+    # `_first_five_innings_winner` — see outcome_resolution_service.py).
+    "baseball.first_five_innings_winner": MarketOutcomeSpec(
+        "baseball.first_five_innings_winner", "baseball", "First Five Innings Winner",
+        OutcomeType.HOME_DRAW_AWAY, ("HOME_WIN", "AWAY_WIN", "DRAW"),
+        resolver_key="baseball.first_five_innings_winner",
+    ),
     "baseball.totals": MarketOutcomeSpec(
         "baseball.totals", "baseball", "Totals", _OU, _OVER_UNDER_VALUES,
+    ),
+    # POST-M24 Phase 13 — the actually-seeded market_key (baseball/market_seeding.py) behind the
+    # generic "totals" entry above. Real resolver: `_total_runs_over_under_8_5` against
+    # `Fixture.home_score + away_score`, line grounded in this platform's own 3,912-fixture median
+    # (see outcome_resolution_service.py) — this market previously had zero real predictions or
+    # outcomes ever recorded (no resolver existed at all), confirmed via direct dev.db audit, not a
+    # missing-data problem.
+    "baseball.total_runs": MarketOutcomeSpec(
+        "baseball.total_runs", "baseball", "Total Runs Over/Under 8.5", _OU, _OVER_UNDER_VALUES,
+        resolver_key="baseball.total_runs",
+    ),
+    # Four more lines bracketing the median (real dev.db percentiles: p25=5, median=8, p75=12),
+    # same "spread of fixed lines around the real central tendency" shape as football's
+    # total_goals_over_under_0_5/1_5/3_5/4_5 around 2.5 — see outcome_resolution_service.py.
+    "baseball.total_runs_6_5": MarketOutcomeSpec(
+        "baseball.total_runs_6_5", "baseball", "Total Runs Over/Under 6.5", _OU, _OVER_UNDER_VALUES,
+        resolver_key="baseball.total_runs_6_5",
+    ),
+    "baseball.total_runs_7_5": MarketOutcomeSpec(
+        "baseball.total_runs_7_5", "baseball", "Total Runs Over/Under 7.5", _OU, _OVER_UNDER_VALUES,
+        resolver_key="baseball.total_runs_7_5",
+    ),
+    "baseball.total_runs_9_5": MarketOutcomeSpec(
+        "baseball.total_runs_9_5", "baseball", "Total Runs Over/Under 9.5", _OU, _OVER_UNDER_VALUES,
+        resolver_key="baseball.total_runs_9_5",
+    ),
+    "baseball.total_runs_10_5": MarketOutcomeSpec(
+        "baseball.total_runs_10_5", "baseball", "Total Runs Over/Under 10.5", _OU, _OVER_UNDER_VALUES,
+        resolver_key="baseball.total_runs_10_5",
     ),
 
     # -- Table Tennis -----------------------------------------------------------------------------

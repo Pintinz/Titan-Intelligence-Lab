@@ -8,7 +8,11 @@ import pytest
 
 from modules.predictions.application.experiment_tracking_service import ExperimentTrackingService
 from modules.predictions.application.model_registry_service import ModelRegistryService
-from modules.predictions.application.model_selection_service import AutomaticModelSelectionService
+from modules.predictions.application.model_selection_service import (
+    DEFAULT_CLASSIFICATION_CANDIDATES,
+    DEFAULT_REGRESSION_CANDIDATES,
+    AutomaticModelSelectionService,
+)
 from modules.predictions.application.training_pipeline_service import TrainingPipelineService
 from modules.predictions.domain.dataset import Dataset, DatasetId, DatasetLineage, DatasetStatistics, DatasetStatus, SplitStrategy
 from modules.predictions.domain.ml_value_objects import MLAlgorithm, MLFramework
@@ -84,6 +88,31 @@ def _multiclass_dataset(n: int = 90, status: DatasetStatus = DatasetStatus.APPRO
     )
 
 
+def _count_regression_dataset(n: int = 60, status: DatasetStatus = DatasetStatus.APPROVED) -> Dataset:
+    """Non-negative, count-shaped labels — `PoissonRegressor`/`TweedieRegressor` require `y >= 0`,
+    unlike `_classification_dataset`'s signed regression variant used elsewhere in this file."""
+    samples = [
+        TrainingSample(
+            features={"x1": float(i % 10), "x2": float((i * 2) % 10)},
+            label=max(0.0, round(0.5 * (i % 10) + 0.3 * ((i * 2) % 10))),
+            reference_time=T0 + timedelta(hours=i),
+        )
+        for i in range(n)
+    ]
+    feature_order = ["x1", "x2"]
+    return Dataset(
+        id=DatasetId(uuid4()),
+        market_id=MarketId(uuid4()),
+        version=1,
+        content_hash="hash",
+        samples=samples,
+        statistics=DatasetStatistics(sample_count=n, feature_count=2, positive_rate=None),
+        lineage=DatasetLineage(market_id=MarketId(uuid4()), source_prediction_ids=(), feature_keys=tuple(feature_order), built_at=T0),
+        status=status,
+        created_at=T0,
+    )
+
+
 @dataclass
 class _InMemoryArtifactStore:
     store: dict = field(default_factory=dict)
@@ -134,6 +163,36 @@ def experiment_repo_fake():
             return [e for e in self.store.values() if e.market_id == market_id][:limit]
 
     return _Repo()
+
+
+@pytest.fixture
+def training_run_repo_fake():
+    @dataclass
+    class _Repo:
+        store: dict = field(default_factory=dict)
+
+        async def record(self, run):
+            self.store[run.id] = run
+            return run
+
+        async def get(self, run_id):
+            return self.store.get(run_id)
+
+        async def list_by_market(self, market_id, limit=50):
+            return [r for r in self.store.values() if r.market_id == market_id][:limit]
+
+    return _Repo()
+
+
+@pytest.fixture
+def service_with_training_runs(model_repo, experiment_repo_fake, artifact_store, training_run_repo_fake):
+    return AutomaticModelSelectionService(
+        training_pipeline=TrainingPipelineService(),
+        model_registry=ModelRegistryService(models=model_repo),
+        experiments=ExperimentTrackingService(experiments=experiment_repo_fake),
+        artifact_store=artifact_store,
+        training_runs=training_run_repo_fake,
+    )
 
 
 class TestSelect:
@@ -268,6 +327,51 @@ class TestSelectAndRegisterChallenger:
         persisted = await model_repo.get(challenger.id)
         assert persisted.status is ModelStatus.CHALLENGER
 
+    async def test_leaves_training_run_ref_unset_when_no_repository_wired(self, service, model_repo):
+        """`service` (no `training_runs` port) matches every pre-existing caller/test — proves
+        this stays a true no-op rather than raising or silently misbehaving."""
+        dataset = _classification_dataset()
+
+        challenger, _ = await service.select_and_register_challenger(
+            market_id=dataset.market_id, dataset=dataset, target_type=TargetType.CLASSIFICATION,
+            model_key_prefix="football.match_result", next_version=1, now=T0,
+            candidates=FAST_CLASSIFICATION_CANDIDATES,
+        )
+
+        assert challenger.training_run_ref is None
+
+    async def test_persists_a_real_training_run_row_when_repository_is_wired(
+        self, service_with_training_runs, model_repo, training_run_repo_fake,
+    ):
+        """The audit trail behind `ModelDefinition.training_run_ref` — Phase 3 audit gap #7:
+        `training_runs` table was defined but nothing ever wrote to it."""
+        dataset = _classification_dataset()
+
+        challenger, selection = await service_with_training_runs.select_and_register_challenger(
+            market_id=dataset.market_id, dataset=dataset, target_type=TargetType.CLASSIFICATION,
+            model_key_prefix="football.match_result", next_version=1, now=T0,
+            candidates=FAST_CLASSIFICATION_CANDIDATES,
+        )
+
+        assert challenger.training_run_ref is not None
+        run = next(iter(training_run_repo_fake.store.values()))
+        assert str(run.id.value) == challenger.training_run_ref
+
+        assert run.market_id == dataset.market_id
+        assert run.model_id == challenger.id
+        assert run.dataset_id == dataset.id
+        assert run.algorithm == selection.winning_candidate.algorithm.value
+        assert run.framework == selection.winning_candidate.framework.value
+        assert run.samples_used > 0
+        assert run.feature_order == ("x1", "x2")
+        assert run.test_metrics["log_loss"] == selection.ranking_value
+        assert run.started_at == T0
+        assert run.completed_at == T0
+
+        runs_for_market = await training_run_repo_fake.list_by_market(dataset.market_id)
+        assert len(runs_for_market) == 1
+        assert runs_for_market[0].id == run.id
+
     async def test_persists_a_real_artifact_the_winning_model_can_be_reloaded_from(
         self, service, artifact_store
     ):
@@ -308,3 +412,53 @@ class TestSelectAndRegisterChallenger:
         assert len(experiments) == 1
         assert experiments[0].config["kind"] == "model_selection"
         assert experiments[0].config["winning_algorithm"] == selection.winning_candidate.algorithm.value
+
+
+class TestStatisticalBaselineRoster:
+    """Statistical-baseline charter: every trainable market should have a simple statistical
+    baseline (Poisson/Tweedie/Ridge/Logistic) competing in the same roster as the ML candidates,
+    not assumed inferior — these tests confirm the roster wiring and audit-trail additions."""
+
+    def test_poisson_and_tweedie_in_default_regression_roster(self):
+        algorithms = {c.algorithm for c in DEFAULT_REGRESSION_CANDIDATES}
+        assert MLAlgorithm.POISSON_GLM in algorithms
+        assert MLAlgorithm.TWEEDIE_GLM in algorithms
+
+    def test_poisson_and_tweedie_absent_from_classification_roster(self):
+        algorithms = {c.algorithm for c in DEFAULT_CLASSIFICATION_CANDIDATES}
+        assert MLAlgorithm.POISSON_GLM not in algorithms
+        assert MLAlgorithm.TWEEDIE_GLM not in algorithms
+
+    def test_baseline_tags_on_expected_candidates_only(self):
+        classification_baselines = {c.algorithm for c in DEFAULT_CLASSIFICATION_CANDIDATES if c.is_baseline}
+        assert classification_baselines == {MLAlgorithm.LOGISTIC_REGRESSION}
+
+        regression_baselines = {c.algorithm for c in DEFAULT_REGRESSION_CANDIDATES if c.is_baseline}
+        assert regression_baselines == {MLAlgorithm.RIDGE, MLAlgorithm.POISSON_GLM, MLAlgorithm.TWEEDIE_GLM}
+
+    async def test_select_populates_candidate_scores_for_every_non_skipped_candidate(self, service):
+        dataset = _count_regression_dataset()
+        candidates = (
+            CandidateSpec(MLAlgorithm.RIDGE, MLFramework.SKLEARN, is_baseline=True),
+            CandidateSpec(MLAlgorithm.POISSON_GLM, MLFramework.SKLEARN, is_baseline=True),
+            CandidateSpec(MLAlgorithm.RANDOM_FOREST, MLFramework.SKLEARN),
+        )
+
+        result = await service.select(dataset, TargetType.REGRESSION, candidates=candidates)
+
+        scored_algorithms = {c.algorithm for c, _ in result.candidate_scores}
+        assert scored_algorithms == {MLAlgorithm.RIDGE, MLAlgorithm.POISSON_GLM, MLAlgorithm.RANDOM_FOREST}
+        for _, value in result.candidate_scores:
+            assert value >= 0.0
+
+    async def test_poisson_can_win_the_roster(self, service):
+        """Proves the ranking logic doesn't structurally exclude the new baseline — a real
+        candidate on its own always wins by definition, confirming Poisson is a fully viable,
+        non-skipped roster member end to end (fit -> train -> rank -> select)."""
+        dataset = _count_regression_dataset()
+        candidates = (CandidateSpec(MLAlgorithm.POISSON_GLM, MLFramework.SKLEARN, is_baseline=True),)
+
+        result = await service.select(dataset, TargetType.REGRESSION, candidates=candidates)
+
+        assert result.winning_candidate.algorithm is MLAlgorithm.POISSON_GLM
+        assert result.winning_candidate.is_baseline is True

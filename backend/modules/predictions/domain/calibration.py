@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
+from modules.predictions.domain.value_objects import ModelId
+
 
 class CalibrationMethod(str, Enum):
     NONE = "none"  # identity mapping — no calibrator has been fit for this model yet
@@ -46,3 +48,16 @@ class CalibrationReport:
     brier_score: float
     reliability_curve: ReliabilityCurve
     generated_at: datetime
+
+
+@dataclass(frozen=True)
+class PlattCalibrationParameters:
+    """The durable form of `PlattScalingCalibrator`'s fitted `(a, b)` — persisted so a `fit()`
+    call in one process (e.g. a Celery worker) reaches `calibrate()` in every other process
+    (e.g. the API server), instead of staying trapped in that one process's in-memory cache."""
+
+    model_id: ModelId
+    a: float
+    b: float
+    sample_count: int
+    fitted_at: datetime

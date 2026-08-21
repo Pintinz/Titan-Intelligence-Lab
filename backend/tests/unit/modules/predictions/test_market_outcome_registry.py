@@ -42,6 +42,38 @@ MARKETS_WITH_REAL_RESOLVER = {
     "football.home_win_to_nil", "football.away_win_to_nil",
     "basketball.moneyline", "baseball.winner", "baseball.moneyline",
     "table_tennis.winner", "table_tennis.match_winner",
+    # Post-M24 half-result resolvers — real resolution logic exists (football.first_half_winner/
+    # second_half_winner via THREE_WAY_MARKET_RESOLVERS, first_half_goals/
+    # first_half_both_teams_to_score via MARKET_OUTCOME_RESOLVERS), even though none of the four
+    # will actually resolve a real outcome yet: no provider adapter parses a football fixture's
+    # half-time score today. The catalog correctly reflects "resolution logic exists", not "data
+    # currently flows through it" — see outcome_resolution_service.py's docs for the full chain.
+    "football.first_half_winner", "football.second_half_winner",
+    "football.first_half_goals", "football.first_half_both_teams_to_score",
+    # POST-M24 Phase 5A — basketball's real halftime (quarters 1+2, genuinely populated by
+    # ApiSportsAdapter) and baseball's real first-five-innings segment (genuinely populated
+    # innings 1-5) — unlike the football half-result resolvers above, these *do* resolve real
+    # outcomes today, since the underlying period_scores data already exists in dev.db.
+    "basketball.first_half_winner", "baseball.first_five_innings_winner",
+    # POST-M24 Phase 5B — basketball's four quarter-winner markets plus second-half-winner, added
+    # after confirming all 1,708 completed basketball fixtures carry complete real per-quarter
+    # period_scores data.
+    "basketball.second_half_winner", "basketball.q1_winner", "basketball.q2_winner",
+    "basketball.q3_winner", "basketball.q4_winner",
+    # basketball's full-time and half-time total-points markets — real resolvers computed straight
+    # from home_score+away_score / home_score_ht+away_score_ht, both 100%-covered across all 1,708
+    # completed basketball fixtures (see outcome_resolution_service.py).
+    "basketball.game_total_points", "basketball.first_half_total_points",
+    # POST-M24 Phase 13 — baseball's total-runs market, same pattern, computed straight from
+    # home_score+away_score across all 3,912 completed baseball fixtures.
+    "baseball.total_runs",
+    # POST-M24 Phase 15 — four more basketball total-points lines and four more baseball
+    # total-runs lines, bracketing each sport's real median (same shape as football's
+    # total_goals_over_under_0_5/1_5/3_5/4_5 around 2.5).
+    "basketball.game_total_points_199_5", "basketball.game_total_points_209_5",
+    "basketball.game_total_points_229_5", "basketball.game_total_points_239_5",
+    "baseball.total_runs_6_5", "baseball.total_runs_7_5",
+    "baseball.total_runs_9_5", "baseball.total_runs_10_5",
 }
 
 

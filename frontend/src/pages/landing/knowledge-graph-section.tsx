@@ -99,11 +99,20 @@ function KgPreviewGraph({ entity }: { entity: NonNullable<PublicKnowledgeGraphPr
       {[entity.node, ...neighbors].map((node) => {
         const pos = positions.get(node.id)
         if (!pos) return null
+        const isCenter = node.id === entity.node.id
         return (
           <g key={node.id}>
-            <circle cx={pos.x} cy={pos.y} r={node.id === entity.node.id ? 9 : 6} fill={typeColor[node.type] ?? 'var(--color-text-muted)'} />
-            <text x={pos.x} y={pos.y - 14} textAnchor="middle" fontSize={10} fill="var(--color-text-secondary)" fontFamily="var(--font-body)">
-              {node.type}
+            <circle cx={pos.x} cy={pos.y} r={isCenter ? 9 : 6} fill={typeColor[node.type] ?? 'var(--color-text-muted)'} />
+            <text
+              x={pos.x}
+              y={pos.y - (isCenter ? 16 : 14)}
+              textAnchor="middle"
+              fontSize={isCenter ? 11 : 9}
+              fontWeight={node.label ? 600 : 400}
+              fill={node.label ? 'var(--color-text-primary)' : 'var(--color-text-secondary)'}
+              fontFamily="var(--font-body)"
+            >
+              {node.label ?? node.type}
             </text>
           </g>
         )

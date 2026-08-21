@@ -85,6 +85,87 @@ def _resolve_request_url(base_url: str, auth_type: str | None, credential: str |
     return base_url
 
 
+async def test_oauth2_client_credentials(
+    *,
+    token_url: str | None,
+    client_id: str | None,
+    client_secret: str | None,
+    timeout_seconds: int = 10,
+    client: httpx.AsyncClient | None = None,
+) -> ConnectionTestResult:
+    """RFC 6749 client-credentials grant — POSTs ``client_id``/``client_secret``/
+    ``grant_type=client_credentials`` as form-urlencoded to ``token_url`` and classifies success
+    by whether a Bearer access token comes back. Exists alongside ``test_connection`` (rather
+    than folding into it) because this shape is fundamentally different: two paired credential
+    values instead of one, and a POST token exchange instead of a single authenticated GET —
+    e.g. Flutterwave's V4 API issues short-lived tokens from a static client_id/client_secret
+    pair instead of accepting one static API key directly.
+
+    Deliberately never returns the issued access token in ``raw_body`` (unlike
+    ``test_connection``, which passes through whatever the provider returned) — a fresh Bearer
+    token is itself a live credential, and nothing here needs to inspect it."""
+    if not token_url or not client_id or not client_secret:
+        return ConnectionTestResult(
+            status=ConnectionTestStatus.NOT_CONFIGURED,
+            latency_ms=None,
+            http_status=None,
+            message="Missing token URL, client ID, or client secret — nothing to test.",
+        )
+
+    owns_client = client is None
+    http_client = client or httpx.AsyncClient(timeout=timeout_seconds)
+    started = perf_counter()
+    try:
+        response = await http_client.post(
+            token_url,
+            data={"client_id": client_id, "client_secret": client_secret, "grant_type": "client_credentials"},
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        latency_ms = (perf_counter() - started) * 1000
+
+        if response.status_code in (400, 401, 403):
+            return ConnectionTestResult(
+                ConnectionTestStatus.UNAUTHORIZED, latency_ms, response.status_code,
+                "Provider rejected the client credentials.",
+            )
+        if response.status_code == 429:
+            return ConnectionTestResult(
+                ConnectionTestStatus.RATE_LIMITED, latency_ms, response.status_code,
+                "Provider is rate-limiting this credential (429).",
+            )
+        if 200 <= response.status_code < 300:
+            try:
+                got_token = bool(response.json().get("access_token"))
+            except ValueError:
+                got_token = False
+            if got_token:
+                return ConnectionTestResult(
+                    ConnectionTestStatus.HEALTHY, latency_ms, response.status_code,
+                    "Reachable and authenticated — access token issued.",
+                )
+            return ConnectionTestResult(
+                ConnectionTestStatus.WARNING, latency_ms, response.status_code,
+                "200 response but no access_token in the body.",
+            )
+        return ConnectionTestResult(
+            ConnectionTestStatus.WARNING, latency_ms, response.status_code,
+            f"Unexpected response status {response.status_code}.",
+        )
+    except httpx.TimeoutException:
+        return ConnectionTestResult(
+            ConnectionTestStatus.TIMEOUT, (perf_counter() - started) * 1000, None,
+            f"No response within {timeout_seconds}s.",
+        )
+    except httpx.HTTPError as exc:
+        return ConnectionTestResult(
+            ConnectionTestStatus.OFFLINE, (perf_counter() - started) * 1000, None,
+            f"Connection failed: {type(exc).__name__}.",
+        )
+    finally:
+        if owns_client:
+            await http_client.aclose()
+
+
 async def test_connection(
     *,
     base_url: str | None,

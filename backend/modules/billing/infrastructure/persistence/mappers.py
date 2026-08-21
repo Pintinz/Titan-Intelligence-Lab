@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from modules.billing.domain.entities import Entitlement, Plan, Subscription, UsageCounter
+from modules.billing.domain.payment import PendingCheckout
 from modules.billing.domain.value_objects import (
     BillingPeriod,
+    ChargeStatus,
     EntitlementId,
+    PendingCheckoutId,
     PlanId,
     PlanTier,
     SubjectType,
@@ -13,6 +16,7 @@ from modules.billing.domain.value_objects import (
 )
 from modules.billing.infrastructure.persistence.models import (
     EntitlementModel,
+    PendingCheckoutModel,
     PlanModel,
     SubscriptionModel,
     UsageCounterModel,
@@ -102,4 +106,31 @@ def usage_counter_to_model(entity: UsageCounter, model: UsageCounterModel | None
         window_key=entity.window_key,
     )
     model.used_amount = entity.used_amount
+    return model
+
+
+def pending_checkout_to_domain(model: PendingCheckoutModel) -> PendingCheckout:
+    return PendingCheckout(
+        id=PendingCheckoutId(model.id),
+        reference=model.reference,
+        subject_type=model.subject_type,
+        subject_id=model.subject_id,
+        plan_id=PlanId(model.plan_id),
+        provider_charge_id=model.provider_charge_id,
+        status=ChargeStatus(model.status),
+        created_at=model.created_at,
+        resolved_at=model.resolved_at,
+    )
+
+
+def pending_checkout_to_model(entity: PendingCheckout, model: PendingCheckoutModel | None = None) -> PendingCheckoutModel:
+    model = model or PendingCheckoutModel(id=entity.id.value)
+    model.reference = entity.reference
+    model.subject_type = entity.subject_type
+    model.subject_id = entity.subject_id
+    model.plan_id = entity.plan_id.value
+    model.provider_charge_id = entity.provider_charge_id
+    model.status = entity.status.value
+    model.created_at = entity.created_at
+    model.resolved_at = entity.resolved_at
     return model

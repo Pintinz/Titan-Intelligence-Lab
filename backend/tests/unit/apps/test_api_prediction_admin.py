@@ -4,11 +4,15 @@ import asyncio
 from datetime import datetime, timezone
 from uuid import uuid4
 
+import fakeredis
 import pytest
 import pytest_asyncio
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+import apps.api.composition as composition
+import apps.api.main as main_module
 from apps.api.composition import get_jwt_validator, get_session
 from apps.api.main import app
 from modules.features.domain.entities import FeatureDefinition, FeatureValue
@@ -89,11 +93,25 @@ async def db_session_factory():
 
 
 @pytest.fixture
-def client(db_session_factory):
+def client(db_session_factory, monkeypatch):
     async def override_get_session():
         async with db_session_factory() as session:
             yield session
             await session.commit()
+
+    # Same pattern as test_api_ingestion.py's `client` fixture — see test_api_predictions.py's
+    # identical fixture for the full rationale.
+    from modules.admin.infrastructure.vault import get_vault_settings
+
+    fake_client = fakeredis.FakeAsyncRedis(decode_responses=True)
+    composition.get_redis_client.cache_clear()
+    composition.get_redis_lock.cache_clear()
+    composition.get_redis_sync_cache.cache_clear()
+    monkeypatch.setattr(composition, "get_redis_client", lambda: fake_client)
+    monkeypatch.setattr(main_module, "get_redis_client", lambda: fake_client)
+
+    monkeypatch.setenv("TITANIQ_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    get_vault_settings.cache_clear()
 
     app.dependency_overrides[get_session] = override_get_session
     app.dependency_overrides[get_jwt_validator] = lambda: MockJWTValidator()

@@ -109,3 +109,30 @@ class TextIntelligenceProviderPort(Protocol):
         """Key Phrase Extraction — the most salient phrases in the text, ranked by relevance
         score (Milestone 8); feeds search indexing and quick-scan summaries."""
         ...
+
+    async def assess_prediction_context(self, payload: dict) -> tuple[str, str]:
+        """Gemini Prediction Reasoning Engine: given a structured payload (base prediction,
+        optional live statistical baseline, verified pre-cutoff evidence), returns a raw JSON
+        string Gemini was instructed to produce — never parsed/validated here (that's
+        `ContextualReasoningService`'s job, against `GeminiReasoningResponseSchema`). Same
+        guardrail as every other method on this port: the returned assessment can support,
+        weaken, or contextualize the supplied base probability — it can never replace it with a
+        new one of Gemini's own invention.
+
+        Returns ``(raw_json, source)`` — ``source`` is ``"gemini"`` or ``"mock"`` so a caller can
+        honestly disclose which one actually produced this narration (never silently indistinguishable,
+        per the product's "never fabricate" posture) rather than only the text itself."""
+        ...
+
+    async def explain_football_prediction(self, payload: dict) -> tuple[str, str]:
+        """Phase 3 Sports-Analyst Explainability: given a structured payload (real model
+        attribution, football semantic mapping, cutoff-safe context, classified as model-driver
+        vs. context-only), returns a raw JSON string Gemini was instructed to produce — never
+        parsed/validated here (that's `FootballExplanationService`'s job, against
+        `FootballExplanationSchema`). Gemini narrates verified model reasoning in football-
+        analyst language; it never decides feature importance, invents evidence, or replaces the
+        supplied prediction/probability.
+
+        Returns ``(raw_json, source)`` — see `assess_prediction_context`'s docstring for what
+        ``source`` means and why it's returned alongside the text."""
+        ...

@@ -24,22 +24,22 @@ export function HeroSection({ loading, pick }: { loading: boolean; pick: PublicF
         <div>
           <p className="inline-flex items-center gap-2 rounded-full border border-border-default bg-bg-elevated/60 px-3 py-1 text-xs font-medium text-text-secondary">
             <LiveDot />
-            Sports Intelligence Platform — not a prediction site
+            Sports Intelligence Platform — not a betting or tips site
           </p>
           <h1 className="mt-6 max-w-xl font-display text-4xl font-semibold leading-[1.05] tracking-tight text-text-primary lg:text-6xl">
-            See Every Match Through Intelligence.
+            Understand the prediction, not just the prediction.
           </h1>
           <p className="mt-6 max-w-lg text-lg text-text-secondary">
-            TitanIQ converts structured data, live events, news, and community signal into
-            explainable sports intelligence — every output carries its confidence, its evidence,
-            and the reasoning behind it. Predictions are one output; they were never the point.
+            TitanIQ combines historical data, statistical models, machine learning, and verified
+            context into one auditable prediction workflow — every output carries its confidence,
+            its evidence, and the reasoning behind it.
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3">
             <Button asChild size="lg">
               <Link to="/signup">Start free</Link>
             </Button>
             <Button asChild variant="secondary" size="lg">
-              <Link to="/methodology">Explore the methodology</Link>
+              <a href="#proof-of-mechanism">Explore Intelligence</a>
             </Button>
           </div>
         </div>

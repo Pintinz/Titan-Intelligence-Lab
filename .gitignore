@@ -16,9 +16,15 @@ test-results/
 .coverage
 catboost_info/
 
-# Local dev database
-dev.db
-dev.db.bak-*
+# Celery Beat's local persistent schedule state (sqlite-backed shelve db) — runtime state, not
+# source; regenerated on first Beat startup.
+celerybeat-schedule*
+
+# Local dev database — dev.db itself plus every backup/snapshot naming convention used across
+# this project's history (dev.db.bak-<ts>-<desc>, dev.db.bak_before_<desc>_<ts>,
+# dev.db.snapshot_before_<desc>). The single `dev.db*` glob is deliberately broad so a future
+# one-off naming choice doesn't silently reopen this gap the way the underscore variants did.
+dev.db*
 
 # Env / secrets
 .env

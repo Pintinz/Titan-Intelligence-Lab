@@ -30,6 +30,7 @@ from modules.features.domain.entities import (
     FeatureValidationReport,
     FeatureValue,
 )
+from modules.features.domain.freshness import FreshnessStatus, classify_freshness
 from modules.features.domain.value_objects import (
     FeatureKey,
     FeatureValidationReportId,
@@ -71,6 +72,10 @@ class FeatureQualitySnapshot:
     invalid_pct: float | None
     duplicate_pct: float | None
     coverage_pct: float | None
+    # spec §26 "Context Freshness" — the real CURRENT/STALE/UNKNOWN verdict derived from
+    # `freshness_score` (never independently invented), so a caller renders a categorical status
+    # rather than reimplementing this same "score >= 1.0" threshold itself.
+    freshness_status: FreshnessStatus = FreshnessStatus.UNKNOWN
 
 
 @dataclass(frozen=True)
@@ -176,10 +181,11 @@ class FeatureQualityEngine:
             2,
         )
 
+        freshness_score_pct = round(freshness_score * 100, 2) if freshness_score is not None else None
         return FeatureQualitySnapshot(
             sample_size=total,
             quality_score=quality_score,
-            freshness_score=round(freshness_score * 100, 2) if freshness_score is not None else None,
+            freshness_score=freshness_score_pct,
             reliability_score=reliability_score,
             completeness_score=completeness_score,
             missing_pct=missing_pct,
@@ -188,6 +194,7 @@ class FeatureQualityEngine:
             invalid_pct=invalid_pct,
             duplicate_pct=duplicate_pct,
             coverage_pct=coverage_pct,
+            freshness_status=classify_freshness(freshness_score_pct),
         )
 
     @staticmethod

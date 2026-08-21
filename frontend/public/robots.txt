@@ -1,0 +1,11 @@
+# TitanIQ — crawl guidance. Public marketing/legal pages are indexable; everything behind
+# authentication (/app, the signed-in product surface) is not a page a search result should ever
+# land a visitor on directly, so it's excluded here rather than left for crawlers to discover on
+# their own.
+User-agent: *
+Disallow: /app/
+Disallow: /auth/
+Disallow: /reset-password
+Disallow: /maintenance
+
+Sitemap: https://titaniq.ai/sitemap.xml

@@ -16,12 +16,17 @@ export interface Envelope<T> {
 export class ApiError extends Error {
   status: number
   detail: string
+  /** Present only for a structured `{prediction_status, reason_code, failed_gates, message}`
+   * error body (e.g. a blocked `POST /predictions/generate` — prediction_router.py's
+   * `_blocked_detail`) — `undefined` for every other endpoint's plain-string `detail`. */
+  reasonCode?: string
 
-  constructor(status: number, detail: string) {
+  constructor(status: number, detail: string, reasonCode?: string) {
     super(detail)
     this.name = 'ApiError'
     this.status = status
     this.detail = detail
+    this.reasonCode = reasonCode
   }
 }
 
@@ -49,6 +54,7 @@ async function requestEnvelope<T>(path: string, init: RequestInit = {}): Promise
   let response: Response
   try {
     response = await fetch(`${env.apiBaseUrl}${path}`, {
+      cache: 'no-store',
       ...init,
       signal: init.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       headers: {
@@ -66,13 +72,24 @@ async function requestEnvelope<T>(path: string, init: RequestInit = {}): Promise
 
   if (!response.ok) {
     let detail = response.statusText
+    let reasonCode: string | undefined
     try {
       const body = await response.json()
-      detail = typeof body?.detail === 'string' ? body.detail : JSON.stringify(body)
+      if (typeof body?.detail === 'string') {
+        detail = body.detail
+      } else if (body?.detail && typeof body.detail.message === 'string') {
+        // Structured diagnostic body (prediction_router.py's `_blocked_detail`:
+        // {prediction_status, reason_code, failed_gates, message}) — surface the human-readable
+        // message, not the raw JSON; `reason_code` is kept on the error for callers that want it.
+        detail = body.detail.message
+        reasonCode = typeof body.detail.reason_code === 'string' ? body.detail.reason_code : undefined
+      } else if (body?.detail !== undefined) {
+        detail = JSON.stringify(body.detail)
+      }
     } catch {
       // non-JSON error body — keep statusText
     }
-    throw new ApiError(response.status, detail)
+    throw new ApiError(response.status, detail, reasonCode)
   }
 
   if (response.status === 204) return { data: undefined as T, meta: {}, error: null }
@@ -89,10 +106,11 @@ export const api = {
   /** Like `get`, but keeps `meta` (pagination totals, counts) instead of discarding it — use this
    * for any list endpoint a caller needs `meta.total`/`meta.has_more` from. */
   getWithMeta: <T>(path: string, params?: Record<string, unknown>) => requestEnvelope<T>(withQuery(path, params)),
-  post: <T>(path: string, body?: unknown, params?: Record<string, unknown>) =>
+  post: <T>(path: string, body?: unknown, params?: Record<string, unknown>, opts?: { timeoutMs?: number }) =>
     request<T>(withQuery(path, params), {
       method: 'POST',
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: opts?.timeoutMs ? AbortSignal.timeout(opts.timeoutMs) : undefined,
     }),
   patch: <T>(path: string, body?: unknown, params?: Record<string, unknown>) =>
     request<T>(withQuery(path, params), {

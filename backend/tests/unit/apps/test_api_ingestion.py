@@ -200,6 +200,7 @@ def test_ingestion_quality_reflects_completed_sync(client, db_session_factory):
     data = response.json()["data"]
     assert data is not None
     assert data["sample_size"] > 0
+    assert data["freshness_status"] in {"current", "stale", "unknown"}
 
 
 def test_sync_fixtures_and_standings_endpoints(client, db_session_factory):

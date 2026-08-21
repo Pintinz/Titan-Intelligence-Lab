@@ -47,9 +47,12 @@ configurable expected-fact baseline; news/community reliability are the mean
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
+
+logger = logging.getLogger("titaniq.predictions")
 
 from modules.features.domain.value_objects import EntityType
 from modules.intelligence.application.intelligence_retrieval_service import IntelligenceRetrievalService
@@ -261,7 +264,20 @@ class PredictionEngine:
                 )
                 return TrainedModelPredictor(market_kind=context.market.market_kind, model=model)
             except Exception:  # noqa: BLE001 — any artifact-loading failure falls back, never breaks generation
-                pass
+                # Falling back is deliberate (a broken artifact must never break generation when a
+                # safe formula-based path exists), but it must never be *silent* — this is the
+                # Champion model failing to serve its own market, which operators need to see and
+                # act on (a corrupt/missing artifact is a real incident, not routine behavior).
+                logger.error(
+                    "prediction_engine.champion_artifact_load_failed",
+                    extra={
+                        "market_key": context.market.market_key,
+                        "model_id": str(context.model.id.value),
+                        "artifact_ref": context.model.artifact_ref,
+                        "framework": context.model.framework,
+                    },
+                    exc_info=True,
+                )
         return self.predictors.get(context.market.market_kind, context.market.market_key)
 
     async def _historical_accuracy(self, market_id: MarketId) -> float:

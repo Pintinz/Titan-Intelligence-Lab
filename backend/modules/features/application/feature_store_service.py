@@ -9,7 +9,24 @@ failure raised straight out of `write()` and rolled back the whole (already-dura
 write along with it. Now caught narrowly (`redis.exceptions.RedisError`, the base class covering
 connection/timeout failures) and skipped: the durable record is already written by the time the
 cache write is attempted, so a cache outage degrades reads (next read falls back to offline, per
-this module's own docstring), it must never lose a write."""
+this module's own docstring), it must never lose a write.
+
+Phase 2 audit fix (2026-08-18): catching the exception stopped the write from being lost, but did
+nothing about the *latency* — every `write()` call independently re-attempted a fresh Redis
+connection and paid the full `socket_connect_timeout` (2s) before falling back, with no memory of
+"Redis was just unreachable a moment ago." `EntityReconciliationService.reconcile_fixture`
+(football) calls into several calculators that each write multiple features per fixture — with
+Redis down, a single fixture reconciliation was measured taking ~12s (6 features × ~2s each) that
+should take milliseconds, turning a normal historical resync (hundreds of fixtures) into a
+multi-hour operation that looked indistinguishable from an infinite hang when observed for only a
+few minutes at a time. `circuit_breaker` (optional, same `CircuitBreaker` class
+`SportsProviderRouter` already uses for provider calls — no new breaker implementation) now
+short-circuits `online.set()` entirely once Redis has failed a few times in a row, instead of
+paying the full timeout on every single subsequent call; it self-heals (`HALF_OPEN` -> `CLOSED`)
+the same way the existing provider circuit breaker already does, so a Redis that comes back
+up is used again automatically. `None` (the default) preserves every existing caller/test's
+behavior exactly as before this fix — this is purely an opt-in latency guard, not a behavior
+change to what gets written or when a write is considered to have succeeded."""
 
 from __future__ import annotations
 
@@ -19,10 +36,13 @@ from uuid import uuid4
 
 import redis.exceptions
 
+from modules.admin.application.circuit_breaker import CircuitBreaker
 from modules.features.domain.entities import FeatureValue
 from modules.features.domain.value_objects import EntityType, FeatureDataType, FeatureKey, QualityFlag, FeatureValueId
 from modules.features.ports.online_store import OnlineFeatureStorePort
 from modules.features.ports.repositories import FeatureDefinitionRepositoryPort, FeatureValueRepositoryPort
+
+_ONLINE_STORE_BREAKER_KEY = "feature_store:online"
 
 
 class FeatureNotFoundError(KeyError):
@@ -47,6 +67,10 @@ class FeatureStoreService:
     definitions: FeatureDefinitionRepositoryPort
     offline: FeatureValueRepositoryPort
     online: OnlineFeatureStorePort
+    # Phase 2 audit fix — see module docstring. Optional/defaulted so every existing caller/test
+    # keeps working unchanged; production wiring (composition.py) passes the same process-wide
+    # CircuitBreaker instance SportsProviderRouter already uses, keyed separately.
+    circuit_breaker: CircuitBreaker | None = None
 
     async def write(
         self,
@@ -77,10 +101,18 @@ class FeatureStoreService:
             quality_flags=self._validate(definition, value),
         )
         await self.offline.record(record)  # durable record written regardless of quality flags
-        try:
-            await self.online.set(record, ttl_seconds=definition.online_ttl_seconds)
-        except redis.exceptions.RedisError:
-            pass  # cache unavailable — the durable offline record above already succeeded
+        if self.circuit_breaker is None or self.circuit_breaker.allow_request(_ONLINE_STORE_BREAKER_KEY, as_of):
+            try:
+                await self.online.set(record, ttl_seconds=definition.online_ttl_seconds)
+                if self.circuit_breaker is not None:
+                    self.circuit_breaker.record_success(_ONLINE_STORE_BREAKER_KEY)
+            except redis.exceptions.RedisError:
+                # cache unavailable — the durable offline record above already succeeded
+                if self.circuit_breaker is not None:
+                    self.circuit_breaker.record_failure(_ONLINE_STORE_BREAKER_KEY, as_of)
+        # else: breaker OPEN — skip the attempt entirely rather than re-paying the connect
+        # timeout on a Redis we already know is down; degrades exactly like a caught
+        # RedisError (offline record already durable), just without the latency.
         return record
 
     async def read(

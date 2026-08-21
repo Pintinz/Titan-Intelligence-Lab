@@ -95,6 +95,7 @@ const PREDICTION: PredictionDto = {
   probability_distribution: { Yes: 0.81, No: 0.19 },
   confidence_interval: null,
   expected_error: null,
+  contextual_review: null,
 }
 
 function renderPage(matchId = 'fx-1') {
@@ -132,8 +133,46 @@ describe('MatchDetailPage', () => {
       entity_type: 'fixture',
       entity_id: 'fx-1',
       subject_ref: 'fx-1',
+      include_football_explanation: true,
+      include_contextual_review: true,
     })
     expect(screen.getByText('Form Shots On Target (Last 5)', { exact: false })).toBeInTheDocument()
+  })
+
+  it('renders the Contextual Review section when the backend returns one', async () => {
+    vi.mocked(sportsApi.getFixture).mockResolvedValue(FIXTURE)
+    vi.mocked(sportsApi.teamFixtures).mockResolvedValue([])
+    vi.mocked(marketsApi.list).mockResolvedValue([MARKET])
+    vi.mocked(predictionsApi.generate).mockResolvedValue({
+      ...PREDICTION,
+      contextual_review: {
+        review_status: 'SUPPORTED',
+        overall_assessment: 'Fresh evidence aligns with the base prediction.',
+        confidence_level: 'HIGH',
+        confidence_score: 0.82,
+        statistical_baseline: { applicable: true, available: true, algorithm: 'poisson_goals_model', probabilities: { Yes: 0.79, No: 0.21 }, reason: null },
+        contextual_assessment: { injuries: { impact: 'POSITIVE', strength: 'MODERATE', score: 0.6, reason: 'Both attacking lineups are fully available.' } },
+        supporting_factors: [{ factor: 'lineup_availability', impact: 'POSITIVE', strength: 'MODERATE', evidence: 'Both first-choice attackers confirmed starting.', source_ids: ['src-1'] }],
+        risk_factors: [],
+        missing_context: [],
+        reconsideration: { direction: 'SUPPORTS_BASE_PREDICTION', material_change: false, reason: 'No new information changes the outlook.' },
+        evidence_quality: { overall: 'HIGH', source_count: 2, timestamp_valid: true, pre_event_only: true, conflicting_information: false },
+        source_ids: ['src-1', 'src-2'],
+        prediction_cutoff: new Date().toISOString(),
+        prompt_version: 'v1',
+        generated_at: new Date().toISOString(),
+      },
+    })
+
+    renderPage()
+
+    await userEvent.click(await screen.findByText('Both Teams to Score'))
+    await userEvent.click(await screen.findByRole('button', { name: 'Generate Intelligence — Both Teams to Score' }))
+
+    await waitFor(() => expect(screen.getByText('Contextual review')).toBeInTheDocument())
+    expect(screen.getByText('Fresh evidence aligns with the base prediction.')).toBeInTheDocument()
+    expect(screen.getByText('Supported by current evidence')).toBeInTheDocument()
+    expect(screen.getByText('Both first-choice attackers confirmed starting.')).toBeInTheDocument()
   })
 
   it('splits recent form into home/away columns excluding the current fixture', async () => {

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 
 from modules.billing.domain.entities import Entitlement, Plan, Subscription, UsageCounter
-from modules.billing.domain.value_objects import PlanId, SubjectType, SubscriptionId
+from modules.billing.domain.payment import PendingCheckout
+from modules.billing.domain.value_objects import PendingCheckoutId, PlanId, SubjectType, SubscriptionId
 
 
 class PlanRepositoryPort(Protocol):
@@ -32,3 +34,19 @@ class UsageCounterRepositoryPort(Protocol):
         self, subject_type: SubjectType, subject_id: str, feature_key: str, window_key: str
     ) -> UsageCounter | None: ...
     async def upsert(self, counter: UsageCounter) -> UsageCounter: ...
+
+
+class PendingCheckoutRepositoryPort(Protocol):
+    async def get(self, checkout_id: PendingCheckoutId) -> PendingCheckout | None: ...
+    async def get_by_reference(self, reference: str) -> PendingCheckout | None: ...
+    async def get_by_provider_charge_id(self, provider_charge_id: str) -> PendingCheckout | None: ...
+    async def upsert(self, checkout: PendingCheckout) -> PendingCheckout: ...
+
+
+class ProcessedPaymentEventRepositoryPort(Protocol):
+    """Webhook-delivery idempotency — the same event id must never be processed twice, no
+    matter how many times the provider redelivers it (docs constitution: webhook processing
+    must be idempotent)."""
+
+    async def already_processed(self, provider: str, event_id: str) -> bool: ...
+    async def mark_processed(self, provider: str, event_id: str, now: datetime) -> None: ...

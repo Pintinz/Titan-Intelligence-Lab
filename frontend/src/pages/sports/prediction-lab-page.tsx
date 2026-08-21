@@ -41,6 +41,11 @@ export default function PredictionLabPage() {
         entity_type: 'fixture',
         entity_id: selectedFixtureId!,
         subject_ref: selectedFixtureId!,
+        include_contextual_review: true,
+        // Sports-Analyst Explainability is football-specific (attribution translated into
+        // football-analyst language) — requesting it for another sport would just degrade to
+        // "unavailable" server-side, so skip the extra Gemini round trip entirely.
+        include_football_explanation: sport?.code === 'football',
       }),
   })
 

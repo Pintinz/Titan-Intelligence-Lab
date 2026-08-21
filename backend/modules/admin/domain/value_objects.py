@@ -16,6 +16,8 @@ class ProviderCategory(str, Enum):
     AI = "ai"
     NEWS = "news"
     ODDS = "odds"
+    PAYMENT = "payment"
+    ADVERTISING = "advertising"
     GENERAL = "general"
 
 

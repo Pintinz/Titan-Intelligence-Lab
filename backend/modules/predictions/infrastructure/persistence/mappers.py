@@ -3,6 +3,15 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
+from modules.predictions.domain.calibration import (
+    CalibrationMethod,
+    CalibrationReport,
+    PlattCalibrationParameters,
+    ReliabilityBin,
+    ReliabilityCurve,
+)
+from modules.predictions.domain.model_comparison import ChallengerEvaluation, ComparisonMetrics, ComparisonVerdict
+from modules.predictions.domain.training_run import TrainingRun, TrainingRunId
 from modules.predictions.domain.dataset import (
     Dataset,
     DatasetId,
@@ -25,6 +34,7 @@ from modules.predictions.domain.entities import (
 )
 from modules.predictions.domain.value_objects import (
     AuditAction,
+    ChallengerEvaluationId,
     ExperimentId,
     FeatureMarketMappingId,
     MarketId,
@@ -300,6 +310,8 @@ def prediction_outcome_to_domain(model: PredictionOutcomeModel) -> PredictionOut
         actual_value=model.actual_value,
         error=model.error,
         evaluated_at=model.evaluated_at,
+        raw_home_goals=model.raw_home_goals,
+        raw_away_goals=model.raw_away_goals,
     )
 
 
@@ -311,6 +323,8 @@ def prediction_outcome_to_model(
     model.actual_value = entity.actual_value
     model.error = entity.error
     model.evaluated_at = entity.evaluated_at
+    model.raw_home_goals = entity.raw_home_goals
+    model.raw_away_goals = entity.raw_away_goals
     return model
 
 
@@ -333,6 +347,135 @@ def model_evaluation_to_model(
     model.metrics = dict(entity.metrics)
     model.calibration_report = dict(entity.calibration_report)
     return model
+
+
+def calibration_report_to_domain(model) -> CalibrationReport:
+    curve_payload = model.reliability_curve or {}
+    bins = tuple(
+        ReliabilityBin(
+            bin_index=b["bin_index"],
+            predicted_mean=b["predicted_mean"],
+            actual_rate=b["actual_rate"],
+            sample_count=b["sample_count"],
+        )
+        for b in curve_payload.get("bins", [])
+    )
+    return CalibrationReport(
+        method=CalibrationMethod(model.method),
+        sample_count=model.sample_count,
+        expected_calibration_error=model.expected_calibration_error,
+        brier_score=model.brier_score,
+        reliability_curve=ReliabilityCurve(bins=bins),
+        generated_at=model.generated_at,
+    )
+
+
+def platt_calibration_parameters_to_model(params: PlattCalibrationParameters, model=None):
+    from modules.predictions.infrastructure.persistence.models import CalibrationParametersModel
+
+    model = model or CalibrationParametersModel(model_id=params.model_id.value)
+    model.a = params.a
+    model.b = params.b
+    model.sample_count = params.sample_count
+    model.fitted_at = params.fitted_at
+    return model
+
+
+def platt_calibration_parameters_to_domain(model) -> PlattCalibrationParameters:
+    return PlattCalibrationParameters(
+        model_id=ModelId(model.model_id), a=model.a, b=model.b,
+        sample_count=model.sample_count, fitted_at=model.fitted_at,
+    )
+
+
+def _comparison_metrics_to_dict(metrics: ComparisonMetrics) -> dict:
+    return {
+        "log_loss": metrics.log_loss, "brier_score": metrics.brier_score,
+        "expected_calibration_error": metrics.expected_calibration_error, "mae": metrics.mae,
+    }
+
+
+def _comparison_metrics_to_domain(payload: dict) -> ComparisonMetrics:
+    return ComparisonMetrics(
+        log_loss=payload.get("log_loss"), brier_score=payload.get("brier_score"),
+        expected_calibration_error=payload.get("expected_calibration_error"), mae=payload.get("mae"),
+    )
+
+
+def challenger_evaluation_to_model(evaluation: ChallengerEvaluation):
+    from modules.predictions.infrastructure.persistence.models import ChallengerEvaluationModel
+
+    return ChallengerEvaluationModel(
+        id=evaluation.id.value,
+        market_id=evaluation.market_id.value,
+        challenger_model_id=evaluation.challenger_model_id.value,
+        champion_model_id=evaluation.champion_model_id.value if evaluation.champion_model_id else None,
+        challenger_metrics=_comparison_metrics_to_dict(evaluation.challenger_metrics),
+        champion_metrics=(
+            _comparison_metrics_to_dict(evaluation.champion_metrics) if evaluation.champion_metrics else None
+        ),
+        verdict=evaluation.verdict.value,
+        decisive_metric=evaluation.decisive_metric,
+        holdout_sample_count=evaluation.holdout_sample_count,
+        evaluated_at=evaluation.evaluated_at,
+    )
+
+
+def challenger_evaluation_to_domain(model) -> ChallengerEvaluation:
+    return ChallengerEvaluation(
+        id=ChallengerEvaluationId(model.id),
+        market_id=MarketId(model.market_id),
+        challenger_model_id=ModelId(model.challenger_model_id),
+        champion_model_id=ModelId(model.champion_model_id) if model.champion_model_id else None,
+        challenger_metrics=_comparison_metrics_to_domain(model.challenger_metrics or {}),
+        champion_metrics=(
+            _comparison_metrics_to_domain(model.champion_metrics) if model.champion_metrics else None
+        ),
+        verdict=ComparisonVerdict(model.verdict),
+        decisive_metric=model.decisive_metric,
+        holdout_sample_count=model.holdout_sample_count,
+        evaluated_at=model.evaluated_at,
+    )
+
+
+def training_run_to_model(run: TrainingRun):
+    from modules.predictions.infrastructure.persistence.models import TrainingRunModel
+
+    return TrainingRunModel(
+        id=run.id.value,
+        market_id=run.market_id.value,
+        model_id=run.model_id.value if run.model_id else None,
+        dataset_id=run.dataset_id.value if run.dataset_id else None,
+        algorithm=run.algorithm,
+        framework=run.framework,
+        train_metrics=run.train_metrics,
+        test_metrics=run.test_metrics,
+        feature_order=list(run.feature_order),
+        selected_features=list(run.selected_features),
+        samples_used=run.samples_used,
+        outliers_removed=run.outliers_removed,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+    )
+
+
+def training_run_to_domain(model) -> TrainingRun:
+    return TrainingRun(
+        id=TrainingRunId(model.id),
+        market_id=MarketId(model.market_id),
+        model_id=ModelId(model.model_id) if model.model_id else None,
+        dataset_id=DatasetId(model.dataset_id) if model.dataset_id else None,
+        algorithm=model.algorithm,
+        framework=model.framework,
+        train_metrics=dict(model.train_metrics or {}),
+        test_metrics=dict(model.test_metrics or {}),
+        feature_order=tuple(model.feature_order or []),
+        selected_features=tuple(model.selected_features or []),
+        samples_used=model.samples_used,
+        outliers_removed=model.outliers_removed,
+        started_at=model.started_at,
+        completed_at=model.completed_at,
+    )
 
 
 def experiment_to_domain(model: ExperimentModel) -> Experiment:
@@ -393,6 +536,8 @@ def _training_sample_to_dict(sample: TrainingSample) -> dict:
         "features": dict(sample.features),
         "label": sample.label,
         "reference_time": sample.reference_time.isoformat() if sample.reference_time else None,
+        "raw_home_goals": sample.raw_home_goals,
+        "raw_away_goals": sample.raw_away_goals,
     }
 
 
@@ -402,6 +547,8 @@ def _training_sample_from_dict(data: dict) -> TrainingSample:
         features=dict(data["features"]),
         label=data["label"],
         reference_time=datetime.fromisoformat(reference_time) if reference_time else None,
+        raw_home_goals=data.get("raw_home_goals"),
+        raw_away_goals=data.get("raw_away_goals"),
     )
 
 

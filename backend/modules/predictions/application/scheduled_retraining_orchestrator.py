@@ -68,17 +68,80 @@ from datetime import datetime
 from modules.predictions.application.challenger_evaluation_service import ChallengerEvaluationService
 from modules.predictions.application.dataset_builder_service import DatasetBuilder
 from modules.predictions.application.dataset_registry_service import DatasetHasQualityIssuesError, DatasetRegistryService
-from modules.predictions.application.model_selection_service import AutomaticModelSelectionService
+from modules.predictions.application.model_selection_service import (
+    DEFAULT_CLASSIFICATION_CANDIDATES,
+    AutomaticModelSelectionService,
+)
 from modules.predictions.application.training_pipeline_service import RetrainingScheduler
+from modules.predictions.application.training_preflight_service import TrainingPreflightService
 from modules.predictions.domain.dataset import Dataset
 from modules.predictions.domain.entities import MarketDefinition, ModelDefinition
+from modules.predictions.domain.ml_value_objects import MLAlgorithm, MLFramework
 from modules.predictions.domain.model_comparison import ChallengerEvaluation, ComparisonVerdict
+from modules.predictions.domain.model_selection import CandidateSpec
 from modules.predictions.domain.value_objects import MarketStatus
 from modules.predictions.infrastructure.ml.model_loader import ModelLoaderService
 from modules.predictions.ports.ml_model import TrainingSample
 from modules.predictions.ports.repositories import MarketRepositoryPort, ModelComparisonRepositoryPort, ModelRepositoryPort
 
 SYSTEM_APPROVER = "scheduled-retraining"
+
+# Statistical-baseline charter, live wiring — a real, empirically-benchmarked
+# `FootballGoalsPoissonAdapter` candidate for each of the 12 football goals/score markets it
+# supports (see the adapter's own module docstring for the 5 `market_shape`s). Additive only:
+# consulted below in `_check_and_retrain` solely when the caller leaves `candidates=None` (the
+# normal sweep path), so an explicit operator/test override of the roster is never silently
+# augmented, and every market outside this mapping is completely unaffected.
+POISSON_ELIGIBLE_MARKETS: dict[str, CandidateSpec] = {
+    "football.total_goals_over_under": CandidateSpec(
+        MLAlgorithm.POISSON_GOALS_MODEL, MLFramework.POISSON_GOALS,
+        params={"market_shape": "total_threshold", "line": 2.5}, is_baseline=True,
+    ),
+    "football.total_goals_over_under_0_5": CandidateSpec(
+        MLAlgorithm.POISSON_GOALS_MODEL, MLFramework.POISSON_GOALS,
+        params={"market_shape": "total_threshold", "line": 0.5}, is_baseline=True,
+    ),
+    "football.total_goals_over_under_1_5": CandidateSpec(
+        MLAlgorithm.POISSON_GOALS_MODEL, MLFramework.POISSON_GOALS,
+        params={"market_shape": "total_threshold", "line": 1.5}, is_baseline=True,
+    ),
+    "football.total_goals_over_under_3_5": CandidateSpec(
+        MLAlgorithm.POISSON_GOALS_MODEL, MLFramework.POISSON_GOALS,
+        params={"market_shape": "total_threshold", "line": 3.5}, is_baseline=True,
+    ),
+    "football.total_goals_over_under_4_5": CandidateSpec(
+        MLAlgorithm.POISSON_GOALS_MODEL, MLFramework.POISSON_GOALS,
+        params={"market_shape": "total_threshold", "line": 4.5}, is_baseline=True,
+    ),
+    "football.home_team_total_goals": CandidateSpec(
+        MLAlgorithm.POISSON_GOALS_MODEL, MLFramework.POISSON_GOALS,
+        params={"market_shape": "team_total_threshold", "line": 1.5, "team": "home"}, is_baseline=True,
+    ),
+    "football.away_team_total_goals": CandidateSpec(
+        MLAlgorithm.POISSON_GOALS_MODEL, MLFramework.POISSON_GOALS,
+        params={"market_shape": "team_total_threshold", "line": 1.5, "team": "away"}, is_baseline=True,
+    ),
+    "football.correct_score": CandidateSpec(
+        MLAlgorithm.POISSON_GOALS_MODEL, MLFramework.POISSON_GOALS,
+        params={"market_shape": "correct_score"}, is_baseline=True,
+    ),
+    "football.home_clean_sheet": CandidateSpec(
+        MLAlgorithm.POISSON_GOALS_MODEL, MLFramework.POISSON_GOALS,
+        params={"market_shape": "clean_sheet", "team": "home"}, is_baseline=True,
+    ),
+    "football.away_clean_sheet": CandidateSpec(
+        MLAlgorithm.POISSON_GOALS_MODEL, MLFramework.POISSON_GOALS,
+        params={"market_shape": "clean_sheet", "team": "away"}, is_baseline=True,
+    ),
+    "football.home_win_to_nil": CandidateSpec(
+        MLAlgorithm.POISSON_GOALS_MODEL, MLFramework.POISSON_GOALS,
+        params={"market_shape": "win_to_nil", "team": "home"}, is_baseline=True,
+    ),
+    "football.away_win_to_nil": CandidateSpec(
+        MLAlgorithm.POISSON_GOALS_MODEL, MLFramework.POISSON_GOALS,
+        params={"market_shape": "win_to_nil", "team": "away"}, is_baseline=True,
+    ),
+}
 
 # A comparison holdout is only carved off when doing so still leaves the Challenger's own training
 # comfortably above `MIN_TRAINING_SAMPLES` (30) after `TrainingPipelineService`'s own internal
@@ -136,6 +199,12 @@ class ScheduledRetrainingOrchestrator:
     that construct this orchestrator without them keep working unchanged — the Continuous Outcome
     Learning Engine's comparison step is simply skipped (same as an insufficient-holdout market)
     when any of the three isn't wired, rather than raising."""
+    preflight: TrainingPreflightService | None = None
+    """Phase 3 audit fix — `TrainingPreflightService` existed since Milestone 19 but nothing ever
+    called it. Optional for the same backward-compatibility reason as the three fields above: when
+    wired, a market failing preflight (missing feature manifest, leakage-unsafe intelligence
+    feature, insufficient labeled observations, etc.) is skipped with the blocking checks recorded
+    in `skipped_reason`, never trained on data that already failed a documented gate."""
 
     async def run(self, now: datetime, candidates=None) -> list[RetrainingOutcome]:
         """Checks, and retrains where warranted, every PRODUCTION market — the periodic sweep a
@@ -163,6 +232,15 @@ class ScheduledRetrainingOrchestrator:
                 return RetrainingOutcome(market_key=market.market_key, should_retrain=False, reason=self._reason(decision))
             reason = self._reason(decision)
 
+        if self.preflight is not None:
+            report = await self.preflight.check(market.market_key, now)
+            if not report.ready:
+                blocking = ", ".join(f"{c.name}: {c.detail}" for c in report.blocking())
+                return RetrainingOutcome(
+                    market_key=market.market_key, should_retrain=True, reason=reason,
+                    skipped_reason=f"preflight failed — {blocking}",
+                )
+
         try:
             dataset = await self._build_validate_approve_dataset(market, now)
         except DatasetHasQualityIssuesError as exc:
@@ -185,6 +263,12 @@ class ScheduledRetrainingOrchestrator:
                 training_pool, holdout_samples = split
                 training_dataset = replace(dataset, samples=training_pool)
 
+        # Additive-only Poisson injection (see `POISSON_ELIGIBLE_MARKETS`'s own comment) — only
+        # when the caller left `candidates` at its default, never overriding an explicit roster.
+        effective_candidates = candidates
+        if candidates is None and market.market_key in POISSON_ELIGIBLE_MARKETS:
+            effective_candidates = DEFAULT_CLASSIFICATION_CANDIDATES + (POISSON_ELIGIBLE_MARKETS[market.market_key],)
+
         try:
             next_model_version = await self._next_model_version(market)
             challenger, selection = await self.model_selection.select_and_register_challenger(
@@ -194,7 +278,7 @@ class ScheduledRetrainingOrchestrator:
                 model_key_prefix=market.market_key,
                 next_version=next_model_version,
                 now=now,
-                candidates=candidates,
+                candidates=effective_candidates,
             )
         except Exception as exc:  # noqa: BLE001 — same isolation as the dataset-build path
             return RetrainingOutcome(

@@ -172,7 +172,17 @@ class FootballDataOrgAdapter:
         `TOTAL` table is used; a competition split into groups (e.g. a cup's group stage) would
         have multiple `standings` entries, but every top-flight league this adapter targets has
         exactly one. `record` mirrors the shape `ApiFootballAdapter` already produces so
-        `reconcile_standing` doesn't need to special-case the provider."""
+        `reconcile_standing` doesn't need to special-case the provider.
+
+        CAUTION — same free-tier limitation as `fetch_fixtures`/`fetch_completed_fixtures`:
+        `season_label` isn't sent as a request param, so this always returns whatever
+        football-data.org considers the competition's *current* season, regardless of which
+        season you asked for. Triggering `sync_standings_alt` for any season other than the
+        genuinely current one (e.g. replaying it for a past season, or during the gap before a
+        new season's fixtures exist) silently reconciles a mismatched — sometimes all-zero,
+        not-yet-started — table under the wrong `season_id`. Confirmed live 2026-08-16: a manual
+        re-run against a past season overwrote a real 20-team table with an unstarted season's
+        blank one. Only call this for the season football-data.org would itself call current."""
         payload = await self._get(f"/competitions/{competition_ref}/standings", {})
         total_table = next((group.get("table", []) for group in payload.get("standings", []) if group.get("type") == "TOTAL"), [])
         records = []

@@ -19,18 +19,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from uuid import uuid4
 
 from modules.features.domain.value_objects import FeatureKey
 from modules.features.ports.repositories import FeatureDefinitionRepositoryPort
 from modules.predictions.application.experiment_tracking_service import ExperimentTrackingService
 from modules.predictions.application.model_registry_service import ModelRegistryService
-from modules.predictions.application.training_pipeline_service import TrainingPipelineService
+from modules.predictions.application.training_pipeline_service import EvaluationMetrics, TrainingPipelineService
 from modules.predictions.domain.dataset import Dataset, SplitStrategy
 from modules.predictions.domain.entities import ModelDefinition
 from modules.predictions.domain.ml_value_objects import MLAlgorithm, MLFramework
 from modules.predictions.domain.model_selection import CandidateSpec, ModelSelectionResult, NoViableCandidateError
+from modules.predictions.domain.training_run import TrainingRun, TrainingRunId
 from modules.predictions.domain.value_objects import MarketId, TargetType
 from modules.predictions.infrastructure.ml.catboost_adapter import CatBoostAdapter
+from modules.predictions.infrastructure.ml.football_goals_poisson_adapter import FootballGoalsPoissonAdapter
 from modules.predictions.infrastructure.ml.lightgbm_adapter import LightGBMAdapter
 from modules.predictions.infrastructure.ml.sklearn_adapter import SklearnAdapter
 from modules.predictions.infrastructure.ml.xgboost_adapter import XGBoostAdapter
@@ -40,6 +43,7 @@ from modules.predictions.ports.ml_model import (
     PredictionModelPort,
     UnsupportedAlgorithmForTargetTypeError,
 )
+from modules.predictions.ports.training_run_repository import TrainingRunRepositoryPort
 
 DEFAULT_CLASSIFICATION_CANDIDATES: tuple[CandidateSpec, ...] = (
     CandidateSpec(MLAlgorithm.LIGHTGBM_GBM, MLFramework.LIGHTGBM),
@@ -47,7 +51,10 @@ DEFAULT_CLASSIFICATION_CANDIDATES: tuple[CandidateSpec, ...] = (
     CandidateSpec(MLAlgorithm.CATBOOST_GBM, MLFramework.CATBOOST),
     CandidateSpec(MLAlgorithm.RANDOM_FOREST, MLFramework.SKLEARN),
     CandidateSpec(MLAlgorithm.EXTRA_TREES, MLFramework.SKLEARN),
-    CandidateSpec(MLAlgorithm.LOGISTIC_REGRESSION, MLFramework.SKLEARN),
+    # Statistical baseline (charter: "every trainable market should have a simple statistical
+    # baseline before an ML Champion can be promoted") — competes in the same roster as every ML
+    # candidate rather than being assumed inferior; is_baseline only tags it for reporting.
+    CandidateSpec(MLAlgorithm.LOGISTIC_REGRESSION, MLFramework.SKLEARN, is_baseline=True),
     CandidateSpec(MLAlgorithm.RIDGE, MLFramework.SKLEARN),
     CandidateSpec(MLAlgorithm.ELASTIC_NET, MLFramework.SKLEARN),
     CandidateSpec(MLAlgorithm.SVM, MLFramework.SKLEARN),
@@ -55,10 +62,21 @@ DEFAULT_CLASSIFICATION_CANDIDATES: tuple[CandidateSpec, ...] = (
     CandidateSpec(MLAlgorithm.MLP, MLFramework.SKLEARN),
 )
 
-DEFAULT_REGRESSION_CANDIDATES: tuple[CandidateSpec, ...] = tuple(
-    candidate
-    for candidate in DEFAULT_CLASSIFICATION_CANDIDATES
-    if candidate.algorithm not in (MLAlgorithm.LOGISTIC_REGRESSION, MLAlgorithm.GAUSSIAN_NB)
+DEFAULT_REGRESSION_CANDIDATES: tuple[CandidateSpec, ...] = (
+    CandidateSpec(MLAlgorithm.LIGHTGBM_GBM, MLFramework.LIGHTGBM),
+    CandidateSpec(MLAlgorithm.XGBOOST_GBM, MLFramework.XGBOOST),
+    CandidateSpec(MLAlgorithm.CATBOOST_GBM, MLFramework.CATBOOST),
+    CandidateSpec(MLAlgorithm.RANDOM_FOREST, MLFramework.SKLEARN),
+    CandidateSpec(MLAlgorithm.EXTRA_TREES, MLFramework.SKLEARN),
+    CandidateSpec(MLAlgorithm.RIDGE, MLFramework.SKLEARN, is_baseline=True),
+    CandidateSpec(MLAlgorithm.ELASTIC_NET, MLFramework.SKLEARN),
+    CandidateSpec(MLAlgorithm.SVM, MLFramework.SKLEARN),
+    CandidateSpec(MLAlgorithm.MLP, MLFramework.SKLEARN),
+    # Statistical baselines proper (Milestone: statistical-baseline charter) — genuine count-shaped
+    # GLMs, not just a plain linear model reused as a stand-in. Compete for real against the rest
+    # of the roster; ranking is empirical, never assumed.
+    CandidateSpec(MLAlgorithm.POISSON_GLM, MLFramework.SKLEARN, is_baseline=True),
+    CandidateSpec(MLAlgorithm.TWEEDIE_GLM, MLFramework.SKLEARN, is_baseline=True),
 )
 
 
@@ -75,6 +93,8 @@ def _build_model(
         return XGBoostAdapter(target_type=target_type, params=dict(candidate.params), class_labels=class_labels)
     if candidate.framework is MLFramework.CATBOOST:
         return CatBoostAdapter(target_type=target_type, params=dict(candidate.params), class_labels=class_labels)
+    if candidate.framework is MLFramework.POISSON_GOALS:
+        return FootballGoalsPoissonAdapter(target_type=target_type, params=dict(candidate.params), class_labels=class_labels)
     return SklearnAdapter(
         algorithm=candidate.algorithm, target_type=target_type, params=dict(candidate.params), class_labels=class_labels
     )
@@ -103,6 +123,13 @@ def _is_better(target_type: TargetType, candidate_value: float, current_best: fl
     return candidate_value < current_best
 
 
+def _evaluation_metrics_to_dict(metrics: EvaluationMetrics) -> dict:
+    return {
+        "accuracy": metrics.accuracy, "precision": metrics.precision, "recall": metrics.recall,
+        "f1": metrics.f1, "mae": metrics.mae, "rmse": metrics.rmse, "log_loss": metrics.log_loss,
+    }
+
+
 @dataclass
 class AutomaticModelSelectionService:
     training_pipeline: TrainingPipelineService
@@ -113,6 +140,12 @@ class AutomaticModelSelectionService:
     # current `FeatureDefinition.version` at registration time, closing the bug where
     # `ModelDefinition.feature_versions` was silently dropped (see `select_and_register_challenger`).
     feature_definitions: FeatureDefinitionRepositoryPort | None = None
+    # Training Run audit trail — the record behind `ModelDefinition.training_run_ref`. Optional
+    # (defaults to `None`, matching this class's existing `feature_definitions` posture) so every
+    # existing caller/test that doesn't pass it keeps working unchanged; when wired,
+    # `select_and_register_challenger` persists a real `TrainingRun` row for the winning
+    # candidate instead of leaving `training_run_ref` permanently unset.
+    training_runs: TrainingRunRepositoryPort | None = None
 
     async def select(
         self,
@@ -131,7 +164,9 @@ class AutomaticModelSelectionService:
         )
 
         best: tuple[CandidateSpec, float, PredictionModelPort] | None = None
+        best_result = None
         skipped: list[tuple[CandidateSpec, str]] = []
+        scored: list[tuple[CandidateSpec, float]] = []
 
         for candidate in roster:
             model = _build_model(candidate, target_type, dataset.lineage.class_labels)
@@ -146,8 +181,10 @@ class AutomaticModelSelectionService:
                 skipped.append((candidate, "training produced no evaluable test metric"))
                 continue
 
+            scored.append((candidate, value))
             if best is None or _is_better(target_type, value, best[1]):
                 best = (candidate, value, result.model)
+                best_result = result
 
         if best is None:
             raise NoViableCandidateError(
@@ -158,11 +195,18 @@ class AutomaticModelSelectionService:
         winning_candidate, winning_value, winning_model = best
         return ModelSelectionResult(
             winning_candidate=winning_candidate,
+            winning_train_metrics=best_result.train_metrics,
+            winning_test_metrics=_evaluation_metrics_to_dict(best_result.test_metrics),
+            winning_feature_order=best_result.feature_order,
+            winning_selected_features=best_result.selected_features,
+            winning_samples_used=best_result.samples_used,
+            winning_outliers_removed=best_result.outliers_removed,
             winning_model=winning_model,
             ranking_metric=_ranking_metric_name(target_type),
             ranking_value=winning_value,
             all_candidates=roster,
             skipped_candidates=tuple(skipped),
+            candidate_scores=tuple(scored),
         )
 
     async def select_and_register_challenger(
@@ -200,6 +244,12 @@ class AutomaticModelSelectionService:
 
         feature_versions = await self._resolve_feature_versions(dataset.lineage.feature_keys)
 
+        # Training Run audit trail: the id is minted before registration so it can be handed to
+        # `model_registry.register` as `training_run_ref` — `register()` already accepts this
+        # opaque string, it just never had a real row backing it until this service was wired
+        # with a `training_runs` repository.
+        run_id = TrainingRunId(uuid4()) if self.training_runs is not None else None
+
         model_def = await self.model_registry.register(
             market_id=market_id,
             model_key=model_key,
@@ -211,10 +261,43 @@ class AutomaticModelSelectionService:
             trained_at=now,
             now=now,
             artifact_ref=artifact_ref,
+            training_run_ref=str(run_id.value) if run_id is not None else None,
         )
         challenger = await self.model_registry.promote_to_challenger(model_def.id)
 
         await self.experiments.record_model_selection(market_id, selection, now)
+
+        if self.training_runs is not None and run_id is not None:
+            # `started_at`/`completed_at` both reuse `now` — the caller's registration timestamp,
+            # not measured wall-clock training duration (`TrainingPipelineService.train()` does
+            # not instrument that today, and this method never fabricates a value it didn't
+            # measure).
+            run = TrainingRun(
+                id=run_id,
+                market_id=market_id,
+                model_id=challenger.id,
+                dataset_id=dataset.id,
+                algorithm=selection.winning_candidate.algorithm.value,
+                framework=selection.winning_candidate.framework.value,
+                train_metrics=(
+                    {
+                        "sample_count": selection.winning_train_metrics.sample_count,
+                        "metric_name": selection.winning_train_metrics.metric_name,
+                        "metric_value": selection.winning_train_metrics.metric_value,
+                        **selection.winning_train_metrics.extra,
+                    }
+                    if selection.winning_train_metrics is not None
+                    else {}
+                ),
+                test_metrics=selection.winning_test_metrics,
+                feature_order=selection.winning_feature_order,
+                selected_features=selection.winning_selected_features,
+                samples_used=selection.winning_samples_used,
+                outliers_removed=selection.winning_outliers_removed,
+                started_at=now,
+                completed_at=now,
+            )
+            await self.training_runs.record(run)
 
         return challenger, selection
 

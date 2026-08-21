@@ -2,7 +2,7 @@ import { Link } from 'react-router-dom'
 import { useQueries } from '@tanstack/react-query'
 import { Radar } from 'lucide-react'
 import { sportsApi } from '@/lib/api/sports'
-import { SPORT_SLUGS } from '@/lib/hooks/use-sport'
+import { useAvailableSports } from '@/lib/hooks/use-sport'
 import { CDStatusDot } from '../primitives/status'
 import { MissionSection, MissionSkeletonGrid, MissionEmptyState } from './mission-section'
 import { CD_DOMAIN_COLOR_VAR, sportDomainFor } from '../primitives/domain'
@@ -22,8 +22,9 @@ export function CompetitionsUnderWatch({
   liveFixtures: FixtureCardItem[]
   upcomingFixtures: FixtureCardItem[]
 }) {
+  const availableSports = useAvailableSports()
   const competitionQueries = useQueries({
-    queries: SPORT_SLUGS.map((sport) => ({
+    queries: availableSports.map((sport) => ({
       queryKey: ['sports', sport.code, 'competitions', 'mission-control'],
       queryFn: () => sportsApi.listCompetitions(sport.code),
       staleTime: 5 * 60 * 1000,
@@ -34,7 +35,7 @@ export function CompetitionsUnderWatch({
   const liveCountByCompetition = countByCompetition(liveFixtures)
   const upcomingCountByCompetition = countByCompetition(upcomingFixtures)
 
-  const competitions = SPORT_SLUGS.flatMap((sport, i) => (competitionQueries[i].data ?? []).map((c) => ({ competition: c, sport })))
+  const competitions = availableSports.flatMap((sport, i) => (competitionQueries[i].data ?? []).map((c) => ({ competition: c, sport })))
     .sort((a, b) => (liveCountByCompetition[b.competition.id] ?? 0) - (liveCountByCompetition[a.competition.id] ?? 0))
     .slice(0, 6)
 

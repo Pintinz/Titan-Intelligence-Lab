@@ -15,6 +15,7 @@ from uuid import UUID
 class PlanTier(str, Enum):
     FREE = "free"
     REWARDED = "rewarded"
+    PRO = "pro"
     PREMIUM = "premium"
     ENTERPRISE = "enterprise"
 
@@ -38,6 +39,17 @@ class SubjectType(str, Enum):
 
     USER = "user"
     ORGANIZATION = "organization"
+
+
+class ChargeStatus(str, Enum):
+    """A payment-provider charge attempt's lifecycle — distinct from ``SubscriptionStatus``:
+    a charge is a single payment event, a subscription is the entitlement state it unlocks.
+    Only a verified webhook (never the synchronous checkout response) may move a
+    ``PendingCheckout`` to SUCCEEDED/FAILED — see ``CheckoutService.handle_webhook``."""
+
+    PENDING = "pending"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
 
 
 @dataclass(frozen=True)
@@ -66,6 +78,14 @@ class SubscriptionId:
 
 @dataclass(frozen=True)
 class UsageCounterId:
+    value: UUID
+
+    def __str__(self) -> str:
+        return str(self.value)
+
+
+@dataclass(frozen=True)
+class PendingCheckoutId:
     value: UUID
 
     def __str__(self) -> str:

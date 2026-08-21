@@ -132,9 +132,12 @@ export default function MatchListViewAllPage({ scope }: { scope: MatchesScope })
           }}
           className="h-9 rounded-infinity-sm border border-infinity-border-default bg-infinity-ground-0 px-3 font-infinity-body text-[13px] text-infinity-text-primary focus:border-infinity-signal focus:outline-none focus:ring-1 focus:ring-infinity-signal"
         >
-          <option value="">All competitions</option>
+          {/* Native <option> ignores the <select>'s own background/text classes in its dropdown
+              popup — Chrome/Firefox both default it to a white background, so without repeating
+              the color classes here the light theme text renders unreadable on that white popup. */}
+          <option value="" className="bg-infinity-ground-0 text-infinity-text-primary">All competitions</option>
           {(competitionsQuery.data ?? []).map((c) => (
-            <option key={c.id} value={c.id}>
+            <option key={c.id} value={c.id} className="bg-infinity-ground-0 text-infinity-text-primary">
               {c.name}
             </option>
           ))}
@@ -148,9 +151,9 @@ export default function MatchListViewAllPage({ scope }: { scope: MatchesScope })
             }}
             className="h-9 rounded-infinity-sm border border-infinity-border-default bg-infinity-ground-0 px-3 font-infinity-body text-[13px] text-infinity-text-primary focus:border-infinity-signal focus:outline-none focus:ring-1 focus:ring-infinity-signal"
           >
-            <option value="">Every season</option>
+            <option value="" className="bg-infinity-ground-0 text-infinity-text-primary">Every season</option>
             {seasons.map((s) => (
-              <option key={s.id} value={s.id}>
+              <option key={s.id} value={s.id} className="bg-infinity-ground-0 text-infinity-text-primary">
                 {s.label} season
               </option>
             ))}
@@ -210,6 +213,7 @@ export default function MatchListViewAllPage({ scope }: { scope: MatchesScope })
                   awayScore={awayScore}
                   homeLogoUrl={fixture.home_team.logo_url}
                   awayLogoUrl={fixture.away_team.logo_url}
+                  stats={fixture.stats}
                   following={watchlist.isFollowing('fixture', fixture.id)}
                   onToggleFollow={() => watchlist.toggle('fixture', fixture.id)}
                   href={status === 'completed' ? `/app/${sport.slug}/matches/${fixture.id}/review` : `/app/${sport.slug}/matches/${fixture.id}`}

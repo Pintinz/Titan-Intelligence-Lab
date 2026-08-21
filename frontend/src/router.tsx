@@ -1,12 +1,12 @@
 import { lazy, Suspense, type ComponentType } from 'react'
 import { createBrowserRouter } from 'react-router-dom'
 import { PageLoader } from '@/components/layout/page-loader'
-import HomePage from '@/pages/home-page'
 import LoginPage from '@/pages/login-page'
 import LandingPage from '@/pages/landing-page'
 import SignupPage from '@/pages/signup-page'
 import ForgotPasswordPage from '@/pages/forgot-password-page'
 import ResetPasswordPage from '@/pages/reset-password-page'
+import AuthCallbackPage from '@/pages/auth-callback-page'
 import { RebuildingPage } from '@/pages/rebuilding-page'
 import { ProtectedRoute } from '@/routes/protected-route'
 import { RoleRoute } from '@/routes/role-route'
@@ -15,36 +15,15 @@ import { InfinityAppShell } from '@/components/infinity/app-shell/infinity-app-s
 import { MarketingShell } from '@/components/layout/marketing-shell'
 import { SportShell } from '@/components/layout/sport-shell'
 import { OpsShell } from '@/components/layout/ops-shell'
-import ExecutiveDashboard from '@/pages/ops/executive-dashboard'
-import ProviderManagement from '@/pages/ops/provider-management'
-import FeatureFlags from '@/pages/ops/feature-flags'
-import SettingsPage from '@/pages/settings-page'
-import WatchlistPage from '@/pages/watchlist-page'
-import AiPicksPage from '@/pages/ai-picks-page'
-import AlertsPage from '@/pages/alerts-page'
-import LivePage from '@/pages/live-page'
-import CompetitionsPage from '@/pages/competitions-page'
-import TeamsPage from '@/pages/teams-page'
-import ProfilePage from '@/pages/profile-page'
-import KnowledgeGraphPage from '@/pages/knowledge-graph-page'
-import SportHubPage from '@/pages/sports/sport-hub-page'
-import MatchListPage from '@/pages/sports/match-list-page'
-import MatchListViewAllPage from '@/pages/sports/match-list-view-all-page'
-import MatchDetailPage from '@/pages/sports/match-detail-page'
-import TeamListPage from '@/pages/sports/team-list-page'
-import TeamDetailPage from '@/pages/sports/team-detail-page'
-import PlayerListPage from '@/pages/sports/player-list-page'
-import PlayerDetailPage from '@/pages/sports/player-detail-page'
-import CompetitionListPage from '@/pages/sports/competition-list-page'
-import CompetitionDetailPage from '@/pages/sports/competition-detail-page'
-import PredictionLabPage from '@/pages/sports/prediction-lab-page'
-import SportNewsPage from '@/pages/sports/sport-news-page'
-import SportCommunityPage from '@/pages/sports/sport-community-page'
-import NewsIntelligencePage from '@/pages/intelligence/news-intelligence-page'
-import LearningIntelligencePage from '@/pages/intelligence/learning-intelligence-page'
-import InsightsPage from '@/pages/insights/insights-page'
+import type { MatchesScope } from '@/pages/sports/match-list-view-all-page'
 
 import { RouteErrorBoundary } from '@/pages/errors/route-error-boundary'
+// Both already ship in the main bundle regardless — RouteErrorBoundary (imported eagerly above,
+// since an errorElement must render synchronously) statically imports both itself. Wrapping them
+// in lazyPage() here too bought nothing but a build warning (INEFFECTIVE_DYNAMIC_IMPORT): Vite
+// can't move an already-static module into a separate chunk.
+import NotFoundPage from '@/pages/errors/not-found-page'
+import ServerErrorPage from '@/pages/errors/server-error-page'
 
 // Milestone 10.3 — Trust, Legal, Compliance & Navigation ecosystem. Code-split: none of these
 // are needed for the initial landing/app bundle, and there are 30+ of them — eagerly importing
@@ -62,6 +41,7 @@ const matchReviewPage = lazyPage(() => import('@/pages/sports/match-review-page'
 const aboutPage = lazyPage(() => import('@/pages/about-page'))
 const contactPage = lazyPage(() => import('@/pages/contact-page'))
 const pricingPage = lazyPage(() => import('@/pages/pricing-page'))
+const checkoutPage = lazyPage(() => import('@/pages/checkout-page'))
 const documentationPage = lazyPage(() => import('@/pages/documentation-page'))
 const developerPortalPage = lazyPage(() => import('@/pages/developer-portal-page'))
 const apiReferencePage = lazyPage(() => import('@/pages/api-reference-page'))
@@ -92,8 +72,6 @@ const disclaimerPage = lazyPage(() => import('@/pages/legal/disclaimer-page'))
 const licensesPage = lazyPage(() => import('@/pages/legal/licenses-page'))
 const gdprPage = lazyPage(() => import('@/pages/legal/gdpr-page'))
 const ccpaPage = lazyPage(() => import('@/pages/legal/ccpa-page'))
-const notFoundPage = lazyPage(() => import('@/pages/errors/not-found-page'))
-const serverErrorPage = lazyPage(() => import('@/pages/errors/server-error-page'))
 const maintenancePage = lazyPage(() => import('@/pages/errors/maintenance-page'))
 
 // Milestone 11A — Operations Center. Admin-only, so none of this belongs in the initial /app
@@ -112,6 +90,56 @@ const alertsMonitoringPage = lazyPage(() => import('@/pages/ops/alerts-monitorin
 const securityCompliancePage = lazyPage(() => import('@/pages/ops/security-compliance-page'))
 const auditCenterPage = lazyPage(() => import('@/pages/ops/audit-center-page'))
 const logsDebuggingPage = lazyPage(() => import('@/pages/ops/logs-debugging-page'))
+
+// Production Readiness Audit §8 fix — everything below used to be a static top-level import, so
+// every anonymous landing-page visitor downloaded the *entire* authenticated app (every Sport
+// Intelligence Center, Ops Center, prediction lab, knowledge graph explorer, etc.) in one 1.5MB+
+// main chunk before seeing a single pixel. None of it is needed until a route under it actually
+// renders, matching every other page in this file.
+const homePage = lazyPage(() => import('@/pages/home-page'))
+const sportHubPage = lazyPage(() => import('@/pages/sports/sport-hub-page'))
+const matchListPage = lazyPage(() => import('@/pages/sports/match-list-page'))
+const matchDetailPage = lazyPage(() => import('@/pages/sports/match-detail-page'))
+const teamListPage = lazyPage(() => import('@/pages/sports/team-list-page'))
+const teamDetailPage = lazyPage(() => import('@/pages/sports/team-detail-page'))
+const playerListPage = lazyPage(() => import('@/pages/sports/player-list-page'))
+const playerDetailPage = lazyPage(() => import('@/pages/sports/player-detail-page'))
+const competitionListPage = lazyPage(() => import('@/pages/sports/competition-list-page'))
+const competitionDetailPage = lazyPage(() => import('@/pages/sports/competition-detail-page'))
+const predictionLabPage = lazyPage(() => import('@/pages/sports/prediction-lab-page'))
+const sportNewsPage = lazyPage(() => import('@/pages/sports/sport-news-page'))
+const sportCommunityPage = lazyPage(() => import('@/pages/sports/sport-community-page'))
+const newsIntelligencePage = lazyPage(() => import('@/pages/intelligence/news-intelligence-page'))
+const learningIntelligencePage = lazyPage(() => import('@/pages/intelligence/learning-intelligence-page'))
+const insightsPage = lazyPage(() => import('@/pages/insights/insights-page'))
+const livePage = lazyPage(() => import('@/pages/live-page'))
+const competitionsPage = lazyPage(() => import('@/pages/competitions-page'))
+const teamsPage = lazyPage(() => import('@/pages/teams-page'))
+const profilePage = lazyPage(() => import('@/pages/profile-page'))
+const knowledgeGraphPage = lazyPage(() => import('@/pages/knowledge-graph-page'))
+const aiPicksPage = lazyPage(() => import('@/pages/ai-picks-page'))
+const watchlistPage = lazyPage(() => import('@/pages/watchlist-page'))
+const settingsPage = lazyPage(() => import('@/pages/settings-page'))
+const alertsPage = lazyPage(() => import('@/pages/alerts-page'))
+const executiveDashboardPage = lazyPage(() => import('@/pages/ops/executive-dashboard'))
+const providerManagementPage = lazyPage(() => import('@/pages/ops/provider-management'))
+const featureFlagsPage = lazyPage(() => import('@/pages/ops/feature-flags'))
+
+// Only page in this router that takes a route-level prop — lazyPage()'s plain-JSX return can't
+// carry one, so this variant returns a component (still Suspense-wrapped inside) instead.
+function lazyPageWithProps<P extends object>(loader: () => Promise<{ default: ComponentType<P> }>) {
+  const LazyComponent = lazy(loader)
+  return function LazyRoutePage(props: P) {
+    return (
+      <Suspense fallback={<PageLoader />}>
+        <LazyComponent {...props} />
+      </Suspense>
+    )
+  }
+}
+const MatchListViewAllPage = lazyPageWithProps<{ scope: MatchesScope }>(
+  () => import('@/pages/sports/match-list-view-all-page'),
+)
 
 // Phase 11.0 — dev-only verification fixture, see devInfinityShowcaseRoute below.
 const infinityShowcasePage = lazyPage(() => import('@/pages/infinity-showcase-page'))
@@ -211,8 +239,8 @@ export const router = createBrowserRouter([
   { path: '/signup', element: <SignupPage />, errorElement: <RouteErrorBoundary /> },
   { path: '/forgot-password', element: <ForgotPasswordPage />, errorElement: <RouteErrorBoundary /> },
   { path: '/reset-password', element: <ResetPasswordPage />, errorElement: <RouteErrorBoundary /> },
-  { path: '/auth/callback', element: <RebuildingPage title="Signing in…" phase="Phase 7" /> },
-  { path: '/500', element: serverErrorPage },
+  { path: '/auth/callback', element: <AuthCallbackPage />, errorElement: <RouteErrorBoundary /> },
+  { path: '/500', element: <ServerErrorPage /> },
   { path: '/maintenance', element: maintenancePage },
   {
     path: '/app',
@@ -229,7 +257,7 @@ export const router = createBrowserRouter([
     ),
     errorElement: <RouteErrorBoundary />,
     children: [
-      { index: true, element: <HomePage /> },
+      { index: true, element: homePage },
 
       {
         // One generic shell serves every Sport Intelligence Center — "only market types differ
@@ -238,44 +266,44 @@ export const router = createBrowserRouter([
         path: ':sport',
         element: <SportShell />,
         children: [
-          { index: true, element: <SportHubPage /> },
-          { path: 'matches', element: <MatchListPage /> },
+          { index: true, element: sportHubPage },
+          { path: 'matches', element: matchListPage },
           { path: 'matches/today', element: <MatchListViewAllPage scope="today" /> },
           { path: 'matches/tomorrow', element: <MatchListViewAllPage scope="tomorrow" /> },
           { path: 'matches/week', element: <MatchListViewAllPage scope="week" /> },
           { path: 'matches/completed', element: <MatchListViewAllPage scope="completed" /> },
-          { path: 'matches/:matchId', element: <MatchDetailPage /> },
+          { path: 'matches/:matchId', element: matchDetailPage },
           { path: 'matches/:matchId/review', element: matchReviewPage },
-          { path: 'teams', element: <TeamListPage /> },
-          { path: 'teams/:teamId', element: <TeamDetailPage /> },
-          { path: 'players', element: <PlayerListPage /> },
-          { path: 'players/:playerId', element: <PlayerDetailPage /> },
-          { path: 'competitions', element: <CompetitionListPage /> },
-          { path: 'competitions/:competitionId', element: <CompetitionDetailPage /> },
+          { path: 'teams', element: teamListPage },
+          { path: 'teams/:teamId', element: teamDetailPage },
+          { path: 'players', element: playerListPage },
+          { path: 'players/:playerId', element: playerDetailPage },
+          { path: 'competitions', element: competitionListPage },
+          { path: 'competitions/:competitionId', element: competitionDetailPage },
           {
             path: 'lab',
             element: (
               <RoleRoute minRole="administrator">
-                <PredictionLabPage />
+                {predictionLabPage}
               </RoleRoute>
             ),
           },
-          { path: 'news', element: <SportNewsPage /> },
-          { path: 'community', element: <SportCommunityPage /> },
+          { path: 'news', element: sportNewsPage },
+          { path: 'community', element: sportCommunityPage },
         ],
       },
 
-      { path: 'live', element: <LivePage /> },
-      { path: 'competitions', element: <CompetitionsPage /> },
-      { path: 'teams', element: <TeamsPage /> },
-      { path: 'news', element: <NewsIntelligencePage /> },
-      { path: 'learning', element: <LearningIntelligencePage /> },
-      { path: 'insights', element: <InsightsPage /> },
+      { path: 'live', element: livePage },
+      { path: 'competitions', element: competitionsPage },
+      { path: 'teams', element: teamsPage },
+      { path: 'news', element: newsIntelligencePage },
+      { path: 'learning', element: learningIntelligencePage },
+      { path: 'insights', element: insightsPage },
       { path: 'analytics', element: <RebuildingPage title="Analytics" phase="Phase 7" /> },
-      { path: 'graph', element: <KnowledgeGraphPage /> },
-      { path: 'picks', element: <AiPicksPage /> },
-      { path: 'watchlist', element: <WatchlistPage /> },
-      { path: 'profile', element: <ProfilePage /> },
+      { path: 'graph', element: knowledgeGraphPage },
+      { path: 'picks', element: aiPicksPage },
+      { path: 'watchlist', element: watchlistPage },
+      { path: 'profile', element: profilePage },
 
       {
         path: 'ops',
@@ -285,9 +313,9 @@ export const router = createBrowserRouter([
           </RoleRoute>
         ),
         children: [
-          { index: true, element: <ExecutiveDashboard /> },
-          { path: 'providers', element: <ProviderManagement /> },
-          { path: 'flags', element: <FeatureFlags /> },
+          { index: true, element: executiveDashboardPage },
+          { path: 'providers', element: providerManagementPage },
+          { path: 'flags', element: featureFlagsPage },
           { path: 'pipeline', element: dataPipelinePage },
           { path: 'features', element: featureStorePage },
           { path: 'markets', element: predictionEnginePage },
@@ -305,14 +333,14 @@ export const router = createBrowserRouter([
         ],
       },
 
-      { path: 'settings', element: <SettingsPage /> },
+      { path: 'settings', element: settingsPage },
       { path: 'settings/organization', element: <RebuildingPage title="Organization Settings" phase="Phase 7" /> },
-      { path: 'billing', element: <RebuildingPage title="Billing" phase="Phase 7" /> },
-      { path: 'notifications', element: <AlertsPage /> },
+      { path: 'billing', element: checkoutPage },
+      { path: 'notifications', element: alertsPage },
       { path: 'help', element: helpCenterPage },
     ],
   },
   // Catch-all — must stay last; any path not matched above renders the 404 page rather than a
   // blank screen or router throw.
-  { path: '*', element: notFoundPage },
+  { path: '*', element: <NotFoundPage /> },
 ])

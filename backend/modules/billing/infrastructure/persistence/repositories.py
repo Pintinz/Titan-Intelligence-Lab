@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from modules.billing.domain.entities import Entitlement, Plan, Subscription, UsageCounter
-from modules.billing.domain.value_objects import PlanId, SubjectType, SubscriptionId, SubscriptionStatus
+from modules.billing.domain.payment import PendingCheckout
+from modules.billing.domain.value_objects import PendingCheckoutId, PlanId, SubjectType, SubscriptionId, SubscriptionStatus
 from modules.billing.infrastructure.persistence import mappers
 from modules.billing.infrastructure.persistence.models import (
     EntitlementModel,
+    PendingCheckoutModel,
     PlanModel,
+    ProcessedPaymentEventModel,
     SubscriptionModel,
     UsageCounterModel,
 )
@@ -123,3 +127,47 @@ class SqlAlchemyUsageCounterRepository:
         await self.session.flush()
         await self.session.refresh(model)
         return mappers.usage_counter_to_domain(model)
+
+
+@dataclass
+class SqlAlchemyPendingCheckoutRepository:
+    session: AsyncSession
+
+    async def get(self, checkout_id: PendingCheckoutId) -> PendingCheckout | None:
+        model = await self.session.get(PendingCheckoutModel, checkout_id.value)
+        return mappers.pending_checkout_to_domain(model) if model else None
+
+    async def get_by_reference(self, reference: str) -> PendingCheckout | None:
+        result = await self.session.execute(select(PendingCheckoutModel).where(PendingCheckoutModel.reference == reference))
+        model = result.scalar_one_or_none()
+        return mappers.pending_checkout_to_domain(model) if model else None
+
+    async def get_by_provider_charge_id(self, provider_charge_id: str) -> PendingCheckout | None:
+        stmt = select(PendingCheckoutModel).where(PendingCheckoutModel.provider_charge_id == provider_charge_id)
+        result = await self.session.execute(stmt)
+        model = result.scalar_one_or_none()
+        return mappers.pending_checkout_to_domain(model) if model else None
+
+    async def upsert(self, checkout: PendingCheckout) -> PendingCheckout:
+        existing = await self.session.get(PendingCheckoutModel, checkout.id.value)
+        model = mappers.pending_checkout_to_model(checkout, existing)
+        self.session.add(model)
+        await self.session.flush()
+        await self.session.refresh(model)
+        return mappers.pending_checkout_to_domain(model)
+
+
+@dataclass
+class SqlAlchemyProcessedPaymentEventRepository:
+    session: AsyncSession
+
+    async def already_processed(self, provider: str, event_id: str) -> bool:
+        stmt = select(ProcessedPaymentEventModel).where(
+            ProcessedPaymentEventModel.provider == provider, ProcessedPaymentEventModel.event_id == event_id
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none() is not None
+
+    async def mark_processed(self, provider: str, event_id: str, now: datetime) -> None:
+        self.session.add(ProcessedPaymentEventModel(provider=provider, event_id=event_id, processed_at=now))
+        await self.session.flush()

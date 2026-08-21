@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, LayoutGrid, CalendarDays, History, ListOrdered, Users } from 'lucide-react'
+import { ArrowLeft, LayoutGrid, CalendarDays, History, ListOrdered, Users, CalendarRange } from 'lucide-react'
 import { sportsApi } from '@/lib/api/sports'
 import { marketsApi } from '@/lib/api/markets'
 import { useSportParam } from '@/lib/hooks/use-sport'
@@ -29,7 +29,10 @@ const TABS: Array<{ key: TabKey; label: string; icon: typeof LayoutGrid }> = [
 ]
 
 const OVERVIEW_LIMIT = 6
-const KICKOFF_TIME = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' })
+const KICKOFF_TIME = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+// Results can now span any past season via the season filter, not just "today's" matches, so a
+// finished fixture's card needs its date (not just "Full time") to stay legible.
+const RESULT_DATE = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
 
 /**
  * CompetitionDetailPage — Competition Intelligence, redesigned per the shaped brief (see chat).
@@ -43,20 +46,28 @@ export default function CompetitionDetailPage() {
   const { competitionId } = useParams<{ competitionId: string }>()
   const watchlist = useWatchlist()
   const [tab, setTab] = useState<TabKey>('overview')
+  // '' means "let the backend pick the current season" — the same best-effort default it always
+  // used before this filter existed. Only set once the person explicitly chooses one.
+  const [selectedSeasonId, setSelectedSeasonId] = useState('')
 
   const competitionQuery = useQuery({
     queryKey: ['sports', 'competition', competitionId],
     queryFn: () => sportsApi.getCompetition(competitionId!),
     enabled: !!competitionId,
   })
+  const seasonsQuery = useQuery({
+    queryKey: ['sports', 'competition', competitionId, 'seasons'],
+    queryFn: () => sportsApi.competitionSeasons(competitionId!),
+    enabled: !!competitionId,
+  })
   const standingsQuery = useQuery({
-    queryKey: ['sports', 'competition', competitionId, 'standings'],
-    queryFn: () => sportsApi.competitionStandings(competitionId!),
+    queryKey: ['sports', 'competition', competitionId, 'standings', selectedSeasonId],
+    queryFn: () => sportsApi.competitionStandings(competitionId!, selectedSeasonId || undefined),
     enabled: !!competitionId,
   })
   const fixturesQuery = useQuery({
-    queryKey: ['sports', 'competition', competitionId, 'fixtures'],
-    queryFn: () => sportsApi.competitionFixtures(competitionId!),
+    queryKey: ['sports', 'competition', competitionId, 'fixtures', selectedSeasonId],
+    queryFn: () => sportsApi.competitionFixtures(competitionId!, 50, selectedSeasonId || undefined),
     enabled: !!competitionId,
   })
   const marketsQuery = useQuery({
@@ -67,6 +78,7 @@ export default function CompetitionDetailPage() {
 
   const fixtures = fixturesQuery.data ?? []
   const standings = standingsQuery.data ?? []
+  const seasons = seasonsQuery.data ?? []
   const aiReady = (marketsQuery.data?.length ?? 0) > 0
 
   const live = useMemo(() => fixtures.filter((f) => fixtureCardStatus(f.status) === 'live'), [fixtures])
@@ -133,7 +145,7 @@ export default function CompetitionDetailPage() {
         competition={competition.name}
         competitionLogoUrl={competition.logo_url}
         status={status}
-        kickoffLabel={status === 'completed' ? undefined : KICKOFF_TIME.format(new Date(fixture.scheduled_at))}
+        kickoffLabel={status === 'completed' ? RESULT_DATE.format(new Date(fixture.scheduled_at)) : KICKOFF_TIME.format(new Date(fixture.scheduled_at))}
         venue={fixture.venue_name}
         homeTeam={fixture.home_team.name}
         awayTeam={fixture.away_team.name}
@@ -170,28 +182,57 @@ export default function CompetitionDetailPage() {
 
       <CompetitionSnapshot fixtures={fixtures.length} upcoming={live.length + upcoming.length} completed={completed.length} teams={teams.length} nextMatch={nextMatch} />
 
-      <div role="tablist" aria-label="Competition sections" className="-mx-1 flex w-fit max-w-full gap-1 overflow-x-auto rounded-[var(--cd-radius-md)] border p-1 backdrop-blur-md" style={{ borderColor: 'var(--cd-border-default)', backgroundColor: 'color-mix(in srgb, var(--cd-surface-2) 70%, transparent)' }}>
-        {TABS.map(({ key, label, icon: Icon }) => {
-          const active = key === activeTab
-          return (
-            <button
-              key={key}
-              type="button"
-              role="tab"
-              aria-selected={active}
-              onClick={() => setTab(key)}
-              className="inline-flex shrink-0 items-center gap-1.5 rounded-[var(--cd-radius-sm)] px-3.5 py-1.5 font-[var(--cd-font-body)] text-[12.5px] font-semibold transition-all duration-[var(--cd-motion-base)]"
-              style={{
-                backgroundColor: active ? domainTint(domain, 16) : 'transparent',
-                boxShadow: active ? `0 0 0 1px ${domainTint(domain, 40)} inset` : 'none',
-                color: active ? domainColor : 'var(--cd-text-secondary)',
-              }}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div role="tablist" aria-label="Competition sections" className="-mx-1 flex w-fit max-w-full gap-1 overflow-x-auto rounded-[var(--cd-radius-md)] border p-1 backdrop-blur-md" style={{ borderColor: 'var(--cd-border-default)', backgroundColor: 'color-mix(in srgb, var(--cd-surface-2) 70%, transparent)' }}>
+          {TABS.map(({ key, label, icon: Icon }) => {
+            const active = key === activeTab
+            return (
+              <button
+                key={key}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setTab(key)}
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-[var(--cd-radius-sm)] px-3.5 py-1.5 font-[var(--cd-font-body)] text-[12.5px] font-semibold transition-all duration-[var(--cd-motion-base)]"
+                style={{
+                  backgroundColor: active ? domainTint(domain, 16) : 'transparent',
+                  boxShadow: active ? `0 0 0 1px ${domainTint(domain, 40)} inset` : 'none',
+                  color: active ? domainColor : 'var(--cd-text-secondary)',
+                }}
+              >
+                <Icon className="size-3.5" aria-hidden="true" />
+                {label}
+              </button>
+            )
+          })}
+        </div>
+
+        {tab !== 'overview' && tab !== 'teams' && seasons.length > 1 && (
+          <label className="inline-flex shrink-0 items-center gap-1.5 rounded-[var(--cd-radius-md)] border px-2.5 py-1.5" style={{ borderColor: 'var(--cd-border-default)', backgroundColor: 'var(--cd-surface-1)' }}>
+            <CalendarRange className="size-3.5 shrink-0" style={{ color: 'var(--cd-text-muted)' }} aria-hidden="true" />
+            <span className="sr-only">Season</span>
+            <select
+              value={selectedSeasonId}
+              onChange={(e) => setSelectedSeasonId(e.target.value)}
+              className="bg-transparent font-[var(--cd-font-body)] text-[12.5px] font-medium focus:outline-none"
+              style={{ color: 'var(--cd-text-primary)' }}
             >
-              <Icon className="size-3.5" aria-hidden="true" />
-              {label}
-            </button>
-          )
-        })}
+              {/* The closed control inherits the dark page background via bg-transparent, but the
+                  native OS dropdown popup ignores that — Chrome/Firefox both default <option> to a
+                  white popup background, which combined with this page's light `color` token reads
+                  as unreadable white-on-white. <option> (unlike <select>) does accept its own
+                  background-color/color, so set both explicitly here rather than relying on inheritance. */}
+              <option value="" style={{ backgroundColor: 'var(--cd-surface-1)', color: 'var(--cd-text-primary)' }}>
+                Current season
+              </option>
+              {seasons.map((s) => (
+                <option key={s.id} value={s.id} style={{ backgroundColor: 'var(--cd-surface-1)', color: 'var(--cd-text-primary)' }}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
 
       {activeTab === 'overview' && (

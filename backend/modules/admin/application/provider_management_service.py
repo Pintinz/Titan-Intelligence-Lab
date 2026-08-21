@@ -6,6 +6,7 @@ these methods; it does not talk to repositories or the vault directly.
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -31,6 +32,15 @@ class ProviderNotFoundError(KeyError):
 
 class EnvironmentVariableNotSetError(ValueError):
     pass
+
+
+def normalize_credential_label(label: str) -> str:
+    """A human typing into a free-text label field will write "Client ID" or "client id", not
+    the machine-format "client_id" a lookup-by-label needs — normalize whitespace/hyphens to
+    underscores and lowercase so any of those match. Shared by connection testing and any
+    payment-provider adapter that needs a specific named credential (e.g. Flutterwave's
+    client_id/client_secret/encryption_key/webhook_secret_hash)."""
+    return re.sub(r"[\s\-]+", "_", label.strip().lower())
 
 
 def mask_credential(plaintext: str) -> str:

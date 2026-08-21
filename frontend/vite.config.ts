@@ -52,6 +52,10 @@ export default defineConfig({
     },
   },
   server: {
-    port: 5173,
+    port: Number(process.env.PORT) || 5173,
+    // Temporary: allows Cloudflare's quick-tunnel hostname through Vite's Host-header check
+    // while previewing the app off-machine (e.g. on a phone). Safe to remove once done — this
+    // only affects which Host headers dev-server requests accept, not what's exposed.
+    allowedHosts: ['.trycloudflare.com'],
   },
 })

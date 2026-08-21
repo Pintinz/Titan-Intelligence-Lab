@@ -35,9 +35,9 @@ import { KeyValueGrid } from '@/components/domain/key-value-grid'
 import { OpsPageHeader, HealthPill, SectionCard } from '@/components/ops/ops-primitives'
 import { toast } from '@/stores/toast-store'
 
-const CATEGORIES: ProviderCategory[] = ['sports_data', 'ai', 'news', 'odds', 'general']
+const CATEGORIES: ProviderCategory[] = ['sports_data', 'ai', 'news', 'odds', 'payment', 'advertising', 'general']
 
-function statusToHealth(status: string): 'healthy' | 'warning' | 'offline' | 'unknown' {
+export function statusToHealth(status: string): 'healthy' | 'warning' | 'offline' | 'unknown' {
   const s = status.toLowerCase()
   if (s === 'active' || s === 'healthy') return 'healthy'
   if (s === 'degraded' || s === 'warning') return 'warning'
@@ -45,13 +45,13 @@ function statusToHealth(status: string): 'healthy' | 'warning' | 'offline' | 'un
   return 'unknown'
 }
 
-function connectionResultTone(status: string): 'success' | 'warning' | 'danger' {
+export function connectionResultTone(status: string): 'success' | 'warning' | 'danger' {
   if (status === 'healthy') return 'success'
   if (status === 'warning' || status === 'not_configured') return 'warning'
   return 'danger'
 }
 
-function CredentialsPanel({ providerId }: { providerId: string }) {
+export function CredentialsPanel({ providerId }: { providerId: string }) {
   const queryClient = useQueryClient()
   const [label, setLabel] = useState('')
   const [value, setValue] = useState('')
@@ -155,6 +155,7 @@ const AUTH_TYPES: Array<{ value: ProviderAuthType | 'none'; label: string }> = [
   { value: 'api_key_header', label: 'API key header' },
   { value: 'api_key_query', label: 'API key query param' },
   { value: 'basic', label: 'Basic auth' },
+  { value: 'oauth2_client_credentials', label: 'OAuth2 client credentials' },
 ]
 
 /** Base URL and auth wiring for the connection tester — separate from `CredentialsPanel` below,
@@ -193,7 +194,9 @@ function ConnectionSettingsPanel({ provider, onSaved }: { provider: ProviderDto;
       </p>
       <div className="space-y-2.5">
         <div>
-          <Label htmlFor={`base-url-${provider.id}`}>Base URL</Label>
+          <Label htmlFor={`base-url-${provider.id}`}>
+            {authType === 'oauth2_client_credentials' ? 'Token endpoint URL' : 'Base URL'}
+          </Label>
           <Input
             id={`base-url-${provider.id}`}
             placeholder="https://api.example.com"
@@ -201,6 +204,13 @@ function ConnectionSettingsPanel({ provider, onSaved }: { provider: ProviderDto;
             onChange={(e) => setBaseUrl(e.target.value)}
             className="mt-1.5 h-8 text-xs"
           />
+          {authType === 'oauth2_client_credentials' && (
+            <p className="mt-1 text-[11px] text-text-muted">
+              Where "Test connection" exchanges the stored <code className="font-mono">client_id</code> /{' '}
+              <code className="font-mono">client_secret</code> credentials for an access token — not the API
+              itself.
+            </p>
+          )}
         </div>
         <div>
           <Label htmlFor={`auth-type-${provider.id}`}>Auth type</Label>

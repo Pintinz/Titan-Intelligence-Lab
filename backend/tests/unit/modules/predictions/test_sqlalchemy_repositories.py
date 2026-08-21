@@ -390,7 +390,13 @@ async def test_prediction_outcome_repository_round_trip(sqlite_session):
     await predictions.record(prediction)
 
     outcome = PredictionOutcome(
-        id=PredictionOutcomeId(uuid4()), prediction_id=prediction.id, actual_value="home_win", error=0.0, evaluated_at=T0
+        id=PredictionOutcomeId(uuid4()),
+        prediction_id=prediction.id,
+        actual_value="home_win",
+        error=0.0,
+        evaluated_at=T0,
+        raw_home_goals=2,
+        raw_away_goals=1,
     )
     await outcomes.record(outcome)
     await sqlite_session.commit()
@@ -399,6 +405,8 @@ async def test_prediction_outcome_repository_round_trip(sqlite_session):
     by_market = await outcomes.list_by_market(market.id)
     assert fetched.actual_value == "home_win"
     assert len(by_market) == 1
+    assert fetched.raw_home_goals == 2
+    assert fetched.raw_away_goals == 1
 
 
 @pytest.mark.asyncio
@@ -586,6 +594,7 @@ def _dataset(market_id, version=1, status=DatasetStatus.DRAFT, **overrides) -> D
         TrainingSample(
             features={"core.feature_a": float(i)}, label=float(i % 2),
             reference_time=T0.replace(hour=i % 24, minute=0, second=0, microsecond=0),
+            raw_home_goals=i, raw_away_goals=i % 3,
         )
         for i in range(5)
     ]
@@ -634,6 +643,8 @@ async def test_dataset_repository_round_trip_preserves_samples_and_lineage(sqlit
     assert reloaded.samples[3].features == {"core.feature_a": 3.0}
     assert reloaded.samples[3].label == 1.0
     assert reloaded.samples[3].reference_time == dataset.samples[3].reference_time
+    assert reloaded.samples[3].raw_home_goals == 3
+    assert reloaded.samples[3].raw_away_goals == 0
     assert reloaded.lineage.class_labels == ("HOME_WIN", "DRAW", "AWAY_WIN")
     assert reloaded.lineage.source_prediction_ids == ("p1", "p2")
     assert reloaded.lineage.built_at == T0

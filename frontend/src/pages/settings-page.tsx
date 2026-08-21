@@ -152,10 +152,14 @@ export default function SettingsPage() {
           onChange={(e) => setActiveId(e.target.value)}
           className="h-10 w-full rounded-infinity-sm border border-infinity-border-default bg-infinity-ground-2 px-3 font-infinity-body text-[13px] text-infinity-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-infinity-signal"
         >
+          {/* Native <option>/<optgroup> ignore the <select>'s own background/text classes in the
+              dropdown popup — Chrome/Firefox both default it to a white background, so without
+              repeating the color classes here this dark theme's text renders unreadable on that
+              white popup. */}
           {groups.map((group) => (
-            <optgroup key={group.label} label={group.label.toUpperCase()}>
+            <optgroup key={group.label} label={group.label.toUpperCase()} className="bg-infinity-ground-2 text-infinity-text-primary">
               {group.items.map((item) => (
-                <option key={item.id} value={item.id}>
+                <option key={item.id} value={item.id} className="bg-infinity-ground-2 text-infinity-text-primary">
                   {item.label}
                 </option>
               ))}

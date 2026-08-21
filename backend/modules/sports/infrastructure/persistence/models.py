@@ -199,6 +199,28 @@ class PlayerStatisticsModel(TimestampMixin, Base):
     stat_set: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
+class MarketLineModel(TimestampMixin, Base):
+    """POST-M24 Phase 6 — real, provider-normalized sportsbook quotes. Append-only (one row per
+    observed quote, never overwritten in place — see `MarketLineRepositoryPort`'s docstring) so
+    a line's real movement over time is preserved rather than lost to an upsert."""
+
+    __tablename__ = "market_lines"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    fixture_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("fixtures.id"), index=True)
+    sport_code: Mapped[str] = mapped_column(String(32), index=True)
+    provider: Mapped[str] = mapped_column(String(64))
+    bookmaker: Mapped[str] = mapped_column(String(128))
+    market_type: Mapped[str] = mapped_column(String(32), index=True)
+    selection: Mapped[str] = mapped_column(String(16))
+    line: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price: Mapped[float] = mapped_column(Float)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    team_side: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
 class StandingModel(TimestampMixin, VersionedMixin, Base):
     __tablename__ = "standings"
 

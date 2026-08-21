@@ -128,7 +128,11 @@ class _RecordingOutcomeResolver:
     def __init__(self):
         self.calls = []
 
-    async def resolve_for_fixture(self, fixture_id, home_score, away_score, now):
+    async def resolve_for_fixture(
+        self, fixture_id, home_score, away_score, now, *,
+        home_score_ht=None, away_score_ht=None, home_score_first5=None, away_score_first5=None,
+        home_quarters=None, away_quarters=None,
+    ):
         self.calls.append((fixture_id, home_score, away_score, now))
         return []
 
@@ -968,6 +972,42 @@ async def test_get_or_create_match_creates_once_then_returns_same_row(service, s
 
     assert first.id == second.id
     assert first.fixture_id == fixture_id
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_match_sets_started_at_from_the_fixtures_real_scheduled_at(service, session):
+    """POST-M24 Phase 5A audit finding: a `Match` created with `started_at=None` is permanently
+    invisible to `TeamStatisticsRepositoryPort.list_recent_by_team` (its query joins on
+    `Match.started_at < before`, and SQL's NULL comparison is never true) — every rolling-form/
+    differential feature calculator for every sport reads through that one method, so this was a
+    real, universal bug, not sport-specific. The fixture's own real `scheduled_at` is the correct,
+    non-fabricated value to use."""
+    sport, _ = await service.reconcile_sport(SportCode.BASKETBALL, "Basketball", T0)
+    await session.commit()
+    competition, _ = await service.reconcile_competition("nba", "api_basketball", sport.id, T0, name="NBA")
+    season, _ = await service.reconcile_season("nba", "2026", "api_basketball", competition.id, T0)
+    home, _ = await service.reconcile_team(
+        ProviderTeamRecord(external_ref=ProviderRef("api_basketball", "h1"), name="Home", short_name="HOM", country=None),
+        sport.id, T0,
+    )
+    away, _ = await service.reconcile_team(
+        ProviderTeamRecord(external_ref=ProviderRef("api_basketball", "a1"), name="Away", short_name="AWY", country=None),
+        sport.id, T0,
+    )
+    kickoff = T0 - timedelta(days=3)
+    fixture, _ = await service.reconcile_fixture(
+        ProviderFixtureRecord(
+            external_ref=ProviderRef("api_basketball", "fx1"), home_team_ref=ProviderRef("api_basketball", "h1"),
+            away_team_ref=ProviderRef("api_basketball", "a1"), scheduled_at=kickoff, competition_ref="nba",
+            season_label="2026",
+        ),
+        season.id, T0,
+    )
+    await session.commit()
+
+    match = await service.get_or_create_match(fixture.id, T0)
+
+    assert match.started_at.replace(tzinfo=timezone.utc) == kickoff
 
 
 @pytest.mark.asyncio

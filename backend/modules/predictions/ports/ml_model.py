@@ -66,6 +66,13 @@ class TrainingSample:
     features: dict[str, float]
     label: float
     reference_time: datetime | None = None
+    raw_home_goals: float | None = None
+    """(Statistical-baseline charter, Phase 3) The real final-score goal count, copied through from
+    `PredictionOutcome.raw_home_goals` — populated only for football's goals/score markets, `None`
+    for every other market. Every existing adapter reads only `.label`; only
+    `FootballGoalsPoissonAdapter` reads this pair, to fit λ_home/λ_away directly instead of the
+    derived 0/1 classification label."""
+    raw_away_goals: float | None = None
 
 
 @dataclass(frozen=True)

@@ -61,7 +61,12 @@ class ExperimentTrackingService:
     async def record_model_selection(self, market_id: MarketId, result: ModelSelectionResult, now: datetime) -> Experiment:
         """Automatic Model Selection's benchmark (Milestone 9.1 task #164) — records every
         candidate considered and which one won, so "Never hardcode algorithm selection" is
-        auditable after the fact, not just true at the moment it ran."""
+        auditable after the fact, not just true at the moment it ran.
+
+        Statistical-baseline charter: also persists every non-skipped candidate's own score (not
+        just the winner's) and which candidates were the designated statistical baseline, so "did
+        ML actually beat the baseline, and by how much" is reconstructable from this record later
+        instead of being discarded the moment a losing candidate is ranked."""
         experiment = Experiment(
             id=ExperimentId(uuid4()),
             market_id=market_id,
@@ -69,10 +74,15 @@ class ExperimentTrackingService:
                 "kind": "model_selection",
                 "candidates_considered": [c.algorithm.value for c in result.all_candidates],
                 "candidates_skipped": [c.algorithm.value for c, _ in result.skipped_candidates],
+                "baseline_candidates": [c.algorithm.value for c in result.all_candidates if c.is_baseline],
                 "winning_algorithm": result.winning_candidate.algorithm.value,
                 "winning_framework": result.winning_candidate.framework.value,
+                "winner_is_baseline": result.winning_candidate.is_baseline,
             },
-            metrics={f"ranking.{result.ranking_metric}": result.ranking_value},
+            metrics={
+                f"ranking.{result.ranking_metric}": result.ranking_value,
+                **{f"candidate.{c.algorithm.value}": v for c, v in result.candidate_scores},
+            },
             decision="pending",
             created_at=now,
         )

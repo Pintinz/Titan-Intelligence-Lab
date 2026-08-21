@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from datetime import datetime
+from enum import Enum
 
 import httpx
 
@@ -43,9 +44,57 @@ def _as_float(value: object) -> float | None:
         return None
 
 
+def _classify_status(status_code: int) -> ProviderErrorKind:
+    if status_code == 429:
+        return ProviderErrorKind.RATE_LIMITED
+    if status_code in (401, 403):
+        return ProviderErrorKind.AUTH
+    if status_code >= 500:
+        return ProviderErrorKind.TRANSIENT
+    return ProviderErrorKind.PERMANENT  # other 4xx: the request itself is wrong
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    header = response.headers.get("Retry-After")
+    if header is None:
+        return None
+    try:
+        return float(header)
+    except ValueError:
+        return None  # Retry-After may also be an HTTP-date, which callers fall back from
+
+
+def _looks_rate_limited(errors: object) -> bool:
+    text = str(errors).lower()
+    return "rate limit" in text or "too many requests" in text or "quota" in text
+
+
+class ProviderErrorKind(str, Enum):
+    """Retry-safety classification (POST-M24 Phase 2) — lets a caller (`SportsProviderRouter`)
+    decide whether bounded backoff-retry is safe without re-deriving it from the raw exception.
+    `TRANSIENT`/`RATE_LIMITED`/`NETWORK` are worth a bounded retry; `AUTH`/`PERMANENT` never are
+    (retrying a bad API key or a malformed request just burns quota for the same failure)."""
+
+    TRANSIENT = "transient"  # 5xx — provider-side, may clear on its own
+    RATE_LIMITED = "rate_limited"  # 429, or API-SPORTS' in-body rate-limit error
+    AUTH = "auth"  # 401/403 — bad/expired credential, retrying changes nothing
+    PERMANENT = "permanent"  # other 4xx / rejected params — the request itself is wrong
+    NETWORK = "network"  # connection/timeout before any response was received
+
+
 class ProviderRequestError(RuntimeError):
     """Wraps any transport/HTTP/parse failure so callers (ProviderRouter) have one exception
-    type to catch regardless of the underlying cause."""
+    type to catch regardless of the underlying cause. Carries enough structure for retry-safety
+    decisions (`kind`, `retry_after_seconds`) without callers needing to inspect the original
+    httpx exception."""
+
+    def __init__(
+        self, message: str, *, kind: ProviderErrorKind = ProviderErrorKind.TRANSIENT,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.retry_after_seconds = retry_after_seconds
 
 
 class _ApiSportsHttpAdapterBase:
@@ -66,7 +115,22 @@ class _ApiSportsHttpAdapterBase:
             )
             response.raise_for_status()
             payload = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
+        except httpx.HTTPStatusError as exc:
+            raise ProviderRequestError(
+                f"{self.provider_key} request to {path} failed: {exc}",
+                kind=_classify_status(exc.response.status_code),
+                retry_after_seconds=_retry_after_seconds(exc.response),
+            ) from exc
+        except httpx.HTTPError as exc:
+            # No response was ever received (connect/read timeout, DNS failure, ...) — a network
+            # problem, not the provider's own fault; worth a bounded retry.
+            raise ProviderRequestError(
+                f"{self.provider_key} request to {path} failed: {exc}", kind=ProviderErrorKind.NETWORK,
+            ) from exc
+        except ValueError as exc:
+            # Response received but not valid JSON — the provider itself is misbehaving, not
+            # something a retry with the same params is likely to fix on the next attempt either,
+            # but not confidently "this exact request is wrong" (PERMANENT) — treat as transient.
             raise ProviderRequestError(f"{self.provider_key} request to {path} failed: {exc}") from exc
 
         # API-SPORTS reports plan/parameter problems (wrong season, league not on this plan,
@@ -76,7 +140,10 @@ class _ApiSportsHttpAdapterBase:
         # with no diagnostic before this.
         errors = payload.get("errors")
         if errors:
-            raise ProviderRequestError(f"{self.provider_key} request to {path} rejected by provider: {errors}")
+            kind = ProviderErrorKind.RATE_LIMITED if _looks_rate_limited(errors) else ProviderErrorKind.PERMANENT
+            raise ProviderRequestError(
+                f"{self.provider_key} request to {path} rejected by provider: {errors}", kind=kind,
+            )
         return payload
 
     async def aclose(self) -> None:
@@ -146,6 +213,7 @@ class ApiFootballAdapter(_ApiSportsHttpAdapterBase):
             teams = entry.get("teams", {})
             league = entry.get("league", {})
             goals = entry.get("goals") or {}
+            score = entry.get("score") or {}
             home, away = teams.get("home", {}), teams.get("away", {})
             records.append(
                 ProviderFixtureRecord(
@@ -159,9 +227,25 @@ class ApiFootballAdapter(_ApiSportsHttpAdapterBase):
                     status=(fixture.get("status") or {}).get("short"),
                     home_score=goals.get("home"),
                     away_score=goals.get("away"),
+                    period_scores=self._extract_half_time_scores(score),
                 )
             )
         return records
+
+    @staticmethod
+    def _extract_half_time_scores(score: dict) -> dict | None:
+        """Real half-time score, from v3.football.api-sports.io's documented `/fixtures` response
+        shape: `{"score": {"halftime": {"home": N, "away": N}, "fulltime": {...}, ...}}` — the
+        `halftime` sub-object is present (with null home/away) even for fixtures that haven't
+        reached half-time yet, so both must be non-null before this is considered reported.
+        `period_scores["home"/"away"]` carries a one-element list (not a bare int) to match the
+        `kind="half"` shape `_extract_half_time_scores` in entity_reconciliation_service.py already
+        expects (mirrors basketball/baseball's per-period list convention)."""
+        halftime = score.get("halftime") or {}
+        home_ht, away_ht = halftime.get("home"), halftime.get("away")
+        if home_ht is None or away_ht is None:
+            return None
+        return {"kind": "half", "home": [home_ht], "away": [away_ht]}
 
     async def fetch_players(self, team_ref: ProviderRef, season_label: str | None = None) -> list[ProviderPlayerRecord]:
         payload = await self._get("/players", {"team": team_ref.external_id, "season": season_label or datetime.now().year})

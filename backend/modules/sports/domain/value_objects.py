@@ -146,3 +146,47 @@ class LineupRole(str, Enum):
 
     STARTER = "starter"
     SUBSTITUTE = "substitute"
+
+
+@dataclass(frozen=True)
+class MarketLineId(EntityId):
+    pass
+
+
+class MarketLineType(str, Enum):
+    """POST-M24 Phase 6 — the small, finite set of real sportsbook market shapes this canonical
+    model represents. Provider-independent: a bookmaker-specific bet name (e.g. "Match Winner",
+    "Home/Away") is normalized into one of these at the adapter boundary, never leaked into the
+    domain layer (see this module's own docstring rule)."""
+
+    MONEYLINE = "moneyline"  # no line value — price only
+    SPREAD = "spread"  # handicap/point-spread — line is the points/runs adjustment
+    TOTAL = "total"  # game total (over/under) — line is the total points/runs threshold
+    TEAM_TOTAL = "team_total"  # one side's total — same shape as TOTAL, scoped to home/away
+
+
+class LineSelection(str, Enum):
+    """The side of a `MarketLine` a prediction (or a real bettor) can take. Which values are
+    valid depends on `MarketLineType`: MONEYLINE/SPREAD/TEAM_TOTAL use HOME/AWAY (DRAW only for a
+    sport with one); TOTAL/TEAM_TOTAL use OVER/UNDER."""
+
+    HOME = "HOME"
+    AWAY = "AWAY"
+    DRAW = "DRAW"
+    OVER = "OVER"
+    UNDER = "UNDER"
+
+
+class MarketLineOutcome(str, Enum):
+    """POST-M24 Phase 6 — the full real-world result set for a resolved market line, distinct
+    from the binary WIN/LOSS every existing `OutcomeResolutionService` resolver assumes. A
+    fixed-line market (spread/total) has a genuine third state — an exact-equality PUSH — that a
+    market with no stored line (moneyline) structurally cannot produce; VOID/CANCELLED cover a
+    fixture that never reached a resolvable final state. Never collapsed into WIN/LOSS."""
+
+    WIN = "WIN"
+    LOSS = "LOSS"
+    PUSH = "PUSH"
+    VOID = "VOID"
+    CANCELLED = "CANCELLED"
+    UNKNOWN = "UNKNOWN"

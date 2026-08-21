@@ -7,7 +7,8 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from modules.billing.domain.entities import Entitlement, Plan, Subscription, UsageCounter
-from modules.billing.domain.value_objects import PlanId, SubscriptionId, SubscriptionStatus, UsageCounterId
+from modules.billing.domain.payment import PendingCheckout
+from modules.billing.domain.value_objects import PendingCheckoutId, PlanId, SubscriptionId, SubscriptionStatus, UsageCounterId
 from modules.billing.infrastructure.persistence.models import Base
 from modules.identity.domain.entities import AuditLogEntry
 
@@ -133,6 +134,45 @@ def usage_counter_repo():
     return InMemoryUsageCounterRepository()
 
 
+@dataclass
+class InMemoryPendingCheckoutRepository:
+    store: dict[PendingCheckoutId, PendingCheckout] = field(default_factory=dict)
+
+    async def get(self, checkout_id):
+        return self.store.get(checkout_id)
+
+    async def get_by_reference(self, reference):
+        return next((c for c in self.store.values() if c.reference == reference), None)
+
+    async def get_by_provider_charge_id(self, provider_charge_id):
+        return next((c for c in self.store.values() if c.provider_charge_id == provider_charge_id), None)
+
+    async def upsert(self, checkout):
+        self.store[checkout.id] = checkout
+        return checkout
+
+
+@dataclass
+class InMemoryProcessedPaymentEventRepository:
+    seen: set[tuple[str, str]] = field(default_factory=set)
+
+    async def already_processed(self, provider, event_id):
+        return (provider, event_id) in self.seen
+
+    async def mark_processed(self, provider, event_id, now):
+        self.seen.add((provider, event_id))
+
+
 @pytest.fixture
 def audit_log_repo():
     return InMemoryAuditLogRepository()
+
+
+@pytest.fixture
+def pending_checkout_repo():
+    return InMemoryPendingCheckoutRepository()
+
+
+@pytest.fixture
+def processed_payment_event_repo():
+    return InMemoryProcessedPaymentEventRepository()

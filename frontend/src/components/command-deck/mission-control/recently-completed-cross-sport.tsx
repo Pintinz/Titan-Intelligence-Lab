@@ -1,14 +1,16 @@
 import { ClipboardCheck } from 'lucide-react'
-import { SPORT_SLUGS } from '@/lib/hooks/use-sport'
+import { useAvailableSports } from '@/lib/hooks/use-sport'
 import { useRecentlyCompletedIntelligence } from '@/lib/hooks/use-recently-completed-intelligence'
 import { ReviewedFixtureCard } from '../discovery/recently-completed-intelligence'
 import { MissionSection, MissionCardGrid, MissionSkeletonGrid, MissionEmptyState } from './mission-section'
 
 /** Cross-sport "Recently Completed Intelligence" for Mission Control — same shared hook and card
- * as the single-sport Match Discovery rail, just fanned out across every sport and capped at 6. */
+ * as the single-sport Match Discovery rail, just fanned out across every sport (that this user
+ * can actually see — Basketball/Baseball/Table Tennis are still under development) and capped at 6. */
 export function RecentlyCompletedCrossSport() {
+  const availableSports = useAvailableSports()
   const { reviewed, isLoading } = useRecentlyCompletedIntelligence(
-    SPORT_SLUGS.map((s) => ({ code: s.code, slug: s.slug })),
+    availableSports.map((s) => ({ code: s.code, slug: s.slug })),
     6,
   )
 

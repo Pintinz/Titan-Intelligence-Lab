@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor, RandomForestClassifier, RandomForestRegressor
-from sklearn.linear_model import ElasticNet, LogisticRegression, Ridge, RidgeClassifier, SGDClassifier
+from sklearn.linear_model import ElasticNet, LogisticRegression, PoissonRegressor, Ridge, RidgeClassifier, SGDClassifier, TweedieRegressor
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neural_network import MLPClassifier, MLPRegressor
 from sklearn.pipeline import Pipeline
@@ -53,7 +53,10 @@ from modules.predictions.ports.ml_model import (
 )
 
 _CLASSIFICATION_ONLY = {MLAlgorithm.LOGISTIC_REGRESSION, MLAlgorithm.GAUSSIAN_NB}
-_REGRESSION_ONLY: set[MLAlgorithm] = set()
+# Statistical Baseline GLMs (Poisson/Tweedie) have no classification form — they model a count/
+# continuous mean via a log-link, not a class probability. Requesting either for CLASSIFICATION
+# raises UnsupportedAlgorithmForTargetTypeError, same posture as the _CLASSIFICATION_ONLY guard.
+_REGRESSION_ONLY: set[MLAlgorithm] = {MLAlgorithm.POISSON_GLM, MLAlgorithm.TWEEDIE_GLM}
 _SCALE_SENSITIVE = {MLAlgorithm.LOGISTIC_REGRESSION, MLAlgorithm.RIDGE, MLAlgorithm.ELASTIC_NET, MLAlgorithm.SVM, MLAlgorithm.MLP}
 
 
@@ -85,6 +88,13 @@ def _build_estimator(algorithm: MLAlgorithm, target_type: TargetType, params: di
         estimator = GaussianNB(**params)
     elif algorithm is MLAlgorithm.MLP:
         estimator = MLPClassifier(**params) if is_classification else MLPRegressor(**params)
+    elif algorithm is MLAlgorithm.POISSON_GLM:
+        estimator = PoissonRegressor(**params)
+    elif algorithm is MLAlgorithm.TWEEDIE_GLM:
+        # power=1.5 (compound Poisson-Gamma) is the default when unspecified — approximates
+        # over-dispersed count variance without literally being negative-binomial (sklearn has no
+        # native NB GLM); callers can override via `params={"power": ...}`.
+        estimator = TweedieRegressor(power=params.get("power", 1.5), **{k: v for k, v in params.items() if k != "power"})
     else:
         raise UnsupportedAlgorithmForTargetTypeError(f"'{algorithm}' is not a scikit-learn algorithm")
 

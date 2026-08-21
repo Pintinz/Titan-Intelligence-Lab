@@ -592,6 +592,49 @@ def baseball_form_calculator(
     )
 
 
+def basketball_fixture_form_differential_calculator(
+    registration: FeatureRegistrationService,
+    store: FeatureStoreService,
+    statistics: TeamStatisticsRepositoryPort,
+    window: int = 5,
+) -> FixtureFormDifferentialCalculator:
+    """POST-M24 Phase 5A — basketball's fixture-scoped analog of
+    `football_fixture_form_differential_calculator`. `basketball.team.form_points_last5`
+    (`basketball_form_calculator` above) is `EntityType.TEAM`-scoped and, per
+    `FixtureFormDifferentialCalculator`'s own docstring, structurally invisible to a
+    fixture-scoped market prediction request — exactly the gap football's own
+    `required_features` fix (`FixtureFormDifferentialCalculator` for football) already closed.
+    This is that same fix, reused verbatim for basketball, not a new mechanism."""
+    return FixtureFormDifferentialCalculator(
+        registration=registration,
+        store=store,
+        statistics=statistics,
+        sport_code="basketball",
+        feature_key=f"basketball.fixture.form_points_diff_last{window}",
+        stat_key="points",
+        window=window,
+    )
+
+
+def baseball_fixture_form_differential_calculator(
+    registration: FeatureRegistrationService,
+    store: FeatureStoreService,
+    statistics: TeamStatisticsRepositoryPort,
+    window: int = 5,
+) -> FixtureFormDifferentialCalculator:
+    """POST-M24 Phase 5A — baseball's fixture-scoped analog, same reasoning as
+    `basketball_fixture_form_differential_calculator` above."""
+    return FixtureFormDifferentialCalculator(
+        registration=registration,
+        store=store,
+        statistics=statistics,
+        sport_code="baseball",
+        feature_key=f"baseball.fixture.form_runs_diff_last{window}",
+        stat_key="runs",
+        window=window,
+    )
+
+
 def table_tennis_form_calculator(
     registration: FeatureRegistrationService,
     store: FeatureStoreService,

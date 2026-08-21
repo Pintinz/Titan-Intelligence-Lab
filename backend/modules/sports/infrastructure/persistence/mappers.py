@@ -17,6 +17,7 @@ from modules.sports.domain.entities import (
     Injury,
     Lineup,
     LineupSlot,
+    MarketLine,
     Match,
     Player,
     Season,
@@ -37,6 +38,8 @@ from modules.sports.domain.value_objects import (
     FixtureStatus,
     LineupId,
     LineupRole,
+    MarketLineId,
+    MarketLineType,
     MatchId,
     PlayerId,
     ProviderRef,
@@ -54,6 +57,7 @@ from modules.sports.infrastructure.persistence.models import (
     FixtureModel,
     InjuryModel,
     LineupModel,
+    MarketLineModel,
     MatchModel,
     PlayerModel,
     SeasonModel,
@@ -342,6 +346,41 @@ def team_statistics_to_model(
     model.stat_set = entity.stat_set
     model.version = entity.version
     model.provider_ref = _provider_refs_to_dict(entity.provider_refs)
+    return model
+
+
+def market_line_to_domain(model: MarketLineModel) -> MarketLine:
+    return MarketLine(
+        id=MarketLineId(model.id),
+        fixture_id=FixtureId(model.fixture_id),
+        sport_code=model.sport_code,
+        provider=model.provider,
+        bookmaker=model.bookmaker,
+        market_type=MarketLineType(model.market_type),
+        selection=model.selection,
+        line=model.line,
+        price=model.price,
+        fetched_at=model.fetched_at,
+        observed_at=model.observed_at,
+        team_side=model.team_side,
+        version=model.version,
+    )
+
+
+def market_line_to_model(entity: MarketLine, model: MarketLineModel | None = None) -> MarketLineModel:
+    model = model or MarketLineModel(id=entity.id.value)
+    model.fixture_id = entity.fixture_id.value
+    model.sport_code = entity.sport_code
+    model.provider = entity.provider
+    model.bookmaker = entity.bookmaker
+    model.market_type = entity.market_type.value
+    model.selection = entity.selection
+    model.line = entity.line
+    model.price = entity.price
+    model.fetched_at = entity.fetched_at
+    model.observed_at = entity.observed_at
+    model.team_side = entity.team_side
+    model.version = entity.version
     return model
 
 

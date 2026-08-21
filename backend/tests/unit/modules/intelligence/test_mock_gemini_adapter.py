@@ -1,6 +1,10 @@
+import json
+
 import pytest
 
 from modules.intelligence.infrastructure.mock_gemini_adapter import MockGeminiAdapter
+from modules.predictions.infrastructure.football_explanation_schema import FootballExplanationSchema
+from modules.predictions.infrastructure.gemini_reasoning_schema import GeminiReasoningResponseSchema
 
 
 @pytest.mark.asyncio
@@ -273,3 +277,112 @@ async def test_extract_key_phrases_empty_for_only_stopwords():
     adapter = MockGeminiAdapter()
 
     assert await adapter.extract_key_phrases("the a an of in on") == []
+
+
+@pytest.mark.asyncio
+async def test_assess_prediction_context_returns_insufficient_context_when_no_evidence():
+    """A market with zero accepted evidence items across every category must get
+    INSUFFICIENT_CONTEXT, never a fabricated SUPPORTED/CHALLENGED verdict this mock has no way
+    to make honestly."""
+    adapter = MockGeminiAdapter()
+
+    raw, _ = await adapter.assess_prediction_context({"context": {"news": [], "injuries": []}})
+    parsed = GeminiReasoningResponseSchema.model_validate(json.loads(raw))
+
+    assert parsed.prediction_review.status.value == "INSUFFICIENT_CONTEXT"
+    assert parsed.prediction_reconsideration.direction.value == "INSUFFICIENT_EVIDENCE"
+
+
+@pytest.mark.asyncio
+async def test_assess_prediction_context_reports_missing_categories_honestly():
+    adapter = MockGeminiAdapter()
+
+    raw, _ = await adapter.assess_prediction_context({"context": {"news": [], "injuries": []}})
+    parsed = json.loads(raw)
+
+    assert set(parsed["missing_context"]) == {"news", "injuries"}
+
+
+@pytest.mark.asyncio
+async def test_assess_prediction_context_never_claims_a_directional_read_with_real_evidence():
+    """With genuine evidence present the mock still can't honestly judge direction — it must
+    report NEUTRAL, never SUPPORTED/CHALLENGED, since it has no real reasoning capability."""
+    adapter = MockGeminiAdapter()
+
+    raw, _ = await adapter.assess_prediction_context(
+        {"context": {"news": [{"source_id": "n1"}, {"source_id": "n2"}, {"source_id": "n3"}]}}
+    )
+    parsed = GeminiReasoningResponseSchema.model_validate(json.loads(raw))
+
+    assert parsed.prediction_review.status.value == "NEUTRAL"
+
+
+@pytest.mark.asyncio
+async def test_assess_prediction_context_output_always_matches_the_strict_schema():
+    adapter = MockGeminiAdapter()
+
+    empty_raw, _ = await adapter.assess_prediction_context({"context": {}})
+    populated_raw, _ = await adapter.assess_prediction_context(
+        {"context": {"injuries": [{"source_id": "i1"}]}}
+    )
+
+    GeminiReasoningResponseSchema.model_validate(json.loads(empty_raw))
+    GeminiReasoningResponseSchema.model_validate(json.loads(populated_raw))
+
+
+@pytest.mark.asyncio
+async def test_explain_football_prediction_output_matches_the_strict_schema():
+    """Sports-Analyst Explainability Upgrade — the mock is what actually renders whenever the real
+    Gemini adapter is unavailable (e.g. provider quota exhausted), so it must produce the full
+    richer schema, not a degraded subset."""
+    adapter = MockGeminiAdapter()
+    payload = {
+        "market": "Correct Score", "prediction": "2-1", "probability": 0.107, "titan_iq_confidence": 0.57,
+        "market_reasoning_kind": "correct_score",
+        "key_reasons": [{"rank": 1, "feature": "football.fixture.expected_home_goals", "football_concept": "modeled home scoring rate", "contribution": 1.15, "direction": "supports"}],
+        "counter_signals": [],
+        "context": [{"type": "injuries", "description": "1 verified pre-cutoff injuries item(s)", "model_contribution": 0.0, "role": "context_only"}],
+        "evidence_items": {"injuries": [{"source_id": "inj-1", "summary": "Out (hamstring)", "entity_ref": "team-1"}], "news": [], "lineups": []},
+        "scoreline": {
+            "selected_score": "2-1", "selected_probability": 0.107, "expected_home_goals": 1.7, "expected_away_goals": 1.2,
+            "alternatives": [{"score": "1-1", "probability": 0.098}],
+        },
+    }
+
+    raw, _ = await adapter.explain_football_prediction(payload)
+    parsed = FootballExplanationSchema.model_validate(json.loads(raw))
+
+    assert parsed.scoreline_reasoning is not None
+    assert parsed.injury_narration[0].source_id == "inj-1"
+    assert "context, not a material driver" in parsed.injury_narration[0].analysis
+    assert "57%" in parsed.confidence_explanation and "11%" in parsed.confidence_explanation
+
+
+@pytest.mark.asyncio
+async def test_explain_football_prediction_omits_scoreline_for_non_correct_score_markets():
+    adapter = MockGeminiAdapter()
+    payload = {
+        "market": "Match Winner", "prediction": "Home Win", "probability": 0.5, "titan_iq_confidence": 0.6,
+        "market_reasoning_kind": "match_winner", "key_reasons": [], "counter_signals": [], "context": [],
+        "evidence_items": {},
+    }
+
+    raw, _ = await adapter.explain_football_prediction(payload)
+    parsed = FootballExplanationSchema.model_validate(json.loads(raw))
+
+    assert parsed.scoreline_reasoning is None
+
+
+@pytest.mark.asyncio
+async def test_explain_football_prediction_context_quality_is_honest_when_no_evidence():
+    adapter = MockGeminiAdapter()
+    payload = {
+        "market": "Match Winner", "prediction": "Home Win", "probability": 0.5, "titan_iq_confidence": 0.6,
+        "market_reasoning_kind": "match_winner", "key_reasons": [], "counter_signals": [], "context": [],
+        "evidence_items": {"injuries": [], "news": [], "lineups": []},
+    }
+
+    raw, _ = await adapter.explain_football_prediction(payload)
+    parsed = FootballExplanationSchema.model_validate(json.loads(raw))
+
+    assert "No verified" in parsed.context_quality

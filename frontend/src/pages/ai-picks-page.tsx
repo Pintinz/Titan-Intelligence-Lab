@@ -3,7 +3,7 @@ import { useQuery, useQueries } from '@tanstack/react-query'
 import { Search, Sparkles } from 'lucide-react'
 import { predictionsApi } from '@/lib/api/predictions'
 import { sportsApi } from '@/lib/api/sports'
-import { SPORT_SLUGS } from '@/lib/hooks/use-sport'
+import { SPORT_SLUGS, useAvailableSports } from '@/lib/hooks/use-sport'
 import { ErrorState } from '@/components/ui/error-state'
 import { MissionEmptyState } from '@/components/command-deck/mission-control/mission-section'
 import { AiPickCard, AI_PICK_CONFIDENCE_FLOOR, AI_PICK_HIGH_CONFIDENCE_FLOOR } from '@/components/command-deck/ai-picks/ai-pick-card'
@@ -12,10 +12,10 @@ import { fixtureCardStatus } from '@/lib/sports-status'
 import type { PredictionPickDto, FixtureSummaryDto } from '@/lib/api/types'
 import type { SportCode } from '@/lib/api/sports'
 
-const SPORT_FILTERS: Array<{ label: string; code: SportCode | null }> = [
-  { label: 'All sports', code: null },
-  ...SPORT_SLUGS.map((s) => ({ label: s.label, code: s.code })),
-]
+// `sportSlugFor` below still resolves against every real sport (a pick's own fixture always
+// carries its true sport_code, whatever that is) — only the *filter dropdown* a regular user
+// sees needs to hide Basketball/Baseball/Table Tennis, computed inside the component from
+// `useAvailableSports()` since it's role-aware.
 
 type DateRange = 'all' | 'today' | 'next7' | 'upcoming' | 'completed'
 
@@ -43,6 +43,11 @@ function isToday(scheduledAt: string): boolean {
 }
 
 export default function AiPicksPage() {
+  const availableSports = useAvailableSports()
+  const sportFilters: Array<{ label: string; code: SportCode | null }> = [
+    { label: 'All sports', code: null },
+    ...availableSports.map((s) => ({ label: s.label, code: s.code })),
+  ]
   const [sportCode, setSportCode] = useState<SportCode | null>(null)
   const [dateRange, setDateRange] = useState<DateRange>('all')
   const [competition, setCompetition] = useState<string | null>(null)
@@ -118,7 +123,7 @@ export default function AiPicksPage() {
 
       <div className="space-y-2.5">
         <div className="flex flex-wrap gap-1.5">
-          {SPORT_FILTERS.map((filter) => {
+          {sportFilters.map((filter) => {
             const active = sportCode === filter.code
             return (
               <button
@@ -190,9 +195,11 @@ export default function AiPicksPage() {
               className="rounded-[var(--cd-radius-md)] border px-2.5 py-1.5 font-[var(--cd-font-body)] text-[12.5px] focus:outline-none"
               style={{ borderColor: 'var(--cd-border-default)', backgroundColor: 'var(--cd-surface-1)', color: 'var(--cd-text-secondary)' }}
             >
-              <option value="">All competitions</option>
+              <option value="" style={{ backgroundColor: 'var(--cd-surface-1)', color: 'var(--cd-text-secondary)' }}>
+                All competitions
+              </option>
               {competitions.map((name) => (
-                <option key={name} value={name}>
+                <option key={name} value={name} style={{ backgroundColor: 'var(--cd-surface-1)', color: 'var(--cd-text-secondary)' }}>
                   {name}
                 </option>
               ))}

@@ -34,13 +34,12 @@ the true pre-calibration probability as its own field would fix this properly; t
 separable schema work, not undertaken here (same "documented proxy, not fabricated" posture as
 every other honestly-scoped v1 metric in this codebase).
 
-**Deployment-topology note**: `PlattScalingCalibrator` itself is explicitly an in-memory,
-per-process singleton (its own docstring: "accumulates fitted per-model parameters in memory
-across requests") — it was never designed to persist across a restart or share state between
-separate OS processes. If Celery workers run in a different process from the API server, fitted
-parameters won't reach the API process's own calibrator instance until a real DB-backed
-`CalibratorPort` implementation exists — future work, not undertaken here, same posture as
-`get_dataset_repo`'s own documented in-memory-only scope.
+**Deployment-topology note (resolved)**: `PlattScalingCalibrator` previously kept fitted
+parameters in an in-memory, per-process dict only — a Celery worker's `fit()` never reached the
+API process's own calibrator instance. It is now backed by `CalibrationParametersRepositoryPort`
+(`SqlAlchemyCalibrationParametersRepository` in production), so `fit()` persists to the
+`calibration_parameters` table and `calibrate()` reads through on a cache miss — a fit from any
+process reaches every process's live inference.
 """
 
 from __future__ import annotations

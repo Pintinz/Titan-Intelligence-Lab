@@ -19,6 +19,7 @@ from modules.sports.domain.entities import (
     Fixture,
     Injury,
     Lineup,
+    MarketLine,
     Match,
     Player,
     Season,
@@ -35,6 +36,7 @@ from modules.sports.domain.value_objects import (
     EntityId,
     FixtureId,
     LineupId,
+    MarketLineId,
     MatchId,
     PlayerId,
     SeasonId,
@@ -51,6 +53,7 @@ from modules.sports.infrastructure.persistence.models import (
     FixtureModel,
     InjuryModel,
     LineupModel,
+    MarketLineModel,
     MatchModel,
     PlayerModel,
     SeasonModel,
@@ -347,6 +350,34 @@ class SqlAlchemyTeamStatisticsRepository:
         )
         result = await self.session.execute(stmt)
         return [mappers.team_statistics_to_domain(row) for row in result.scalars().all()]
+
+
+@dataclass
+class SqlAlchemyMarketLineRepository:
+    session: AsyncSession
+
+    async def record(self, line: MarketLine) -> MarketLine:
+        model = mappers.market_line_to_model(line)
+        self.session.add(model)
+        await self.session.flush()
+        return mappers.market_line_to_domain(model)
+
+    async def list_for_fixture(self, fixture_id: FixtureId) -> list[MarketLine]:
+        stmt = select(MarketLineModel).where(MarketLineModel.fixture_id == fixture_id.value)
+        result = await self.session.execute(stmt)
+        return [mappers.market_line_to_domain(row) for row in result.scalars().all()]
+
+    async def get_latest_for_fixture(
+        self, fixture_id: FixtureId, market_type: str, before: datetime | None = None
+    ) -> MarketLine | None:
+        stmt = select(MarketLineModel).where(
+            MarketLineModel.fixture_id == fixture_id.value, MarketLineModel.market_type == market_type
+        )
+        if before is not None:
+            stmt = stmt.where(MarketLineModel.fetched_at < before)
+        stmt = stmt.order_by(MarketLineModel.fetched_at.desc()).limit(1)
+        model = (await self.session.execute(stmt)).scalar_one_or_none()
+        return mappers.market_line_to_domain(model) if model else None
 
 
 @dataclass

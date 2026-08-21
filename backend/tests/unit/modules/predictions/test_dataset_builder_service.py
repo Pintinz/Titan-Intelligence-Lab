@@ -226,6 +226,39 @@ async def test_regression_label_parses_actual_value_as_float(builder, market_rep
     assert dataset.samples[0].label == pytest.approx(0.0)
 
 
+async def test_raw_goal_counts_are_copied_through_when_present(
+    builder, market_repo, prediction_repo, prediction_outcome_repo
+):
+    """Statistical-baseline charter, Phase 3 — `PredictionOutcome.raw_home_goals`/`raw_away_goals`
+    must survive onto `TrainingSample` unconditionally, for `FootballGoalsPoissonAdapter` to fit
+    against; every other outcome (no goal counts set) must come through as `None`, never guessed."""
+    market = await _market(market_repo)
+    prediction = await prediction_repo.record(_prediction(market.id, {"feature_a": 1.0}, value="positive"))
+    await prediction_outcome_repo.record(
+        PredictionOutcome(
+            id=PredictionOutcomeId(uuid4()), prediction_id=prediction.id,
+            actual_value="btts_yes", error=0.0, evaluated_at=T0,
+            raw_home_goals=2, raw_away_goals=1,
+        )
+    )
+    for i in range(29):
+        prediction = await prediction_repo.record(_prediction(market.id, {"feature_a": float(i)}, value="positive"))
+        await prediction_outcome_repo.record(
+            PredictionOutcome(
+                id=PredictionOutcomeId(uuid4()), prediction_id=prediction.id,
+                actual_value="btts_no", error=1.0, evaluated_at=T0,
+            )
+        )
+
+    dataset = await builder.build(market.id, now=T0)
+
+    with_counts = [s for s in dataset.samples if s.raw_home_goals is not None]
+    assert len(with_counts) == 1
+    assert with_counts[0].raw_home_goals == 2.0
+    assert with_counts[0].raw_away_goals == 1.0
+    assert len([s for s in dataset.samples if s.raw_home_goals is None]) == 29
+
+
 async def test_too_few_samples_flagged_as_quality_issue(builder, market_repo, prediction_repo, prediction_outcome_repo):
     market = await _market(market_repo)
     await _seed_classification_outcomes(market, prediction_repo, prediction_outcome_repo, 5, lambda i: 0.0)

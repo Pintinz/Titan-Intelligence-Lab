@@ -130,6 +130,73 @@ def _derive_season_start(season_label: str, now: datetime) -> datetime:
     return datetime(year, 8, 1, tzinfo=now.tzinfo)
 
 
+def _extract_half_time_scores(fixture: Fixture) -> tuple[int | None, int | None]:
+    """Milestone (post-M24) — `Fixture.period_scores` already carries a real per-period-kind shape
+    for basketball (``kind="quarter"``) and baseball (``kind="inning"``), each populated by
+    `ApiSportsAdapter`'s real parsing of that sport's provider response. No provider adapter parses
+    football's half-time score yet (confirmed: neither `ApiFootballAdapter.fetch_fixtures` nor
+    `FootballDataOrgAdapter._to_fixture_record` reads their real API's `score.halftime`/
+    `score.halfTime` field today) — so this correctly, honestly returns ``(None, None)`` for a
+    football fixture today. Kept as its own small function, not inlined, so the day an adapter
+    *does* start populating a ``kind="half"`` `period_scores` (a distinct, not-yet-authorized
+    ingestion change — see the half-result outcome resolvers' own docs), this is the one place that
+    needs to change for football, not every caller of `resolve_for_fixture`.
+
+    POST-M24 Phase 5A: also handles ``kind="quarter"`` (basketball) — the sport's own halftime is
+    genuinely the combined score after quarters 1+2, the real rule of the game, not a borrowed
+    football convention. Returns ``(None, None)`` if fewer than two quarters are recorded (game
+    hasn't reached halftime yet, or the provider hasn't reported that many periods) — never derived
+    from fewer periods or from the final score."""
+    period_scores = fixture.period_scores
+    if not period_scores:
+        return None, None
+    kind = period_scores.get("kind")
+    home = period_scores.get("home") or []
+    away = period_scores.get("away") or []
+    if kind == "half":
+        home_ht = home[0] if home else None
+        away_ht = away[0] if away else None
+        return home_ht, away_ht
+    if kind == "quarter":
+        if len(home) < 2 or len(away) < 2 or home[0] is None or home[1] is None or away[0] is None or away[1] is None:
+            return None, None
+        return home[0] + home[1], away[0] + away[1]
+    return None, None
+
+
+def _extract_quarter_scores(fixture: Fixture) -> tuple[tuple[int, ...] | None, tuple[int, ...] | None]:
+    """POST-M24 Phase 5B — basketball's individual per-quarter points, from ``Fixture.period_scores``
+    (``kind="quarter"``), backing the Q1-Q4 winner markets. Returns ``(None, None)`` for any other
+    period-score kind (or a fixture with no period scores at all) — never a partial tuple padded
+    with fabricated values for quarters the provider hasn't reported."""
+    period_scores = fixture.period_scores
+    if not period_scores or period_scores.get("kind") != "quarter":
+        return None, None
+    home = period_scores.get("home") or []
+    away = period_scores.get("away") or []
+    return tuple(home), tuple(away)
+
+
+def _extract_first_five_innings_scores(fixture: Fixture) -> tuple[int | None, int | None]:
+    """POST-M24 Phase 5A — baseball's "first five innings" segment score, from
+    ``Fixture.period_scores`` with ``kind="inning"`` (populated by `ApiSportsAdapter`'s real
+    baseball parsing). Requires all five innings to be genuinely recorded (non-``None``) for both
+    sides — a game postponed or abandoned before the fifth inning correctly returns ``(None,
+    None)`` rather than a partial or fabricated total."""
+    period_scores = fixture.period_scores
+    if not period_scores or period_scores.get("kind") != "inning":
+        return None, None
+    home = period_scores.get("home") or []
+    away = period_scores.get("away") or []
+    if len(home) < 5 or len(away) < 5:
+        return None, None
+    home_first5 = home[:5]
+    away_first5 = away[:5]
+    if any(v is None for v in home_first5) or any(v is None for v in away_first5):
+        return None, None
+    return sum(home_first5), sum(away_first5)
+
+
 @dataclass
 class EntityReconciliationService:
     sports: SportRepositoryPort
@@ -501,8 +568,14 @@ class EntityReconciliationService:
     async def _resolve_prediction_outcomes(self, fixture: Fixture, now: datetime) -> None:
         if self.outcome_resolver is None:
             return
+        home_score_ht, away_score_ht = _extract_half_time_scores(fixture)
+        home_score_first5, away_score_first5 = _extract_first_five_innings_scores(fixture)
+        home_quarters, away_quarters = _extract_quarter_scores(fixture)
         await self.outcome_resolver.resolve_for_fixture(
-            str(fixture.id.value), fixture.home_score, fixture.away_score, now
+            str(fixture.id.value), fixture.home_score, fixture.away_score, now,
+            home_score_ht=home_score_ht, away_score_ht=away_score_ht,
+            home_score_first5=home_score_first5, away_score_first5=away_score_first5,
+            home_quarters=home_quarters, away_quarters=away_quarters,
         )
 
     async def _notify_fixture_status_change(self, fixture: Fixture, home_id: str, away_id: str, now: datetime) -> None:
@@ -533,11 +606,24 @@ class EntityReconciliationService:
         `MatchModel.fixture_id` is a unique FK, so it always exists 1:1 with its `Fixture` — there
         is nothing to reconcile against a provider the way Team/Player/Fixture rows are. Callers
         that need a `MatchId` (e.g. `reconcile_team_statistics`) call this first rather than
-        constructing one, so the row is created on first use instead of needing its own sync step."""
+        constructing one, so the row is created on first use instead of needing its own sync step.
+
+        POST-M24 Phase 5A audit finding: this previously always left `started_at=None` for a
+        newly created `Match`, for every sport — `TeamStatisticsRepositoryPort.list_recent_by_team`
+        (the sole read path every rolling-form/differential feature calculator uses) joins through
+        `Match.started_at < before`, so a `NULL` there means the SQL comparison is never true and
+        the row is silently excluded forever, regardless of team or window. Football's dev.db rows
+        happened to already carry a real `started_at` from an earlier one-off correction; basketball
+        and baseball's never did, which is what made their required features permanently
+        unresolvable even once real team_statistics existed. The fixture's own `scheduled_at` is a
+        genuine, real value for this — not fabricated — since it's already the authoritative
+        real-world kickoff time this codebase records for every fixture."""
         existing = await self.matches.get_by_fixture(fixture_id)
         if existing is not None:
             return existing
-        return await self.matches.upsert(Match(id=MatchId(uuid4()), fixture_id=fixture_id, started_at=None, ended_at=None))
+        fixture = await self.fixtures.get(fixture_id)
+        started_at = fixture.scheduled_at if fixture is not None else None
+        return await self.matches.upsert(Match(id=MatchId(uuid4()), fixture_id=fixture_id, started_at=started_at, ended_at=None))
 
     # -- Team Statistics ("Match Statistics") ------------------------------------------------------
 

@@ -7,23 +7,17 @@ interface GoogleSignInButtonProps {
   onClick?: () => void
 }
 
+// Google OAuth is configured Supabase-side (Authentication > Providers), never in this frontend
+// — Supabase holds the Google client ID/secret and does the token exchange itself, so there was
+// never a real `VITE_GOOGLE_OAUTH_CLIENT_ID` for this button to check (no such var exists in
+// .env.example, so the old gate here always evaluated to "not configured" regardless of what was
+// set up in Supabase). Always render the real button; `AuthFlow.handleGoogleSignIn` is the one
+// place that knows whether the call actually succeeded.
 export function GoogleSignInButton({
   disabled = false,
   isLoading = false,
   onClick
 }: GoogleSignInButtonProps) {
-  const googleOAuthConfigured = import.meta.env.VITE_GOOGLE_OAUTH_CLIENT_ID !== undefined
-
-  if (!googleOAuthConfigured) {
-    return (
-      <div className="rounded-lg border border-border-default/20 bg-bg-secondary/30 px-4 py-3 text-center">
-        <p className="text-xs text-text-muted">
-          Google Sign-In will be available once OAuth is configured.
-        </p>
-      </div>
-    )
-  }
-
   return (
     <Button
       type="button"

@@ -4,7 +4,7 @@ import { Command } from 'cmdk'
 import { Search, Check, Users, Trophy, CircleDot } from 'lucide-react'
 import { useQueries } from '@tanstack/react-query'
 import { sportsApi } from '@/lib/api/sports'
-import { SPORT_SLUGS } from '@/lib/hooks/use-sport'
+import { useAvailableSports } from '@/lib/hooks/use-sport'
 import { useWatchlist } from '@/lib/hooks/use-watchlist'
 import { cn } from '@/lib/cn'
 
@@ -31,30 +31,31 @@ export function AddToWatchlistDialog({ open, onOpenChange }: { open: boolean; on
     if (!open) setSearch('')
   }, [open])
 
+  const availableSports = useAvailableSports()
   const teamQueries = useQueries({
-    queries: SPORT_SLUGS.map((s) => ({
+    queries: availableSports.map((s) => ({
       queryKey: ['sports', s.code, 'teams', 'add-watchlist'],
       queryFn: () => sportsApi.listTeams(s.code),
       enabled: open,
     })),
   })
   const competitionQueries = useQueries({
-    queries: SPORT_SLUGS.map((s) => ({
+    queries: availableSports.map((s) => ({
       queryKey: ['sports', s.code, 'competitions', 'add-watchlist'],
       queryFn: () => sportsApi.listCompetitions(s.code),
       enabled: open,
     })),
   })
   const matchQueries = useQueries({
-    queries: SPORT_SLUGS.map((s) => ({
+    queries: availableSports.map((s) => ({
       queryKey: ['sports', s.code, 'fixtures', 'search', debouncedSearch],
       queryFn: () => sportsApi.listFixturesPaged(s.code, { search: debouncedSearch, limit: 6 }),
       enabled: open && debouncedSearch.trim().length >= 2,
     })),
   })
 
-  const teams = teamQueries.flatMap((q, i) => (q.data ?? []).map((t) => ({ ...t, sportSlug: SPORT_SLUGS[i].slug })))
-  const competitions = competitionQueries.flatMap((q, i) => (q.data ?? []).map((c) => ({ ...c, sportSlug: SPORT_SLUGS[i].slug })))
+  const teams = teamQueries.flatMap((q, i) => (q.data ?? []).map((t) => ({ ...t, sportSlug: availableSports[i].slug })))
+  const competitions = competitionQueries.flatMap((q, i) => (q.data ?? []).map((c) => ({ ...c, sportSlug: availableSports[i].slug })))
   const matches = matchQueries.flatMap((q) => q.data?.items ?? [])
 
   return (

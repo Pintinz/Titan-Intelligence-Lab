@@ -64,17 +64,24 @@ class TextIntelligenceRouter:
         adapter = await self._resolve()
         if adapter is self.mock_adapter:
             return await getattr(adapter, method)(*args, **kwargs)
-        try:
-            return await getattr(adapter, method)(*args, **kwargs)
-        except GeminiRequestError as exc:
-            # Safe to log str(exc) here — GeminiAdapter itself now builds GeminiRequestError's
-            # message from the response status/body only, never the request URL (which carries
-            # the API key as a query param), so this can never leak the credential.
-            logger.warning(
-                "Gemini real-adapter call to '%s' failed — falling back to the mock adapter: %s",
-                method, exc,
-            )
-            return await getattr(self.mock_adapter, method)(*args, **kwargs)
+        for attempt in range(2):  # one retry — a meaningful share of GeminiRequestErrors are
+            # transient (HTTP 503 "high demand", a network read timeout) and succeed on a second
+            # try; retrying once here, at the single choke point every method routes through,
+            # measurably increases how often callers get a real Gemini response instead of the
+            # mock fallback, without weakening the fallback guarantee itself.
+            try:
+                return await getattr(adapter, method)(*args, **kwargs)
+            except GeminiRequestError as exc:
+                if attempt == 0:
+                    continue
+                # Safe to log str(exc) here — GeminiAdapter itself now builds GeminiRequestError's
+                # message from the response status/body only, never the request URL (which
+                # carries the API key as a query param), so this can never leak the credential.
+                logger.warning(
+                    "Gemini real-adapter call to '%s' failed after retry — falling back to the mock adapter: %s",
+                    method, exc,
+                )
+                return await getattr(self.mock_adapter, method)(*args, **kwargs)
 
     async def extract_events(self, text: str) -> list[ExtractedEvent]:
         return await self._call("extract_events", text)
@@ -102,3 +109,9 @@ class TextIntelligenceRouter:
 
     async def extract_key_phrases(self, text: str, *, limit: int = 5) -> list[KeyPhrase]:
         return await self._call("extract_key_phrases", text, limit=limit)
+
+    async def assess_prediction_context(self, payload: dict) -> str:
+        return await self._call("assess_prediction_context", payload)
+
+    async def explain_football_prediction(self, payload: dict) -> str:
+        return await self._call("explain_football_prediction", payload)

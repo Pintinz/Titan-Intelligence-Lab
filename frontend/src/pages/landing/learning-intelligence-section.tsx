@@ -23,15 +23,15 @@ export function LearningIntelligenceSection() {
 
       <div className="flex flex-col gap-3 lg:flex-row lg:items-stretch lg:gap-2">
         {LEARNING_STEPS.map((step, i) => (
-          <div key={step.title} className="flex items-center gap-2 lg:flex-1 lg:flex-col lg:items-stretch lg:gap-0">
-            <div className="flex-1 rounded-lg border border-border-default bg-bg-elevated p-4">
+          <div key={step.title} className="flex flex-col items-stretch gap-2 lg:flex-1 lg:flex-row lg:items-center lg:gap-0">
+            <div className="flex-1 self-stretch rounded-lg border border-border-default bg-bg-elevated p-4">
               <p className="font-telemetry text-xs text-text-muted">Step {i + 1}</p>
               <p className="mt-1 font-display text-sm font-semibold text-text-primary">{step.title}</p>
               <p className="mt-1.5 text-xs text-text-secondary">{step.detail}</p>
             </div>
             {i < LEARNING_STEPS.length - 1 && (
               <ArrowRight
-                className="size-4 shrink-0 text-text-muted lg:mx-auto lg:my-2 lg:rotate-90"
+                className="mx-auto size-4 shrink-0 rotate-90 text-text-muted lg:mx-2 lg:my-0 lg:rotate-0"
                 aria-hidden="true"
               />
             )}

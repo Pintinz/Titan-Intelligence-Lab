@@ -91,6 +91,30 @@ class FeatureMarketMappingService:
         )
         return await self.mappings.upsert(mapping)
 
+    async def set_required(self, market_key: str, feature_key: str, is_required: bool) -> FeatureMarketMapping:
+        """Updates an existing (market, feature) mapping's `is_required` flag in place — the
+        update counterpart `map_feature` deliberately lacks (it only ever creates, raising
+        `MappingAlreadyExistsError` on a duplicate). Needed because `_seed_market`'s own
+        create-only `except MappingAlreadyExistsError: continue` means a market_seeding.py spec
+        change never retroactively reaches an already-seeded market's persisted mapping — see
+        docs/post_m24_phase17_football_prediction_recovery_report.md."""
+        market = await self._require_market(market_key)
+        fkey = _as_key(feature_key)
+        existing = await self.mappings.list_by_market(market.id)
+        mapping = next((m for m in existing if m.feature_key == str(fkey)), None)
+        if mapping is None:
+            raise KeyError(f"feature '{feature_key}' is not mapped to market '{market_key}' yet")
+        updated = FeatureMarketMapping(
+            id=mapping.id,
+            market_id=mapping.market_id,
+            feature_key=mapping.feature_key,
+            is_required=is_required,
+            importance=mapping.importance,
+            confidence_contribution=mapping.confidence_contribution,
+            weight=mapping.weight,
+        )
+        return await self.mappings.upsert(updated)
+
     async def list_for_market(self, market_key: str) -> list[FeatureMarketMapping]:
         market = await self._require_market(market_key)
         return await self.mappings.list_by_market(market.id)

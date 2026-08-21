@@ -17,6 +17,7 @@ from modules.sports.domain.entities import (
     Fixture,
     Injury,
     Lineup,
+    MarketLine,
     Match,
     Player,
     Season,
@@ -33,6 +34,7 @@ from modules.sports.domain.value_objects import (
     EntityId,
     FixtureId,
     LineupId,
+    MarketLineId,
     MatchId,
     PlayerId,
     SeasonId,
@@ -139,6 +141,26 @@ class TeamStatisticsRepositoryPort(Protocol):
         """``team_id``'s statistics rows across past matches (joined through Match's
         ``started_at``), most recent first — the windowed-history query engineered features
         need (Milestone 9). Additive: no existing method changed."""
+        ...
+
+
+class MarketLineRepositoryPort(Protocol):
+    """POST-M24 Phase 6 — persistence for real, provider-normalized sportsbook quotes
+    (`MarketLine`). One fixture can have many lines (different market types, bookmakers, or
+    successive quotes over time as a line moves) — this port never overwrites an existing quote
+    in place, it appends, since a line's movement over time is itself real information a resolver
+    or feature calculator may need (e.g. "was this the line at kickoff, or from three days
+    earlier")."""
+
+    async def record(self, line: MarketLine) -> MarketLine: ...
+    async def list_for_fixture(self, fixture_id: FixtureId) -> list[MarketLine]: ...
+    async def get_latest_for_fixture(
+        self, fixture_id: FixtureId, market_type: str, before: datetime | None = None
+    ) -> MarketLine | None:
+        """The most recently observed/fetched line for this fixture+market (optionally capped
+        to lines observed/fetched strictly before ``before`` — the temporal-integrity gate a
+        pre-match feature or resolver must apply so a post-kickoff line quote is never read as
+        if it were available before kickoff)."""
         ...
 
 

@@ -58,4 +58,26 @@ describe('api client', () => {
 
     await expect(api.get('/api/v1/broken')).rejects.toMatchObject({ status: 500 })
   })
+
+  it('surfaces the human-readable message from a structured diagnostic error body, not the raw JSON', async () => {
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: {
+            prediction_status: 'BLOCKED',
+            reason_code: 'MISSING_REQUIRED_FEATURE',
+            failed_gates: ['MISSING_REQUIRED_FEATURE'],
+            message: "market 'football.correct_score' is missing required features: football.fixture.expected_away_goals",
+          },
+        }),
+        { status: 409 },
+      ),
+    )
+
+    await expect(api.get('/api/v1/whatever')).rejects.toMatchObject({
+      status: 409,
+      detail: "market 'football.correct_score' is missing required features: football.fixture.expected_away_goals",
+      reasonCode: 'MISSING_REQUIRED_FEATURE',
+    })
+  })
 })

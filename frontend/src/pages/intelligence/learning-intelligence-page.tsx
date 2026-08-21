@@ -237,14 +237,14 @@ export default function LearningIntelligencePage() {
 
       <div className="flex flex-col gap-3 lg:flex-row lg:items-stretch lg:gap-2">
         {PIPELINE.map((step, i) => (
-          <div key={step.title} className="flex items-center gap-2 lg:flex-1 lg:flex-col lg:items-stretch lg:gap-0">
-            <Card className="flex-1 p-4">
+          <div key={step.title} className="flex flex-col items-stretch gap-2 lg:flex-1 lg:flex-row lg:items-center lg:gap-0">
+            <Card className="flex-1 self-stretch p-4">
               <p className="font-telemetry text-xs text-text-muted">Step {i + 1}</p>
               <p className="mt-1 font-display text-sm font-semibold text-text-primary">{step.title}</p>
               <p className="mt-1.5 text-xs text-text-secondary">{step.detail}</p>
             </Card>
             {i < PIPELINE.length - 1 && (
-              <ArrowRight className="size-4 shrink-0 text-text-muted lg:mx-auto lg:my-2 lg:rotate-90" aria-hidden="true" />
+              <ArrowRight className="mx-auto size-4 shrink-0 rotate-90 text-text-muted lg:mx-2 lg:my-0 lg:rotate-0" aria-hidden="true" />
             )}
           </div>
         ))}

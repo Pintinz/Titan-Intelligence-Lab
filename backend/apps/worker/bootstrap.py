@@ -38,16 +38,21 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.pool import NullPool
 from celery.signals import worker_process_init
 
 from apps.api.composition import (
     build_calibration_fitting_service,
+    build_calibration_validation_service,
     build_engine,
     build_health_intelligence_engine,
     build_provider_management_service,
     build_scheduled_news_sync_service,
     build_scheduled_retraining_orchestrator,
     build_sync_orchestrator,
+    get_redis_client,
+    get_redis_lock,
+    get_redis_sync_cache,
 )
 from modules.ingestion.infrastructure.celery.celery_app import celery_app
 
@@ -125,6 +130,11 @@ def _fresh_registry() -> dict[str, FactoryRecord]:
             name="calibration_service", module="modules.predictions.infrastructure.celery.tasks",
             service="CalibrationFittingService", task_names=("predictions.check_scheduled_calibration",),
         ),
+        "calibration_validation_service": FactoryRecord(
+            name="calibration_validation_service", module="modules.predictions.infrastructure.celery.tasks",
+            service="CalibrationValidationService",
+            task_names=("predictions.check_scheduled_calibration_validation",),
+        ),
         "scheduled_news_sync": FactoryRecord(
             name="scheduled_news_sync", module="modules.intelligence.infrastructure.celery.tasks",
             service="ScheduledNewsSyncService", task_names=("intelligence.sync_scheduled_news",),
@@ -136,6 +146,30 @@ def _fresh_registry() -> dict[str, FactoryRecord]:
 # wiring state. Rebuilt fresh by every `bootstrap_worker()` call so tests never leak state into
 # each other (spec §13's "preserve test isolation").
 FACTORY_REGISTRY: dict[str, FactoryRecord] = _fresh_registry()
+
+
+def _fresh_worker_redis_client():
+    """`apps.api.composition.get_redis_client()` is `@lru_cache`'d for FastAPI's single, long-lived
+    event loop — the same hazard `_build_worker_session_factory()` documents for the DB engine, but
+    for the async Redis client `SyncOrchestrator`'s lock/cache and `FeatureStoreService`'s online
+    backend both depend on. Left as-is, the worker's first task would build one Redis client bound
+    to that task's `asyncio.run()` loop and every later task (different loop) would keep reusing it
+    from the process-wide cache, surfacing as `RuntimeError: Event loop is closed` on some later
+    Redis command.
+
+    `get_redis_lock()` and `get_redis_sync_cache()` are ALSO independently `@lru_cache`'d, each
+    wrapping whatever `get_redis_client()` returned the first time either was called — clearing
+    only `get_redis_client`'s cache is not enough, since those two would keep returning their own
+    stale, already-memoized wrapper around the very first task's (long since closed) client rather
+    than ever re-reading the fresh one. All three must be cleared together so the next call to any
+    of them rebuilds fresh around whatever `get_redis_client()` returns this time.
+
+    The caller must close the returned client (via the `_worker_redis_client` tag, mirroring
+    `_worker_session`) before the loop closes."""
+    get_redis_client.cache_clear()
+    get_redis_lock.cache_clear()
+    get_redis_sync_cache.cache_clear()
+    return get_redis_client()
 
 
 def _build_worker_session_factory() -> async_sessionmaker[AsyncSession]:
@@ -150,8 +184,16 @@ def _build_worker_session_factory() -> async_sessionmaker[AsyncSession]:
     milestone must not do — spec §11, "do not rewrite the business logic of ... tasks"). Setting
     `isolation_level="AUTOCOMMIT"` on the connections this factory hands out makes every individual
     statement durable immediately, closing the "session is silently rolled back on GC because
-    nothing ever explicitly called commit()" gap without touching any task or service code."""
-    engine = build_engine().execution_options(isolation_level="AUTOCOMMIT")
+    nothing ever explicitly called commit()" gap without touching any task or service code.
+
+    `poolclass=NullPool`: every task body runs its own fresh `asyncio.run()` event loop
+    (`modules/ingestion/infrastructure/celery/tasks.py`'s `_run_summary(asyncio.run(_do()))`
+    pattern), but this engine is built once at `worker_process_init`, outside any of them. The
+    default pool hands out a DBAPI connection created inside one task's loop to the next task's
+    new loop, and that connection's driver-level callbacks are bound to the loop that's already
+    closed by then — surfacing as `RuntimeError: Event loop is closed`. NullPool opens a fresh
+    connection per checkout and closes it on return, so no connection ever crosses a loop boundary."""
+    engine = build_engine(poolclass=NullPool).execution_options(isolation_level="AUTOCOMMIT")
     return async_sessionmaker(engine, expire_on_commit=False)
 
 
@@ -173,7 +215,7 @@ def import_task_modules() -> tuple[str, ...]:
 
 
 def register_factories(session_factory: async_sessionmaker[AsyncSession]) -> None:
-    """Wires all 5 production factories to real, composed application services — one fresh
+    """Wires all 6 production factories to real, composed application services — one fresh
     session per task invocation (never a shared mutable session, never the FastAPI request-scoped
     one), built via the existing `apps.api.composition` builders. No task-module code changes."""
     from modules.admin.infrastructure.celery.tasks import set_admin_context_factory
@@ -181,24 +223,68 @@ def register_factories(session_factory: async_sessionmaker[AsyncSession]) -> Non
     from modules.intelligence.infrastructure.celery.tasks import set_scheduled_news_sync_service_factory
     from modules.predictions.infrastructure.celery.tasks import (
         set_calibration_service_factory,
+        set_calibration_validation_service_factory,
         set_retraining_orchestrator_factory,
     )
 
+    # Milestone 24 §3/1(b): each service is tagged with the session it was built from, on a
+    # `_worker_session` attribute the shared `_get_*()` context managers in each task module look
+    # for and close on the way out. Doesn't change the factory Callable contracts (still `Callable[
+    # [], Awaitable[Service]]`), so nothing else — including every existing test's `set_*_factory`
+    # fixture, which returns a bare fake service with no such attribute — needs to change.
+    # `_worker_redis_client` is the same tag-and-close pattern applied to `_fresh_worker_redis_client()`.
+    # Built BEFORE the `build_*` call in every factory below: `build_sync_orchestrator` (and
+    # friends) read `get_redis_client()` synchronously while constructing their lock/cache/feature
+    # store wiring, so the fresh client must already be cached by the time that call runs — building
+    # it after would leave the service holding the *previous* task's (about-to-be-closed) client.
     async def orchestrator_factory():
-        return build_sync_orchestrator(session_factory())
+        session = session_factory()
+        redis_client = _fresh_worker_redis_client()
+        orchestrator = build_sync_orchestrator(session)
+        orchestrator._worker_session = session
+        orchestrator._worker_redis_client = redis_client
+        return orchestrator
 
     async def admin_context_factory():
         session = session_factory()
-        return build_provider_management_service(session), build_health_intelligence_engine(session)
+        redis_client = _fresh_worker_redis_client()
+        service = build_provider_management_service(session)
+        engine = build_health_intelligence_engine(session)
+        service._worker_session = session
+        service._worker_redis_client = redis_client
+        return service, engine
 
     async def retraining_orchestrator_factory():
-        return build_scheduled_retraining_orchestrator(session_factory())
+        session = session_factory()
+        redis_client = _fresh_worker_redis_client()
+        orchestrator = build_scheduled_retraining_orchestrator(session)
+        orchestrator._worker_session = session
+        orchestrator._worker_redis_client = redis_client
+        return orchestrator
 
     async def calibration_service_factory():
-        return build_calibration_fitting_service(session_factory())
+        session = session_factory()
+        redis_client = _fresh_worker_redis_client()
+        service = build_calibration_fitting_service(session)
+        service._worker_session = session
+        service._worker_redis_client = redis_client
+        return service
+
+    async def calibration_validation_service_factory():
+        session = session_factory()
+        redis_client = _fresh_worker_redis_client()
+        service = build_calibration_validation_service(session)
+        service._worker_session = session
+        service._worker_redis_client = redis_client
+        return service
 
     async def scheduled_news_sync_factory():
-        return build_scheduled_news_sync_service(session_factory())
+        session = session_factory()
+        redis_client = _fresh_worker_redis_client()
+        service = build_scheduled_news_sync_service(session)
+        service._worker_session = session
+        service._worker_redis_client = redis_client
+        return service
 
     set_orchestrator_factory(orchestrator_factory)
     FACTORY_REGISTRY["orchestrator"].registered = True
@@ -211,6 +297,9 @@ def register_factories(session_factory: async_sessionmaker[AsyncSession]) -> Non
 
     set_calibration_service_factory(calibration_service_factory)
     FACTORY_REGISTRY["calibration_service"].registered = True
+
+    set_calibration_validation_service_factory(calibration_validation_service_factory)
+    FACTORY_REGISTRY["calibration_validation_service"].registered = True
 
     set_scheduled_news_sync_service_factory(scheduled_news_sync_factory)
     FACTORY_REGISTRY["scheduled_news_sync"].registered = True

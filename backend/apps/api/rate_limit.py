@@ -42,6 +42,16 @@ async def _enforce(request: Request, identity: str | None, key_prefix: str, limi
         )
 
 
+async def enforce_ip_rate_limit(request: Request, key_prefix: str, limit: int, window_seconds: int) -> None:
+    """Same IP-keyed fixed-window check as `rate_limit_by_ip`'s dependency, exposed as a plain
+    callable for `main.py`'s global middleware — admin routes are spread across `main.py`'s
+    inline `@app.get(...)` handlers plus `ml_platform_router`/`prediction_admin_router` (all
+    sharing the `/api/v1/admin` prefix), so a single path-prefix check in middleware covers every
+    one of them without editing 30+ individual route signatures."""
+    identity = request.client.host if request.client else None
+    await _enforce(request, identity, key_prefix, limit, window_seconds)
+
+
 def rate_limit_by_ip(key_prefix: str, limit: int, window_seconds: int):
     """For unauthenticated endpoints (login, register) — the only identity available. No
     reverse-proxy `X-Forwarded-For` trust chain is configured anywhere in this deployment

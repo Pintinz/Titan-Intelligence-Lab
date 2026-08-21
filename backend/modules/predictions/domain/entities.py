@@ -240,13 +240,21 @@ class Prediction:
 class PredictionOutcome:
     """The realized result for a `Prediction`, once known (docs/database_schema.md §4
     `prediction_outcomes`) — feeds `historical_accuracy` (both `ConfidenceBreakdown`'s factor and
-    `SourceReliabilityService`-style EWMA updates on the owning `ModelDefinition`)."""
+    `SourceReliabilityService`-style EWMA updates on the owning `ModelDefinition`).
+
+    `raw_home_goals`/`raw_away_goals` (statistical-baseline charter, Phase 3): the real final-score
+    goal counts, populated only by the resolvers backing football's 12 goals/score markets
+    (`outcome_resolution_service.py`'s GRID and binary branches) — `None` for every other market.
+    Exists so a genuine Poisson model can fit λ_home/λ_away directly, instead of the derived 0/1
+    classification label every other candidate in the roster reads."""
 
     id: PredictionOutcomeId
     prediction_id: PredictionId
     actual_value: str
     error: float | None
     evaluated_at: datetime
+    raw_home_goals: int | None = None
+    raw_away_goals: int | None = None
 
 
 @dataclass

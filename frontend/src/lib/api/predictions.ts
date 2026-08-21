@@ -10,8 +10,18 @@ import type {
 } from '@/lib/api/types'
 
 export const predictionsApi = {
-  generate: (input: { market_key: string; entity_type: string; entity_id: string; subject_ref: string }) =>
-    api.post<PredictionDto>('/api/v1/predictions/generate', input),
+  generate: (input: {
+    market_key: string
+    entity_type: string
+    entity_id: string
+    subject_ref: string
+    include_contextual_review?: boolean
+    include_football_explanation?: boolean
+    // Can involve two sequential live Gemini calls (explanation + contextual review), and each
+    // one now retries once server-side (TextIntelligenceRouter) before falling back to the mock
+    // adapter — worst case is ~4x the adapter's own 30s timeout, so the default 20s client
+    // timeout isn't nearly enough headroom here.
+  }) => api.post<PredictionDto>('/api/v1/predictions/generate', input, undefined, { timeoutMs: 90_000 }),
   get: (predictionId: string) => api.get<PredictionDto>(`/api/v1/predictions/${predictionId}`),
   list: (marketId: string, opts: { status?: string; limit?: number } = {}) =>
     api.get<PredictionDto[]>('/api/v1/predictions', { market_id: marketId, ...opts }),

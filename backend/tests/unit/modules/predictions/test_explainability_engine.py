@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pytest
 
@@ -34,10 +34,29 @@ class _EmptyTeamNamesResolver:
 class _FakeTextIntelligenceProvider:
     provider_key: str = "fake"
     last_context: dict | None = None
+    call_count: int = 0
 
     async def explain(self, context: dict) -> str:
         self.last_context = context
+        self.call_count += 1
         return f"explained {context['market_key']} at p={context['probability']}"
+
+
+@dataclass
+class _FakeSyncCache:
+    """In-memory `SyncCachePort` — real get/set semantics (TTL not enforced, matching every other
+    fake port in this suite), so a cache-hit assertion tests the engine's own cache-check logic."""
+
+    store: dict = field(default_factory=dict)
+
+    async def get(self, key: str):
+        return self.store.get(key)
+
+    async def set(self, key: str, value, ttl_seconds: int) -> None:
+        self.store[key] = value
+
+    async def delete(self, key: str) -> None:
+        self.store.pop(key, None)
 
 
 def _document(modality: str, text: str) -> IntelligenceRetrievalDocument:
@@ -181,3 +200,59 @@ async def test_explain_with_shap_without_model_degrades_to_plain_explain(retriev
 
     assert bundle.shap_explanation is None
     assert fake_shap.last_call is None
+
+
+@pytest.mark.asyncio
+async def test_explain_second_call_with_identical_ranking_is_served_from_cache(retrieval_service, text_intelligence):
+    """Real Gemini quota is scarce — regenerating a prediction whose ranked features haven't
+    actually changed must not burn a fresh Gemini call for the base narration every sport/market
+    shares."""
+    engine = ExplainabilityEngine(retrieval=retrieval_service, text_intelligence=text_intelligence, top_n=3, cache=_FakeSyncCache())
+    output = PredictorOutput(raw_score=0.1, probability=0.55, value="positive", feature_contributions={"a": 0.1})
+
+    first = await engine.explain("fixture-1", "football.match_result", output, probability=0.55)
+    second = await engine.explain("fixture-1", "football.match_result", output, probability=0.55)
+
+    assert text_intelligence.call_count == 1
+    assert second.ai_explanation == first.ai_explanation
+
+
+@pytest.mark.asyncio
+async def test_explain_different_ranking_is_not_served_from_stale_cache(retrieval_service, text_intelligence):
+    engine = ExplainabilityEngine(retrieval=retrieval_service, text_intelligence=text_intelligence, top_n=3, cache=_FakeSyncCache())
+    first_output = PredictorOutput(raw_score=0.1, probability=0.55, value="positive", feature_contributions={"a": 0.1})
+    changed_output = PredictorOutput(raw_score=0.1, probability=0.55, value="positive", feature_contributions={"a": 0.9})
+
+    await engine.explain("fixture-1", "football.match_result", first_output, probability=0.55)
+    await engine.explain("fixture-1", "football.match_result", changed_output, probability=0.55)
+
+    assert text_intelligence.call_count == 2  # a genuinely different ranking is never served stale
+
+
+@pytest.mark.asyncio
+async def test_explain_no_cache_wired_calls_gemini_every_time(engine, text_intelligence):
+    """Backward compatibility: `cache=None` (the default) must behave exactly as before this
+    feature existed."""
+    output = PredictorOutput(raw_score=0.1, probability=0.55, value="positive", feature_contributions={"a": 0.1})
+
+    await engine.explain("fixture-1", "football.match_result", output, probability=0.55)
+    await engine.explain("fixture-1", "football.match_result", output, probability=0.55)
+
+    assert text_intelligence.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_explain_broken_cache_backend_degrades_to_always_miss_not_error(retrieval_service, text_intelligence):
+    class _BrokenCache:
+        async def get(self, key):
+            raise ConnectionError("cache backend down")
+
+        async def set(self, key, value, ttl_seconds):
+            raise ConnectionError("cache backend down")
+
+    engine = ExplainabilityEngine(retrieval=retrieval_service, text_intelligence=text_intelligence, top_n=3, cache=_BrokenCache())
+    output = PredictorOutput(raw_score=0.1, probability=0.55, value="positive", feature_contributions={"a": 0.1})
+
+    bundle = await engine.explain("fixture-1", "football.match_result", output, probability=0.55)
+
+    assert bundle.ai_explanation == "explained football.match_result at p=0.55"  # a broken cache never blocks a good result

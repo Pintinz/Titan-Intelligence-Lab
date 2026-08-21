@@ -5,7 +5,14 @@
       "name": "titaniq-frontend",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "frontend", "run", "dev"],
-      "port": 5173
+      "port": 5173,
+      "autoPort": true
+    },
+    {
+      "name": "titaniq-backend",
+      "runtimeExecutable": "C:\\Program Files\\Git\\bin\\bash.exe",
+      "runtimeArgs": ["-c", "cd backend && set -a && source .env && set +a && .venv/Scripts/python.exe -m uvicorn apps.api.main:app --port 8000"],
+      "port": 8000
     }
   ]
 }

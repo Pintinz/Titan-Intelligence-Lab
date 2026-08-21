@@ -1,0 +1,125 @@
+# TitanIQ — local/staging orchestration. No docker-compose file existed anywhere in the repo
+# before this (Production Readiness Audit §9) — the app previously only ran as bare local
+# processes with no reproducible way to bring the full stack up together.
+#
+# This is intentionally hosting-agnostic: it runs Postgres/Redis as local containers rather than
+# assuming any specific cloud provider, so it works identically on a laptop or a bare VPS. Auth
+# stays on Supabase (already the product's real auth provider — see backend/.env.example) rather
+# than a self-hosted stand-in, since that's what the application code actually talks to.
+#
+# Usage:
+#   cp backend/.env.example backend/.env   # fill in real values — see that file's own comments
+#   docker compose up --build
+#
+# All four TITANIQ_DB_URL/TITANIQ_REDIS_URL/etc values below are pre-wired to the postgres/redis
+# services this file itself defines — only the Supabase and encryption-key values in backend/.env
+# need to be real. Never commit backend/.env (already gitignored).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: titaniq
+      POSTGRES_PASSWORD: titaniq
+      POSTGRES_DB: titaniq
+    ports:
+      - "5432:5432"
+    volumes:
+      - titaniq_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U titaniq"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    # No password/TLS here — this is the local/staging compose file, not a production topology.
+    # A real deployment must put Redis behind auth and never expose 6379 publicly (Production
+    # Readiness Audit §5) — that's a hosting-specific decision this file deliberately doesn't make.
+    ports:
+      - "6379:6379"
+    volumes:
+      - titaniq_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: sh -c "python -m alembic upgrade head && uvicorn apps.api.main:app --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-2}"
+    env_file:
+      - backend/.env
+    environment:
+      TITANIQ_DB_URL: postgresql+asyncpg://titaniq:titaniq@postgres:5432/titaniq
+      TITANIQ_REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A apps.worker.bootstrap worker --loglevel=info
+    env_file:
+      - backend/.env
+    environment:
+      TITANIQ_DB_URL: postgresql+asyncpg://titaniq:titaniq@postgres:5432/titaniq
+      TITANIQ_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A apps.worker.bootstrap beat --loglevel=info
+    env_file:
+      - backend/.env
+    environment:
+      TITANIQ_DB_URL: postgresql+asyncpg://titaniq:titaniq@postgres:5432/titaniq
+      TITANIQ_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL}
+        VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY}
+    ports:
+      - "8080:8080"
+    depends_on:
+      - api
+
+volumes:
+  titaniq_postgres_data:
+  titaniq_redis_data:

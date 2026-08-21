@@ -61,6 +61,15 @@ export default function CompetitionListPage() {
     [competitions, featuredIds],
   )
 
+  // A competition with zero live/upcoming/completed fixtures is a card with nothing to show —
+  // usually a duplicate entity from a second provider that never had fixtures reconciled onto it,
+  // rather than a real gap in coverage. Search still reaches every competition by name; only this
+  // browse grid hides the dead ones.
+  const competitionsWithActivity = useMemo(
+    () => competitions.filter((c) => c.liveCount + c.upcomingCount + c.completedCount > 0),
+    [competitions],
+  )
+
   if (!sport) return null
 
   function cardFor(competition: EnrichedCompetition, size?: 'featured' | 'default') {
@@ -110,11 +119,11 @@ export default function CompetitionListPage() {
             </MissionSection>
           )}
 
-          <MissionSection title={`${sport.label} Competitions`} subtitle={`Every ${sport.label} competition under TitanIQ coverage`} icon={<Trophy className="size-4" aria-hidden="true" />}>
-            {competitions.length === 0 ? (
+          <MissionSection title={`${sport.label} Competitions`} subtitle={`Every ${sport.label} competition with a live, upcoming or completed fixture`} icon={<Trophy className="size-4" aria-hidden="true" />}>
+            {competitionsWithActivity.length === 0 ? (
               <MissionEmptyState icon={Trophy} title="No competitions found" description={`No ${sport.label} competitions are under coverage yet.`} />
             ) : (
-              <CompetitionGrid>{competitions.map((c) => cardFor(c))}</CompetitionGrid>
+              <CompetitionGrid>{competitionsWithActivity.map((c) => cardFor(c))}</CompetitionGrid>
             )}
           </MissionSection>
         </>

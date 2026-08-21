@@ -9,7 +9,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from apps.api.composition import get_jwt_validator, get_session
 from apps.api.main import app
+from modules.identity.domain.value_objects import Email, Role
 from modules.identity.infrastructure.persistence.models import Base as IdentityBase
+from modules.identity.infrastructure.persistence.repositories import SqlAlchemyUserRepository
 from modules.identity.infrastructure.security import MockJWTValidator
 from modules.ingestion.domain.entities import SyncRun
 from modules.ingestion.domain.value_objects import EntityKind as IngestionEntityKind, SyncRunId, SyncStatus, SyncTrigger
@@ -20,6 +22,8 @@ from modules.sports.domain.entities import (
     Competition,
     Fixture,
     Injury,
+    Lineup,
+    LineupSlot,
     Match,
     Player,
     Season,
@@ -37,6 +41,8 @@ from modules.sports.domain.value_objects import (
     EntityId,
     FixtureId,
     FixtureStatus,
+    LineupId,
+    LineupRole,
     MatchId,
     PlayerId,
     SeasonId,
@@ -52,6 +58,7 @@ from modules.sports.infrastructure.persistence.repositories import (
     SqlAlchemyCompetitionRepository,
     SqlAlchemyFixtureRepository,
     SqlAlchemyInjuryRepository,
+    SqlAlchemyLineupRepository,
     SqlAlchemyMatchRepository,
     SqlAlchemyPlayerRepository,
     SqlAlchemySeasonRepository,
@@ -99,6 +106,24 @@ def client(db_session_factory):
 def auth_headers(client):
     email, password = "sports-user@example.com", "correct-horse-battery"
     client.post("/api/v1/auth/register", json={"email": email, "password": password})
+    login = client.post("/api/v1/auth/login", json={"email": email, "password": password})
+    return {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
+
+
+@pytest.fixture
+def admin_headers(client, db_session_factory):
+    email, password = "sports-admin@example.com", "correct-horse-battery"
+    client.post("/api/v1/auth/register", json={"email": email, "password": password})
+
+    async def _promote():
+        async with db_session_factory() as session:
+            users = SqlAlchemyUserRepository(session=session)
+            user = await users.get_by_email(Email(email))
+            user.role = Role.ADMINISTRATOR
+            await users.upsert(user)
+            await session.commit()
+
+    asyncio.run(_promote())
     login = client.post("/api/v1/auth/login", json={"email": email, "password": password})
     return {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
 
@@ -179,6 +204,39 @@ def test_unrecognized_sport_code_returns_422(client, auth_headers):
     assert response.status_code == 422
 
 
+@pytest.mark.parametrize("sport_code", ["basketball", "baseball", "table_tennis"])
+@pytest.mark.parametrize(
+    "endpoint", ["competitions", "teams", "players", "fixtures"],
+)
+def test_non_football_sports_are_404_for_regular_users(client, auth_headers, sport_code, endpoint):
+    """Basketball/Baseball/Table Tennis are still under development — a regular (non-admin) user
+    must see exactly the same 404 a nonexistent sport would give, not a 403 that would confirm
+    the sport exists but is locked."""
+    response = client.get(f"/api/v1/sports/{sport_code}/{endpoint}", headers=auth_headers)
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize("sport_code", ["basketball", "baseball", "table_tennis"])
+def test_non_football_sports_remain_reachable_for_admins(client, admin_headers, db_session_factory, sport_code):
+    async def _seed_sport():
+        async with db_session_factory() as session:
+            await SqlAlchemySportRepository(session=session).upsert(
+                Sport(id=SportId(uuid.uuid4()), code=SportCode(sport_code), name=sport_code.title())
+            )
+            await session.commit()
+
+    asyncio.run(_seed_sport())
+
+    response = client.get(f"/api/v1/sports/{sport_code}/competitions", headers=admin_headers)
+    assert response.status_code == 200
+    assert response.json()["data"] == []  # sport exists, honestly empty — not seeded with competitions here
+
+
+def test_football_remains_open_to_regular_users(client, auth_headers, seeded):
+    response = client.get("/api/v1/sports/football/competitions", headers=auth_headers)
+    assert response.status_code == 200
+
+
 def test_list_competitions_for_sport(client, auth_headers, seeded):
     response = client.get("/api/v1/sports/football/competitions", headers=auth_headers)
     assert response.status_code == 200
@@ -251,6 +309,93 @@ def test_competition_fixtures(client, auth_headers, seeded):
     assert data[0]["away_team"]["name"] == "Everton FC"
     assert data[0]["venue_name"] == "Anfield"
     assert data[0]["status"] == "scheduled"
+
+
+def test_competition_standings_drops_rows_for_a_team_that_no_longer_resolves(client, auth_headers, seeded, db_session_factory):
+    """Audit fix (2026-08-21): a standings snapshot can outlive the team it points to (e.g. a
+    stale row surviving a team merge/dedup that never repointed it) — the row's team_id then
+    resolves to nothing. Previously this rendered as a literal "Unknown" table row, misrepresenting
+    the competition's real roster; it must be dropped instead, matching the same failure mode's
+    handling on the fixtures endpoint (sportsApi.competitionFixtures's withResolvedTeams)."""
+    competition_id = str(seeded["competition"].id)
+    season_id = seeded["season"].id
+
+    async def _insert_orphaned_standing():
+        async with db_session_factory() as session:
+            await SqlAlchemyStandingRepository(session=session).upsert(
+                Standing(
+                    id=EntityId(uuid.uuid4()), season_id=season_id, team_id=TeamId(uuid.uuid4()),
+                    snapshot_at=T0, rank=3, points=10.0, record={"w": 2},
+                )
+            )
+            await session.commit()
+
+    asyncio.run(_insert_orphaned_standing())
+
+    response = client.get(f"/api/v1/sports/competitions/{competition_id}/standings", headers=auth_headers)
+
+    assert response.status_code == 200
+    rows = response.json()["data"]
+    assert len(rows) == 2  # the seeded pair only — the orphaned third row is dropped, not "Unknown"
+    assert all(r["team_name"] != "Unknown" for r in rows)
+
+
+def test_competition_fixtures_defaults_to_the_fuller_active_season(client, auth_headers, seeded, db_session_factory):
+    """Audit fix (2026-08-21): a competition can end up with more than one ACTIVE season row —
+    e.g. a sparse, later-dated season next to an earlier one carrying the real bulk of fixtures.
+    The no-season_id default must pick the fuller season, not just the most recent one, or a
+    Competition Overview page renders almost empty despite the competition having real data."""
+    competition_id = seeded["competition"].id
+    home_id, away_id, venue_id = seeded["home"].id, seeded["away"].id, seeded["venue"].id
+
+    async def _seed_second_season():
+        async with db_session_factory() as session:
+            seasons = SqlAlchemySeasonRepository(session=session)
+            fixtures = SqlAlchemyFixtureRepository(session=session)
+
+            # Later start date than `seeded`'s season, but only one fixture — must lose the pick.
+            sparse_season = await seasons.upsert(
+                Season(
+                    id=SeasonId(uuid.uuid4()), competition_id=competition_id, label="2026/27",
+                    date_range=DateRange(start=T0 + timedelta(days=30), end=T0 + timedelta(days=300)),
+                    status=SeasonStatus.ACTIVE,
+                )
+            )
+            await fixtures.upsert(
+                Fixture(
+                    id=FixtureId(uuid.uuid4()), season_id=sparse_season.id, home_team_id=home_id,
+                    away_team_id=away_id, venue_id=venue_id, scheduled_at=T0 + timedelta(days=31),
+                    status=FixtureStatus.SCHEDULED,
+                )
+            )
+
+            # Earlier start date, but three fixtures — must win the pick despite being older.
+            fuller_season = await seasons.upsert(
+                Season(
+                    id=SeasonId(uuid.uuid4()), competition_id=competition_id, label="2024/25",
+                    date_range=DateRange(start=T0 - timedelta(days=400), end=T0 - timedelta(days=40)),
+                    status=SeasonStatus.ACTIVE,
+                )
+            )
+            for i in range(3):
+                await fixtures.upsert(
+                    Fixture(
+                        id=FixtureId(uuid.uuid4()), season_id=fuller_season.id, home_team_id=home_id,
+                        away_team_id=away_id, venue_id=venue_id, scheduled_at=T0 - timedelta(days=100 - i),
+                        status=FixtureStatus.COMPLETED, home_score=1, away_score=0,
+                    )
+                )
+            await session.commit()
+            return fuller_season.id
+
+    fuller_season_id = asyncio.run(_seed_second_season())
+
+    response = client.get(f"/api/v1/sports/competitions/{competition_id}/fixtures", headers=auth_headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["meta"]["season_id"] == str(fuller_season_id)
+    assert len(body["data"]) == 3
 
 
 def test_list_competition_seasons(client, auth_headers, seeded):
@@ -599,6 +744,84 @@ def test_fixture_statistics_returns_real_per_team_rows(client, auth_headers, db_
     assert rows[str(seeded["away"].id)] == {"possession_pct": 42.0}
 
 
+def test_fixture_lineups_empty_when_fixture_has_no_match_yet(client, auth_headers, seeded):
+    """Phase 3 audit fix — the lineups read endpoint. A scheduled fixture with no `Match` row yet
+    (mirrors the statistics endpoint's own honest-empty posture) returns an empty list."""
+    fixture_id = str(seeded["fixture"].id)
+    response = client.get(f"/api/v1/sports/fixtures/{fixture_id}/lineups", headers=auth_headers)
+    assert response.status_code == 200
+    assert response.json()["data"] == []
+
+
+def test_fixture_lineups_empty_when_match_has_no_synced_lineups(client, auth_headers, db_session_factory, seeded):
+    async def _seed_match_without_lineups():
+        async with db_session_factory() as session:
+            await SqlAlchemyMatchRepository(session=session).upsert(
+                Match(id=MatchId(uuid.uuid4()), fixture_id=seeded["fixture"].id, started_at=T0, ended_at=None)
+            )
+            await session.commit()
+
+    asyncio.run(_seed_match_without_lineups())
+
+    fixture_id = str(seeded["fixture"].id)
+    response = client.get(f"/api/v1/sports/fixtures/{fixture_id}/lineups", headers=auth_headers)
+    assert response.status_code == 200
+    assert response.json()["data"] == []
+
+
+def test_fixture_lineups_returns_real_starters_substitutes_with_player_names(
+    client, auth_headers, db_session_factory, seeded
+):
+    async def _seed_match_with_lineup():
+        async with db_session_factory() as session:
+            match = await SqlAlchemyMatchRepository(session=session).upsert(
+                Match(id=MatchId(uuid.uuid4()), fixture_id=seeded["fixture"].id, started_at=T0, ended_at=None)
+            )
+            sub_player = await SqlAlchemyPlayerRepository(session=session).upsert(
+                Player(
+                    id=PlayerId(uuid.uuid4()), sport_id=seeded["sport"].id, name="Test Sub", date_of_birth=None,
+                    position="MF", team_id=seeded["home"].id,
+                )
+            )
+            await SqlAlchemyLineupRepository(session=session).upsert(
+                Lineup(
+                    id=LineupId(uuid.uuid4()), match_id=match.id, team_id=seeded["home"].id, formation="4-3-3",
+                    slots=(
+                        LineupSlot(player_id=seeded["player"].id, role=LineupRole.STARTER, position="FW", shirt_number=9),
+                        LineupSlot(player_id=sub_player.id, role=LineupRole.SUBSTITUTE, position="MF", shirt_number=14),
+                    ),
+                    availability_classification="VERIFIED_PRE_MATCH", information_available_at=T0,
+                )
+            )
+            await session.commit()
+            return sub_player
+
+    sub_player = asyncio.run(_seed_match_with_lineup())
+
+    fixture_id = str(seeded["fixture"].id)
+    response = client.get(f"/api/v1/sports/fixtures/{fixture_id}/lineups", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert len(data) == 1
+    lineup = data[0]
+    assert lineup["team_id"] == str(seeded["home"].id)
+    assert lineup["formation"] == "4-3-3"
+    assert lineup["availability_classification"] == "VERIFIED_PRE_MATCH"
+    assert len(lineup["starters"]) == 1
+    assert lineup["starters"][0]["player_id"] == str(seeded["player"].id)
+    assert lineup["starters"][0]["player_name"] == "Test Striker"
+    assert lineup["starters"][0]["shirt_number"] == 9
+    assert len(lineup["substitutes"]) == 1
+    assert lineup["substitutes"][0]["player_id"] == str(sub_player.id)
+    assert lineup["substitutes"][0]["player_name"] == "Test Sub"
+
+
+def test_fixture_lineups_unknown_fixture_returns_empty_not_error(client, auth_headers):
+    response = client.get(f"/api/v1/sports/fixtures/{uuid.uuid4()}/lineups", headers=auth_headers)
+    assert response.status_code == 200
+    assert response.json()["data"] == []
+
+
 def test_fixture_statistics_unknown_fixture_returns_empty_not_error(client, auth_headers):
     """No fixture-existence check by design — mirrors the "empty is honest, not an error" posture
     the two tests above establish, and avoids a second DB round-trip just to 404 on a bad id."""
@@ -704,6 +927,55 @@ def test_list_sport_fixtures_filters_by_status(client, auth_headers, seeded, ext
     data = response.json()["data"]
     assert len(data) == 1
     assert data[0]["id"] == str(extra_fixtures["live"].id)
+
+
+def test_list_sport_fixtures_stats_null_when_none_recorded(client, auth_headers, seeded, extra_fixtures):
+    """Most completed fixtures have no `team_statistics` at all today (real, partial coverage —
+    see backend/docs/post_m24_phase9_training_readiness_report.md) — `stats` must be `None`, not
+    an empty-but-present object, so the card can tell "no data" apart from "zero everything"."""
+    response = client.get("/api/v1/sports/football/fixtures", params={"status": "completed"}, headers=auth_headers)
+    data = response.json()["data"]
+    assert data[0]["id"] == str(extra_fixtures["completed"].id)
+    assert data[0]["stats"] is None
+
+
+def test_list_sport_fixtures_stats_null_for_scheduled_fixture(client, auth_headers, seeded):
+    """A scheduled fixture can never have match statistics — skip the match/stats lookup
+    entirely rather than querying for something that structurally cannot exist yet."""
+    response = client.get("/api/v1/sports/football/fixtures", headers=auth_headers)
+    data = response.json()["data"]
+    assert data[0]["id"] == str(seeded["fixture"].id)
+    assert data[0]["stats"] is None
+
+
+def test_list_sport_fixtures_includes_real_stats_when_recorded(client, auth_headers, db_session_factory, seeded, extra_fixtures):
+    async def _seed_match_with_stats():
+        async with db_session_factory() as session:
+            match = await SqlAlchemyMatchRepository(session=session).upsert(
+                Match(id=MatchId(uuid.uuid4()), fixture_id=extra_fixtures["completed"].id, started_at=T0, ended_at=None)
+            )
+            stats = SqlAlchemyTeamStatisticsRepository(session=session)
+            await stats.upsert(
+                TeamStatistics(
+                    id=EntityId(uuid.uuid4()), match_id=match.id, team_id=seeded["home"].id,
+                    stat_set={"possession_pct": 61.0, "corners": 5, "shots_total": 14},
+                )
+            )
+            await stats.upsert(
+                TeamStatistics(
+                    id=EntityId(uuid.uuid4()), match_id=match.id, team_id=seeded["away"].id,
+                    stat_set={"possession_pct": 39.0, "corners": 2},
+                )
+            )
+            await session.commit()
+
+    asyncio.run(_seed_match_with_stats())
+
+    response = client.get("/api/v1/sports/football/fixtures", params={"status": "completed"}, headers=auth_headers)
+    data = response.json()["data"]
+    stats = data[0]["stats"]
+    assert stats["home"] == {"possession_pct": 61.0, "corners": 5, "shots_total": 14}
+    assert stats["away"] == {"possession_pct": 39.0, "corners": 2}
 
 
 def test_list_sport_fixtures_rejects_unrecognized_status(client, auth_headers, seeded):

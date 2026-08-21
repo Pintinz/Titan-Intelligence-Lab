@@ -106,6 +106,28 @@ class ProviderOddsRecord:
 
 
 @dataclass(frozen=True)
+class ProviderMarketLineRecord:
+    """POST-M24 Phase 6 — one real, normalized sportsbook quote for one fixture, the canonical
+    read-path shape `fetch_market_lines` returns (distinct from `ProviderOddsRecord`, which stays
+    football's own moneyline-only DTO backing its already-working odds-feature pipeline —
+    deliberately not touched or replaced this phase).
+
+    Fields mirror `modules.sports.domain.entities.MarketLine` exactly (`market_type`/`selection`/
+    `line`/`price`/`bookmaker`/`observed_at`) so reconciliation is a straight field copy, no
+    provider-specific shape ever crossing into the domain layer. `line` is `None` for a
+    moneyline quote."""
+
+    fixture_ref: ProviderRef
+    bookmaker: str
+    market_type: str  # mirrors MarketLineType's string values — kept a plain string at the port
+    # boundary so this DTO has no dependency on the domain enum
+    selection: str
+    line: float | None
+    price: float
+    observed_at: datetime | None = None
+
+
+@dataclass(frozen=True)
 class ProviderLineupSlotRecord:
     player_ref: ProviderRef
     role: str  # "starter" | "substitute" — kept a plain string here and mapped to the

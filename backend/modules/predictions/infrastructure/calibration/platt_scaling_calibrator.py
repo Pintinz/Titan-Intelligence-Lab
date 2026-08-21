@@ -8,14 +8,25 @@ Until `fit()` has been called for a model (no outcome history yet), `calibrate()
 identity mapping (A=1, B=0) — an honestly-scoped "no calibration data yet" default, not a faked
 result (docs/decisions.md ADR-008 mock-first posture applied to "insufficient data" exactly as it
 applies to "no adapter yet").
+
+Phase 3 audit fix: `_params` alone is an in-memory, per-process cache — a `fit()` call in one
+process (e.g. a Celery worker) never reached `calibrate()` in another process (e.g. the API
+server), silently leaving that process's live inference on the unfitted identity transform. The
+optional `repository` now backs both: `fit()` persists the newly-fitted parameters, and
+`calibrate()` reads through the repository on a cache miss before falling back to identity —
+so a fit reaches every process regardless of which one ran it. `repository=None` (the default)
+preserves the exact previous in-memory-only behavior for any caller/test that doesn't wire one.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
+from modules.predictions.domain.calibration import PlattCalibrationParameters
 from modules.predictions.domain.value_objects import ModelId
+from modules.predictions.ports.calibration_parameters_repository import CalibrationParametersRepositoryPort
 
 
 def _logit(p: float, eps: float = 1e-6) -> float:
@@ -41,10 +52,16 @@ class PlattParameters:
 class PlattScalingCalibrator:
     learning_rate: float = 0.1
     iterations: int = 500
+    repository: CalibrationParametersRepositoryPort | None = None
     _params: dict[ModelId, PlattParameters] = field(default_factory=dict)
 
     async def calibrate(self, model_id: ModelId, raw_probability: float) -> float:
-        params = self._params.get(model_id, PlattParameters())
+        params = self._params.get(model_id)
+        if params is None and self.repository is not None:
+            persisted = await self.repository.get(model_id)
+            params = PlattParameters(a=persisted.a, b=persisted.b) if persisted is not None else PlattParameters()
+            self._params[model_id] = params
+        params = params or PlattParameters()
         x = _logit(raw_probability)
         return _sigmoid(params.a * x + params.b)
 
@@ -70,3 +87,9 @@ class PlattScalingCalibrator:
             b -= self.learning_rate * grad_b / n
 
         self._params[model_id] = PlattParameters(a=a, b=b)
+        if self.repository is not None:
+            await self.repository.upsert(
+                PlattCalibrationParameters(
+                    model_id=model_id, a=a, b=b, sample_count=n, fitted_at=datetime.now(timezone.utc),
+                )
+            )

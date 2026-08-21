@@ -15,13 +15,28 @@ import type {
 
 export type SportCode = 'football' | 'basketball' | 'baseball' | 'table_tennis'
 
+/** Some fixtures reference a team_id the backend can no longer resolve (e.g. after a team merge)
+ * and serialize home_team/away_team as null despite `FixtureSummaryDto`'s non-null type. Every
+ * `sportsApi` function that returns a fixture *list* filters those out here, once, instead of
+ * every one of the ~20 consuming pages/components needing its own null guard. A single fixture
+ * fetched by ID (`getFixture`) can't be silently dropped this way — those two callers
+ * (match-detail-page.tsx, match-review-page.tsx) guard for it directly and show an honest error. */
+function withResolvedTeams(fixtures: FixtureSummaryDto[]): FixtureSummaryDto[] {
+  return fixtures.filter((f) => f.home_team && f.away_team)
+}
+
 export const sportsApi = {
   listCompetitions: (sportCode: SportCode) => api.get<CompetitionSummaryDto[]>(`/api/v1/sports/${sportCode}/competitions`),
   getCompetition: (competitionId: string) => api.get<CompetitionSummaryDto>(`/api/v1/sports/competitions/${competitionId}`),
-  competitionStandings: (competitionId: string) =>
-    api.get<StandingRowDto[]>(`/api/v1/sports/competitions/${competitionId}/standings`),
-  competitionFixtures: (competitionId: string, limit = 50) =>
-    api.get<FixtureSummaryDto[]>(`/api/v1/sports/competitions/${competitionId}/fixtures`, { limit }),
+  /** Omit `seasonId` for the backend's own best-effort "current season" pick; pass one (from
+   * `competitionSeasons`) to pin the response to that exact season instead — powers the season
+   * filter on the competition detail page. */
+  competitionStandings: (competitionId: string, seasonId?: string) =>
+    api.get<StandingRowDto[]>(`/api/v1/sports/competitions/${competitionId}/standings`, seasonId ? { season_id: seasonId } : undefined),
+  competitionFixtures: async (competitionId: string, limit = 50, seasonId?: string) =>
+    withResolvedTeams(
+      await api.get<FixtureSummaryDto[]>(`/api/v1/sports/competitions/${competitionId}/fixtures`, { limit, ...(seasonId ? { season_id: seasonId } : {}) }),
+    ),
   /** Every season TitanIQ has fixture data for under this competition, most recent first — powers
    * the season picker on the Completed Matches browser so users can jump straight to an older
    * season instead of paging past every newer one first. */
@@ -31,8 +46,8 @@ export const sportsApi = {
   listTeams: (sportCode: SportCode) => api.get<TeamSummaryDto[]>(`/api/v1/sports/${sportCode}/teams`),
   getTeam: (teamId: string) => api.get<TeamSummaryDto>(`/api/v1/sports/teams/${teamId}`),
   teamPlayers: (teamId: string) => api.get<PlayerSummaryDto[]>(`/api/v1/sports/teams/${teamId}/players`),
-  teamFixtures: (teamId: string, limit = 10, when: 'recent' | 'upcoming' = 'recent') =>
-    api.get<FixtureSummaryDto[]>(`/api/v1/sports/teams/${teamId}/fixtures`, { limit, when }),
+  teamFixtures: async (teamId: string, limit = 10, when: 'recent' | 'upcoming' = 'recent') =>
+    withResolvedTeams(await api.get<FixtureSummaryDto[]>(`/api/v1/sports/teams/${teamId}/fixtures`, { limit, when })),
   /** Averages of real recorded per-match stats (possession/shots/corners/fouls/cards) — never
    * fabricated, see backend `get_team_statistics`. A key comes back `null` if no recent match
    * ever recorded it; `sample_size` says how many matches actually contributed. */
@@ -59,16 +74,20 @@ export const sportsApi = {
    * common case (most completed fixtures have no synced stats yet), never an error. */
   fixtureStatistics: (fixtureId: string) =>
     api.get<FixtureTeamStatisticsDto[]>(`/api/v1/sports/fixtures/${fixtureId}/statistics`),
-  listFixtures: (sportCode: SportCode, opts: { competition_id?: string; limit?: number } = {}) =>
-    api.get<FixtureSummaryDto[]>(`/api/v1/sports/${sportCode}/fixtures`, opts),
+  listFixtures: async (sportCode: SportCode, opts: { competition_id?: string; limit?: number } = {}) =>
+    withResolvedTeams(await api.get<FixtureSummaryDto[]>(`/api/v1/sports/${sportCode}/fixtures`, opts)),
   /** Paginated fixture browse for the Matches/Live discovery surfaces — carries `meta.total`/
    * `has_more` through, unlike `listFixtures` (which every existing "just show me some fixtures"
    * caller keeps using unchanged). */
   listFixturesPaged: async (sportCode: SportCode, opts: FixtureQueryOpts = {}): Promise<FixturePage> => {
     const envelope = await api.getWithMeta<FixtureSummaryDto[]>(`/api/v1/sports/${sportCode}/fixtures`, opts as Record<string, unknown>)
     const meta = envelope.meta as { total?: number; offset?: number; limit?: number; has_more?: boolean }
+    const items = withResolvedTeams(envelope.data)
     return {
-      items: envelope.data,
+      items,
+      // `total`/`hasMore` intentionally still reflect the server's real count, not the
+      // post-filter length — a handful of orphaned-team fixtures shouldn't understate how much
+      // real data exists or break pagination math for the caller.
       total: meta.total ?? envelope.data.length,
       offset: meta.offset ?? opts.offset ?? 0,
       limit: meta.limit ?? opts.limit ?? envelope.data.length,

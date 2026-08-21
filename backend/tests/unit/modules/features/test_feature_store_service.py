@@ -5,6 +5,8 @@ from uuid import uuid4
 import pytest
 import redis.exceptions
 
+from modules.admin.application.circuit_breaker import CircuitBreaker
+from modules.admin.domain.value_objects import CircuitState
 from modules.features.application.feature_store_service import (
     FeatureNotActiveError,
     FeatureNotFoundError,
@@ -188,6 +190,111 @@ async def test_read_falls_back_to_offline_when_online_cache_is_unreachable(servi
 
     assert read is not None
     assert read.value == 0.6
+
+
+@dataclass
+class _CountingUnreachableOnlineFeatureStore:
+    """Same failure shape as `_UnreachableOnlineFeatureStore`, but counts real attempts made
+    against it — the regression test's evidence that a circuit breaker actually stops calling
+    through once it opens, not just that writes still succeed."""
+
+    calls: int = 0
+
+    async def get(self, feature_key, entity_type, entity_id):
+        self.calls += 1
+        raise redis.exceptions.ConnectionError("connection refused")
+
+    async def set(self, value, ttl_seconds):
+        self.calls += 1
+        raise redis.exceptions.ConnectionError("connection refused")
+
+    async def delete(self, feature_key, entity_type, entity_id):
+        self.calls += 1
+        raise redis.exceptions.ConnectionError("connection refused")
+
+
+class TestOnlineStoreCircuitBreaker:
+    """Phase 2 regression test — reproduces the exact defect discovered while investigating the
+    apparent `EntityReconciliationService.reconcile_fixture` "hang": with Redis unreachable, every
+    `FeatureStoreService.write()` call independently re-paid a full connect-timeout retrying
+    `online.set()`, and `EntityReconciliationService.reconcile_fixture` (football) calls into
+    several calculators that each write multiple features per fixture — measured at ~12s per
+    fixture against the real Redis client (6 features x ~2s timeout each), turning a routine
+    historical resync (hundreds of fixtures) into a multi-hour operation indistinguishable from an
+    infinite hang when observed for only a few minutes. This does not exercise the real 2-second
+    socket timeout (a unit test must stay fast) — `_CountingUnreachableOnlineFeatureStore` raises
+    immediately, so what's being proven is the breaker's call-skipping logic itself, which is the
+    actual fix: once `online.set()` has failed `failure_threshold` times, the breaker opens and
+    every subsequent `write()` skips the online attempt entirely (`online.calls` stops growing)
+    instead of re-attempting and re-paying the connect cost on every single call."""
+
+    @pytest.mark.asyncio
+    async def test_breaker_stops_calling_online_store_after_failure_threshold(self, definition_repo, value_repo):
+        await definition_repo.upsert(_definition())
+        online = _CountingUnreachableOnlineFeatureStore()
+        breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=timedelta(seconds=60))
+        service = FeatureStoreService(
+            definitions=definition_repo, offline=value_repo, online=online, circuit_breaker=breaker
+        )
+
+        # First 3 writes: breaker is CLOSED, each genuinely attempts (and fails) the online call.
+        for i in range(3):
+            await service.write("football.team.possession_pct", EntityType.TEAM, "team-1", 0.5, T0)
+        assert online.calls == 3
+        assert breaker.state_of("feature_store:online") is CircuitState.OPEN
+
+        # Next 10 writes: breaker is OPEN — none of them should reach the online store at all.
+        for i in range(10):
+            await service.write("football.team.possession_pct", EntityType.TEAM, "team-1", 0.5, T0)
+        assert online.calls == 3, "breaker should have skipped every online attempt once OPEN"
+
+    @pytest.mark.asyncio
+    async def test_offline_write_still_succeeds_and_is_correct_regardless_of_breaker_state(
+        self, definition_repo, value_repo
+    ):
+        """The breaker must never affect *correctness* — only latency. The durable offline record
+        (what DatasetBuilder/every real read ultimately falls back to) must be written every time,
+        with the right value, whether the breaker is closed, open, or half-open."""
+        await definition_repo.upsert(_definition())
+        online = _CountingUnreachableOnlineFeatureStore()
+        breaker = CircuitBreaker(failure_threshold=1, recovery_timeout=timedelta(seconds=60))
+        service = FeatureStoreService(
+            definitions=definition_repo, offline=value_repo, online=online, circuit_breaker=breaker
+        )
+
+        for i in range(5):
+            value = await service.write(
+                "football.team.possession_pct", EntityType.TEAM, "team-1", 0.5 + i * 0.01, T0
+            )
+            assert value.value == pytest.approx(0.5 + i * 0.01)
+
+        assert len(value_repo.store) == 5
+        assert breaker.state_of("feature_store:online") is CircuitState.OPEN
+        assert online.calls == 1  # only the first write actually reached the (failing) online store
+
+    @pytest.mark.asyncio
+    async def test_breaker_recovers_once_recovery_timeout_elapses(self, definition_repo, value_repo):
+        """HALF_OPEN -> CLOSED on the next success — a Redis that comes back up is used again
+        automatically, the same self-healing behavior the existing provider CircuitBreaker already
+        has (this is the same class, not a new implementation)."""
+        await definition_repo.upsert(_definition())
+        online = _CountingUnreachableOnlineFeatureStore()
+        breaker = CircuitBreaker(failure_threshold=1, recovery_timeout=timedelta(seconds=30))
+        service = FeatureStoreService(
+            definitions=definition_repo, offline=value_repo, online=online, circuit_breaker=breaker
+        )
+
+        await service.write("football.team.possession_pct", EntityType.TEAM, "team-1", 0.5, T0)
+        assert breaker.state_of("feature_store:online") is CircuitState.OPEN
+        assert online.calls == 1
+
+        # Still within recovery_timeout — breaker stays OPEN, no new attempt.
+        await service.write("football.team.possession_pct", EntityType.TEAM, "team-1", 0.5, T0 + timedelta(seconds=10))
+        assert online.calls == 1
+
+        # Past recovery_timeout — breaker allows one trial request through (HALF_OPEN).
+        await service.write("football.team.possession_pct", EntityType.TEAM, "team-1", 0.5, T0 + timedelta(seconds=31))
+        assert online.calls == 2  # the trial request really was attempted
 
 
 def test_is_stale():

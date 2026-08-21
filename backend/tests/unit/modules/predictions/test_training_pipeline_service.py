@@ -207,6 +207,23 @@ class TestRetrainingScheduler:
         assert result["should_retrain"] is False
         assert result["is_stale"] is False
 
+    async def test_naive_created_at_does_not_raise(self, dataset_repo):
+        """SQLite/aiosqlite drops tzinfo on read-back (docs/decisions.md ADR-007) — a real
+        Dataset.created_at loaded from dev.db comes back naive even though `now` is always
+        tz-aware (datetime.now(timezone.utc)). Regression test for the exact bug hit live:
+        `TypeError: can't subtract offset-naive and offset-aware datetimes`."""
+        registry = DatasetRegistryService(datasets=dataset_repo)
+        market_id = MarketId(uuid4())
+        dataset = _classification_dataset(market_id, status=DatasetStatus.APPROVED)
+        dataset.created_at = T0.replace(tzinfo=None)  # simulates SQLite round-trip
+        await registry.register(dataset)
+
+        result = await scheduler_check(registry, market_id, now=T0 + timedelta(hours=1))
+
+        assert result["should_retrain"] is False
+        assert result["is_stale"] is False
+        assert result["dataset_age_days"] == 0
+
 
 async def scheduler_check(registry, market_id, now):
     scheduler = RetrainingScheduler(dataset_registry=registry, max_dataset_age=timedelta(days=7))

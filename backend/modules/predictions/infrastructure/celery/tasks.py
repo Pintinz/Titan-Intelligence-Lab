@@ -12,12 +12,44 @@ than importing apps/api's composition module directly.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+import functools
+import logging
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from modules.ingestion.infrastructure.celery.celery_app import celery_app
 from modules.predictions.application.calibration_fitting_service import CalibrationFittingService
+from modules.predictions.application.calibration_validation_service import CalibrationValidationService
 from modules.predictions.application.scheduled_retraining_orchestrator import ScheduledRetrainingOrchestrator
+
+logger = logging.getLogger("titaniq.predictions.tasks")
+
+
+def _logged(task_name: str):
+    """See `modules.ingestion.infrastructure.celery.tasks._logged` — identical structured
+    start/success/failure logging, duplicated per-module rather than centralized (same convention
+    already used for `_RETRY_KWARGS` in every one of these `celery/tasks.py` files). Especially
+    worth having here: retraining/calibration are high-stakes ML operations that previously left
+    no log trail at all if they failed silently past their retry budget."""
+
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(self, *args, **kwargs):
+            task_id = getattr(self.request, "id", None)
+            logger.info("celery_task.started", extra={"task": task_name, "task_id": task_id})
+            try:
+                result = fn(self, *args, **kwargs)
+            except Exception:
+                logger.error("celery_task.failed", extra={"task": task_name, "task_id": task_id}, exc_info=True)
+                raise
+            logger.info("celery_task.succeeded", extra={"task": task_name, "task_id": task_id})
+            return result
+
+        return wrapper
+
+    return decorator
+
 
 _RetrainingOrchestratorFactory = Callable[[], Awaitable[ScheduledRetrainingOrchestrator]]
 _retraining_orchestrator_factory: _RetrainingOrchestratorFactory | None = None
@@ -28,12 +60,28 @@ def set_retraining_orchestrator_factory(factory: _RetrainingOrchestratorFactory)
     _retraining_orchestrator_factory = factory
 
 
-async def _get_retraining_orchestrator() -> ScheduledRetrainingOrchestrator:
+@asynccontextmanager
+async def _get_retraining_orchestrator() -> AsyncIterator[ScheduledRetrainingOrchestrator]:
+    """Milestone 24 §3/1(b): closes the worker session tagged onto the orchestrator by the
+    production factory (`bootstrap.py`'s `_worker_session` attribute) before this task's
+    `asyncio.run()` call tears down its event loop — see
+    `modules.ingestion.infrastructure.celery.tasks._get_orchestrator` for the full rationale,
+    identical here."""
     if _retraining_orchestrator_factory is None:
         raise RuntimeError(
             "retraining orchestrator factory not configured — call set_retraining_orchestrator_factory() at worker startup"
         )
-    return await _retraining_orchestrator_factory()
+    orchestrator = await _retraining_orchestrator_factory()
+    try:
+        yield orchestrator
+    finally:
+        session = getattr(orchestrator, "_worker_session", None)
+        if session is not None:
+            await session.close()
+        redis_client = getattr(orchestrator, "_worker_redis_client", None)
+        if redis_client is not None:
+            await redis_client.aclose()
+        await asyncio.sleep(0)
 
 
 _CalibrationServiceFactory = Callable[[], Awaitable[CalibrationFittingService]]
@@ -45,48 +93,94 @@ def set_calibration_service_factory(factory: _CalibrationServiceFactory) -> None
     _calibration_service_factory = factory
 
 
-async def _get_calibration_service() -> CalibrationFittingService:
+@asynccontextmanager
+async def _get_calibration_service() -> AsyncIterator[CalibrationFittingService]:
+    """Milestone 24 §3/1(b): same session-closing rationale as `_get_retraining_orchestrator` above."""
     if _calibration_service_factory is None:
         raise RuntimeError(
             "calibration service factory not configured — call set_calibration_service_factory() at worker startup"
         )
-    return await _calibration_service_factory()
+    service = await _calibration_service_factory()
+    try:
+        yield service
+    finally:
+        session = getattr(service, "_worker_session", None)
+        if session is not None:
+            await session.close()
+        redis_client = getattr(service, "_worker_redis_client", None)
+        if redis_client is not None:
+            await redis_client.aclose()
+        await asyncio.sleep(0)
+
+
+_CalibrationValidationServiceFactory = Callable[[], Awaitable[CalibrationValidationService]]
+_calibration_validation_service_factory: _CalibrationValidationServiceFactory | None = None
+
+
+def set_calibration_validation_service_factory(factory: _CalibrationValidationServiceFactory) -> None:
+    global _calibration_validation_service_factory
+    _calibration_validation_service_factory = factory
+
+
+@asynccontextmanager
+async def _get_calibration_validation_service() -> AsyncIterator[CalibrationValidationService]:
+    """Phase 3 audit fix: same session-closing rationale as `_get_calibration_service` above —
+    `CalibrationValidationService` (sklearn `CalibratedClassifierCV`-based Platt/isotonic
+    comparison) previously had zero scheduled callers, reachable only via a manual script."""
+    if _calibration_validation_service_factory is None:
+        raise RuntimeError(
+            "calibration validation service factory not configured — call "
+            "set_calibration_validation_service_factory() at worker startup"
+        )
+    service = await _calibration_validation_service_factory()
+    try:
+        yield service
+    finally:
+        session = getattr(service, "_worker_session", None)
+        if session is not None:
+            await session.close()
+        redis_client = getattr(service, "_worker_redis_client", None)
+        if redis_client is not None:
+            await redis_client.aclose()
+        await asyncio.sleep(0)
 
 
 _RETRY_KWARGS = {"autoretry_for": (Exception,), "retry_backoff": True, "retry_backoff_max": 300, "max_retries": 3}
 
 
-@celery_app.task(name="predictions.check_scheduled_retraining", bind=True, queue="default", **_RETRY_KWARGS)
+@celery_app.task(name="predictions.check_scheduled_retraining", bind=True, **_RETRY_KWARGS)
+@_logged("predictions.check_scheduled_retraining")
 def check_scheduled_retraining_task(self, now_iso: str | None = None) -> dict:
     """Runs the same drift/staleness check the Ops Center's manual "check retraining" button
     already performs, for every PRODUCTION market, and trains + registers a Challenger wherever
     it says yes — the automatic half of retraining, manual triggering being the other half."""
 
     async def _do() -> dict:
-        orchestrator = await _get_retraining_orchestrator()
-        now = datetime.fromisoformat(now_iso) if now_iso else datetime.now(timezone.utc)
-        outcomes = await orchestrator.run(now)
-        return {
-            "markets_checked": len(outcomes),
-            "retrained": sum(1 for o in outcomes if o.challenger is not None),
-            "skipped": sum(1 for o in outcomes if o.should_retrain and o.challenger is None),
-            "results": [
-                {
-                    "market_key": o.market_key,
-                    "should_retrain": o.should_retrain,
-                    "reason": o.reason,
-                    "challenger_model_key": o.challenger.model_key if o.challenger else None,
-                    "challenger_version": o.challenger.version if o.challenger else None,
-                    "skipped_reason": o.skipped_reason,
-                }
-                for o in outcomes
-            ],
-        }
+        async with _get_retraining_orchestrator() as orchestrator:
+            now = datetime.fromisoformat(now_iso) if now_iso else datetime.now(timezone.utc)
+            outcomes = await orchestrator.run(now)
+            return {
+                "markets_checked": len(outcomes),
+                "retrained": sum(1 for o in outcomes if o.challenger is not None),
+                "skipped": sum(1 for o in outcomes if o.should_retrain and o.challenger is None),
+                "results": [
+                    {
+                        "market_key": o.market_key,
+                        "should_retrain": o.should_retrain,
+                        "reason": o.reason,
+                        "challenger_model_key": o.challenger.model_key if o.challenger else None,
+                        "challenger_version": o.challenger.version if o.challenger else None,
+                        "skipped_reason": o.skipped_reason,
+                    }
+                    for o in outcomes
+                ],
+            }
 
     return asyncio.run(_do())
 
 
-@celery_app.task(name="predictions.check_scheduled_calibration", bind=True, queue="default", **_RETRY_KWARGS)
+@celery_app.task(name="predictions.check_scheduled_calibration", bind=True, **_RETRY_KWARGS)
+@_logged("predictions.check_scheduled_calibration")
 def check_scheduled_calibration_task(self, now_iso: str | None = None) -> dict:
     """Audit fix (2026-08-02) — `CalibratorPort.fit()` had zero real call sites anywhere, so every
     "calibrated" probability was actually just the unfitted identity transform. (Re)fits each
@@ -94,23 +188,59 @@ def check_scheduled_calibration_task(self, now_iso: str | None = None) -> dict:
     accumulated samples."""
 
     async def _do() -> dict:
-        service = await _get_calibration_service()
-        now = datetime.fromisoformat(now_iso) if now_iso else datetime.now(timezone.utc)
-        outcomes = await service.fit_all_production_markets(now)
-        return {
-            "markets_checked": len(outcomes),
-            "fitted": sum(1 for o in outcomes if o.fitted),
-            "skipped": sum(1 for o in outcomes if not o.fitted),
-            "results": [
-                {
-                    "market_key": o.market_key,
-                    "model_id": str(o.model_id) if o.model_id else None,
-                    "sample_count": o.sample_count,
-                    "fitted": o.fitted,
-                    "reason": o.reason,
-                }
-                for o in outcomes
-            ],
-        }
+        async with _get_calibration_service() as service:
+            now = datetime.fromisoformat(now_iso) if now_iso else datetime.now(timezone.utc)
+            outcomes = await service.fit_all_production_markets(now)
+            return {
+                "markets_checked": len(outcomes),
+                "fitted": sum(1 for o in outcomes if o.fitted),
+                "skipped": sum(1 for o in outcomes if not o.fitted),
+                "results": [
+                    {
+                        "market_key": o.market_key,
+                        "model_id": str(o.model_id) if o.model_id else None,
+                        "sample_count": o.sample_count,
+                        "fitted": o.fitted,
+                        "reason": o.reason,
+                    }
+                    for o in outcomes
+                ],
+            }
+
+    return asyncio.run(_do())
+
+
+@celery_app.task(name="predictions.check_scheduled_calibration_validation", bind=True, **_RETRY_KWARGS)
+@_logged("predictions.check_scheduled_calibration_validation")
+def check_scheduled_calibration_validation_task(self, now_iso: str | None = None) -> dict:
+    """Phase 3 audit fix — `CalibrationValidationService` (real sklearn `CalibratedClassifierCV`
+    Platt/isotonic comparison against every PRODUCTION market's Champion, persisting a
+    `CalibrationReport` per candidate and registering a new CHALLENGER on a genuine win) existed
+    since Phase 3 but was reachable only via a manual script, never a schedule. Never auto-promotes
+    — a win only registers a CHALLENGER for the existing human `promote_to_champion` review, same
+    posture as every other automated retraining path in this codebase."""
+
+    async def _do() -> dict:
+        async with _get_calibration_validation_service() as service:
+            now = datetime.fromisoformat(now_iso) if now_iso else datetime.now(timezone.utc)
+            outcomes = await service.validate_all_production_markets(now)
+            return {
+                "markets_checked": len(outcomes),
+                "validated": sum(1 for o in outcomes if o.validated),
+                "skipped": sum(1 for o in outcomes if not o.validated),
+                "results": [
+                    {
+                        "market_key": o.market_key,
+                        "validated": o.validated,
+                        "winner": o.result.winner.value if o.result else None,
+                        "decision_reason": o.result.decision_reason if o.result else None,
+                        "promoted_model_id": (
+                            str(o.result.promoted_model_id) if o.result and o.result.promoted_model_id else None
+                        ),
+                        "reason": o.reason,
+                    }
+                    for o in outcomes
+                ],
+            }
 
     return asyncio.run(_do())

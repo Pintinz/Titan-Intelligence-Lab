@@ -411,9 +411,9 @@ class TestRetraining:
         from datetime import datetime, timezone
         from uuid import uuid4
 
-        from apps.api.composition import get_model_comparison_repo
         from modules.predictions.domain.model_comparison import ChallengerEvaluation, ComparisonMetrics, ComparisonVerdict
         from modules.predictions.domain.value_objects import ChallengerEvaluationId
+        from modules.predictions.infrastructure.persistence.repositories import SqlAlchemyModelComparisonRepository
 
         headers = _admin_headers(client, db_session_factory)
         market_id = asyncio.run(_seed_market(db_session_factory, "football.ml_comparison_market2"))
@@ -426,7 +426,13 @@ class TestRetraining:
             verdict=ComparisonVerdict.CHALLENGER_BETTER, decisive_metric="log_loss",
             holdout_sample_count=12, evaluated_at=datetime(2026, 8, 8, tzinfo=timezone.utc),
         )
-        asyncio.run(get_model_comparison_repo().record(evaluation))
+
+        async def _record():
+            async with db_session_factory() as session:
+                await SqlAlchemyModelComparisonRepository(session=session).record(evaluation)
+                await session.commit()
+
+        asyncio.run(_record())
 
         response = client.get("/api/v1/admin/ml/retraining/football.ml_comparison_market2/comparison", headers=headers)
 
@@ -437,6 +443,52 @@ class TestRetraining:
         assert data["holdout_sample_count"] == 12
         assert data["challenger_metrics"]["log_loss"] == 0.4
         assert data["champion_metrics"]["brier_score"] == 0.2
+
+
+class TestGoalGenerativeComparison:
+    """Spec §9 "Cross-Architecture Validation" — POST /retraining/{market_key}/goal-generative-comparison."""
+
+    def test_ineligible_market_returns_422(self, client, db_session_factory):
+        headers = _admin_headers(client, db_session_factory)
+        asyncio.run(_seed_market(db_session_factory, "football.ml_ineligible_market"))
+
+        response = client.post(
+            "/api/v1/admin/ml/retraining/football.ml_ineligible_market/goal-generative-comparison", headers=headers
+        )
+
+        assert response.status_code == 422
+
+    def test_unknown_market_returns_404(self, client, db_session_factory):
+        headers = _admin_headers(client, db_session_factory)
+
+        response = client.post(
+            "/api/v1/admin/ml/retraining/football.does_not_exist/goal-generative-comparison", headers=headers
+        )
+
+        assert response.status_code == 404
+
+    def test_eligible_market_with_no_outcome_history_returns_honest_zero(self, client, db_session_factory):
+        headers = _admin_headers(client, db_session_factory)
+        asyncio.run(_seed_market(db_session_factory, "football.match_winner"))
+
+        response = client.post(
+            "/api/v1/admin/ml/retraining/football.match_winner/goal-generative-comparison", headers=headers
+        )
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["sample_count"] == 0
+        assert data["goal_generative_wins"] is None
+        assert data["reason"]
+
+    def test_non_admin_is_forbidden(self, client, db_session_factory):
+        headers = _regular_headers(client)
+
+        response = client.post(
+            "/api/v1/admin/ml/retraining/football.match_winner/goal-generative-comparison", headers=headers
+        )
+
+        assert response.status_code == 403
 
 
 class TestBacktest:

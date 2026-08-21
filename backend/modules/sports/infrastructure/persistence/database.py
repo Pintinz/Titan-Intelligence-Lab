@@ -9,6 +9,7 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import Pool
 
 
 class DatabaseSettings(BaseSettings):
@@ -17,6 +18,12 @@ class DatabaseSettings(BaseSettings):
     url: str
     echo: bool = False
     pool_size: int = 10
+    # Recycles a connection SQLAlchemy hasn't verified is still alive before handing it to a
+    # caller (a real production gap without this — a Postgres failover or an idle-connection
+    # timeout on the DB side previously surfaced as a runtime error mid-request instead of being
+    # transparently recycled, Production Readiness Audit §1). SQLite has no server-side connection
+    # to go stale, so this only applies on the Postgres branch below.
+    max_overflow: int = 5
 
 
 @lru_cache
@@ -47,15 +54,34 @@ _ALL_SCHEMAS = [
 ]
 
 
-def build_engine(settings: DatabaseSettings | None = None) -> AsyncEngine:
+def build_engine(
+    settings: DatabaseSettings | None = None, *, poolclass: type[Pool] | None = None
+) -> AsyncEngine:
+    """`poolclass` overrides the default pool (e.g. `NullPool` for a caller like the Celery worker
+    that invokes a fresh `asyncio.run()` event loop per call — pooled DBAPI connections are bound
+    to the loop that created them, so reusing one across loops raises `RuntimeError: Event loop is
+    closed`). Left `None`, callers get today's default pooling unchanged."""
     settings = settings or get_database_settings()
     if settings.url.startswith("sqlite"):
-        return create_async_engine(
-            settings.url,
-            echo=settings.echo,
-            execution_options={"schema_translate_map": dict.fromkeys(_ALL_SCHEMAS)},
-        )
-    return create_async_engine(settings.url, echo=settings.echo, pool_size=settings.pool_size)
+        kwargs: dict = {
+            "echo": settings.echo,
+            "execution_options": {"schema_translate_map": dict.fromkeys(_ALL_SCHEMAS)},
+        }
+    else:
+        kwargs = {
+            "echo": settings.echo,
+            "pool_size": settings.pool_size,
+            "max_overflow": settings.max_overflow,
+            "pool_pre_ping": True,
+        }
+    if poolclass is not None:
+        # NullPool (the one real caller of this override, the Celery worker) manages no pool at
+        # all, so it accepts neither pool_size nor max_overflow — only pool_pre_ping is compatible
+        # with it, and is left in place since it's still meaningful per-connection there.
+        kwargs.pop("pool_size", None)
+        kwargs.pop("max_overflow", None)
+        kwargs["poolclass"] = poolclass
+    return create_async_engine(settings.url, **kwargs)
 
 
 def build_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

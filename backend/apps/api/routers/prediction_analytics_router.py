@@ -20,11 +20,21 @@ from apps.api.composition import (
     get_session,
 )
 from modules.identity.domain.entities import User
+from modules.identity.domain.value_objects import Role
 from modules.predictions.application.prediction_admin_service import serialize_prediction_summary
 from modules.predictions.domain.entities import Prediction
 from modules.predictions.domain.value_objects import MarketId, PredictionId, PredictionStatus
+from modules.sports.domain.value_objects import SportCode
 
 router = APIRouter(prefix="/api/v1/predictions", tags=["predictions"])
+
+
+def _visible_to(user: User, sport_code: str) -> bool:
+    """Basketball/Baseball/Table Tennis are still under development — same non-admin gate as
+    `sports_router.require_football_or_admin`, applied here too since this endpoint's `sport_code`
+    is a query filter (not a path param that dependency can gate) and "no filter" must not become
+    a back door to every sport's predictions for a regular user."""
+    return sport_code == SportCode.FOOTBALL.value or user.is_at_least(Role.ADMINISTRATOR)
 
 
 def envelope(data=None, meta=None, error=None):
@@ -99,7 +109,7 @@ async def ai_picks(
     limit: int = Query(default=20, ge=1, le=100),
     sport_code: str | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
     """A curated, confidence-ranked feed across every sport — reuses
     ``PredictionRepositoryPort.list_recent`` (already powers ``/monitoring/summary`` above)
@@ -126,6 +136,8 @@ async def ai_picks(
         if market is None:
             continue
         if sport_code is not None and market.sport_code != sport_code:
+            continue
+        if not _visible_to(user, market.sport_code):
             continue
         picks.append((prediction, market))
 

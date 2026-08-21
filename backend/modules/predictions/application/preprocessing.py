@@ -36,8 +36,16 @@ def impute_missing(samples: list[TrainingSample], feature_order: list[str], stra
         features = {key: sample.features.get(key, fill_values[key]) for key in feature_order}
         # Milestone 18: reference_time must survive this reconstruction — dataset_splitter.split()
         # (called later in TrainingPipelineService.train()) fails closed without it for every
-        # temporal strategy.
-        imputed.append(TrainingSample(features=features, label=sample.label, reference_time=sample.reference_time))
+        # temporal strategy. Statistical-baseline charter Phase 3: raw_home_goals/raw_away_goals
+        # must survive it too — FootballGoalsPoissonAdapter.fit() reads them directly, and their
+        # silent loss here made it look like every market had insufficient data for Poisson even
+        # with a real backfill in place.
+        imputed.append(
+            TrainingSample(
+                features=features, label=sample.label, reference_time=sample.reference_time,
+                raw_home_goals=sample.raw_home_goals, raw_away_goals=sample.raw_away_goals,
+            )
+        )
     return imputed
 
 

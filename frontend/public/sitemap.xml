@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Real public routes only (matches frontend/src/router.tsx's MarketingShell tree) — never a
+  private /app/* route, which robots.txt already excludes from crawling entirely.
+-->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://titaniq.ai/</loc><priority>1.0</priority></url>
+  <url><loc>https://titaniq.ai/pricing</loc><priority>0.9</priority></url>
+  <url><loc>https://titaniq.ai/about</loc><priority>0.6</priority></url>
+  <url><loc>https://titaniq.ai/faq</loc><priority>0.6</priority></url>
+  <url><loc>https://titaniq.ai/trust-center</loc><priority>0.6</priority></url>
+  <url><loc>https://titaniq.ai/methodology</loc><priority>0.6</priority></url>
+  <url><loc>https://titaniq.ai/contact</loc><priority>0.4</priority></url>
+  <url><loc>https://titaniq.ai/careers</loc><priority>0.3</priority></url>
+  <url><loc>https://titaniq.ai/partners</loc><priority>0.3</priority></url>
+  <url><loc>https://titaniq.ai/press-kit</loc><priority>0.3</priority></url>
+  <url><loc>https://titaniq.ai/brand-assets</loc><priority>0.2</priority></url>
+  <url><loc>https://titaniq.ai/docs</loc><priority>0.5</priority></url>
+  <url><loc>https://titaniq.ai/developers</loc><priority>0.5</priority></url>
+  <url><loc>https://titaniq.ai/api-reference</loc><priority>0.5</priority></url>
+  <url><loc>https://titaniq.ai/blog</loc><priority>0.4</priority></url>
+  <url><loc>https://titaniq.ai/release-notes</loc><priority>0.3</priority></url>
+  <url><loc>https://titaniq.ai/roadmap</loc><priority>0.3</priority></url>
+  <url><loc>https://titaniq.ai/help</loc><priority>0.4</priority></url>
+  <url><loc>https://titaniq.ai/support</loc><priority>0.4</priority></url>
+  <url><loc>https://titaniq.ai/status</loc><priority>0.3</priority></url>
+  <url><loc>https://titaniq.ai/privacy</loc><priority>0.3</priority></url>
+  <url><loc>https://titaniq.ai/terms</loc><priority>0.3</priority></url>
+  <url><loc>https://titaniq.ai/cookies</loc><priority>0.2</priority></url>
+  <url><loc>https://titaniq.ai/advertising-policy</loc><priority>0.2</priority></url>
+  <url><loc>https://titaniq.ai/editorial-policy</loc><priority>0.2</priority></url>
+  <url><loc>https://titaniq.ai/responsible-ai</loc><priority>0.4</priority></url>
+  <url><loc>https://titaniq.ai/security-policy</loc><priority>0.2</priority></url>
+  <url><loc>https://titaniq.ai/copyright-policy</loc><priority>0.2</priority></url>
+  <url><loc>https://titaniq.ai/dmca</loc><priority>0.2</priority></url>
+  <url><loc>https://titaniq.ai/acceptable-use</loc><priority>0.2</priority></url>
+  <url><loc>https://titaniq.ai/disclaimer</loc><priority>0.4</priority></url>
+  <url><loc>https://titaniq.ai/licenses</loc><priority>0.2</priority></url>
+  <url><loc>https://titaniq.ai/gdpr</loc><priority>0.2</priority></url>
+  <url><loc>https://titaniq.ai/ccpa</loc><priority>0.2</priority></url>
+  <url><loc>https://titaniq.ai/login</loc><priority>0.3</priority></url>
+  <url><loc>https://titaniq.ai/signup</loc><priority>0.7</priority></url>
+</urlset>

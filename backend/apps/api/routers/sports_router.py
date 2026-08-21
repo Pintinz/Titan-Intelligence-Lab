@@ -18,14 +18,15 @@ import asyncio
 import uuid
 from datetime import date, datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.auth_deps import get_current_user
-from apps.api.composition import build_monitoring_service, get_session
+from apps.api.composition import build_identity_service, build_monitoring_service, get_session
 from modules.identity.domain.entities import User
+from modules.identity.domain.value_objects import Role
 from modules.ingestion.domain.value_objects import SyncStatus
-from modules.sports.domain.entities import CoachingStaffMember, Competition, Fixture, Injury, Player, Season, Team, Transfer
+from modules.sports.domain.entities import CoachingStaffMember, Competition, Fixture, Injury, Lineup, Player, Season, Team, Transfer
 from modules.sports.domain.value_objects import (
     CompetitionId,
     FixtureId,
@@ -40,6 +41,7 @@ from modules.sports.infrastructure.persistence.repositories import (
     SqlAlchemyCompetitionRepository,
     SqlAlchemyFixtureRepository,
     SqlAlchemyInjuryRepository,
+    SqlAlchemyLineupRepository,
     SqlAlchemyMatchRepository,
     SqlAlchemyPlayerRepository,
     SqlAlchemySeasonRepository,
@@ -121,16 +123,71 @@ async def _get_sport_or_404(session: AsyncSession, sport_code: str):
     return sport
 
 
-def _pick_current_season(seasons: list[Season]) -> Season | None:
-    """Prefer the season marked ACTIVE; otherwise the most recently started one — there is no
-    single authoritative "current season" flag in the schema, so this is a best-effort choice
-    for "what should Match/Competition Center show by default," not a domain rule."""
+async def require_football_or_admin(
+    request: Request, sport_code: str, session: AsyncSession = Depends(get_session), user: User = Depends(get_current_user)
+) -> User:
+    """Basketball/Baseball/Table Tennis are still under active development — real users only get
+    Football; anything else 404s for them exactly like a sport that doesn't exist, rather than a
+    403 that would confirm the other sports are there but locked. Administrators pass through
+    unrestricted so the team can keep building/QA-ing the other sports against the real API.
+    Denials are recorded to the audit trail, same posture and pattern as `require_role`
+    (auth_deps.py) — including the same explicit commit, since the HTTPException below would
+    otherwise skip `get_session`'s normal commit-on-clean-exit and silently roll the write back.
+
+    A genuinely unrecognized sport_code (not one of the 4 real SportCode values) still reaches
+    the handler's own `_parse_sport_code`/`_get_sport_or_404` and gets its normal 422/404 — this
+    dependency only gates codes that ARE real sports, so a malformed request keeps reading as a
+    validation error, not as "sport exists but is locked" for a sport that doesn't exist at all."""
+    is_real_non_football_sport = sport_code in (SportCode.BASKETBALL.value, SportCode.BASEBALL.value, SportCode.TABLE_TENNIS.value)
+    if is_real_non_football_sport and not user.is_at_least(Role.ADMINISTRATOR):
+        identity_service = build_identity_service(session)
+        await identity_service.record_permission_denied(
+            user.id,
+            datetime.now(timezone.utc),
+            target_type="route",
+            target_id=request.url.path,
+            metadata={"sport_code": sport_code, "actual_role": user.role.value, "method": request.method},
+        )
+        await session.commit()
+        raise HTTPException(status_code=404, detail=f"sport '{sport_code}' not found")
+    return user
+
+
+async def _pick_current_season(session: AsyncSession, seasons: list[Season]) -> Season | None:
+    """Prefer the ACTIVE season with the most fixtures, breaking ties by the latest start date —
+    over the schema's lifetime, a fixture-schedule sync (or a standings bootstrap) can create a
+    new season row for a year that hasn't kicked off yet, well before any of its real fixtures
+    exist, and (audit fix, 2026-08-21) a competition can also end up with more than one ACTIVE
+    season row carrying real but partial data (e.g. a single team's away-leg fixtures restored
+    into their own season row) — picking purely by latest start date among ACTIVE seasons favors
+    either an empty stub or a sparse partial season over the one with the fuller, real dataset.
+    There is still no single authoritative "current season" flag in the schema, so this stays a
+    best-effort choice for "what should Match/Competition Center show by default," not a domain
+    rule — falling back to the latest-by-date season when none of them have fixtures yet, since a
+    genuinely new, fixture-less season is still the right thing to show once it IS the newest."""
     if not seasons:
         return None
     active = [s for s in seasons if s.status is SeasonStatus.ACTIVE]
-    if active:
-        return max(active, key=lambda s: s.date_range.start)
-    return max(seasons, key=lambda s: s.date_range.start)
+    candidates = active or seasons
+    fixture_repo = SqlAlchemyFixtureRepository(session=session)
+    counts = {season.id: len(await fixture_repo.list_by_season(season.id)) for season in candidates}
+    if not any(counts.values()):
+        return sorted(candidates, key=lambda s: s.date_range.start, reverse=True)[0]
+    return max(candidates, key=lambda s: (counts[s.id], s.date_range.start))
+
+
+async def _resolve_requested_season(
+    session: AsyncSession, seasons: list[Season], season_id: str | None
+) -> Season | None:
+    """Powers the season filter on the competition detail page: an explicit `season_id` pins the
+    response to that exact season (404 if it isn't one of this competition's own), otherwise
+    falls back to `_pick_current_season`'s best-effort default."""
+    if season_id is None:
+        return await _pick_current_season(session, seasons)
+    season = next((s for s in seasons if str(s.id) == season_id), None)
+    if season is None:
+        raise HTTPException(status_code=404, detail="season not found for this competition")
+    return season
 
 
 def _serialize_season(s: Season) -> dict:
@@ -190,6 +247,30 @@ def _serialize_injury(injury: Injury, player_name: str | None) -> dict:
     }
 
 
+def _serialize_lineup(lineup: Lineup, player_names: dict) -> dict:
+    return {
+        "id": str(lineup.id),
+        "team_id": str(lineup.team_id),
+        "formation": lineup.formation,
+        "starters": [
+            {
+                "player_id": str(slot.player_id), "player_name": player_names.get(str(slot.player_id)),
+                "position": slot.position, "shirt_number": slot.shirt_number,
+            }
+            for slot in lineup.starters()
+        ],
+        "substitutes": [
+            {
+                "player_id": str(slot.player_id), "player_name": player_names.get(str(slot.player_id)),
+                "position": slot.position, "shirt_number": slot.shirt_number,
+            }
+            for slot in lineup.substitutes()
+        ],
+        "availability_classification": lineup.availability_classification,
+        "information_available_at": lineup.information_available_at.isoformat() if lineup.information_available_at else None,
+    }
+
+
 def _serialize_transfer(
     transfer: Transfer, player_name: str | None, from_team_name: str | None, to_team_name: str | None
 ) -> dict:
@@ -217,6 +298,31 @@ def _serialize_coach(coach: CoachingStaffMember) -> dict:
     }
 
 
+async def _fixture_stats(session: AsyncSession, fixture: Fixture) -> dict | None:
+    """Real match-level statistics (possession/shots/corners/fouls/cards) when they exist —
+    `None` when they don't, never a fabricated placeholder. Coverage is genuinely partial today
+    (every English League Two fixture has it; most Premier League/DFB-Pokal history doesn't,
+    since these are only ever written when a provider or historical source actually reports
+    them — see backend/docs/post_m24_phase9_training_readiness_report.md's team_statistics
+    coverage findings), so callers must treat this as optional."""
+    if fixture.status is not FixtureStatus.COMPLETED:
+        return None
+    match = await SqlAlchemyMatchRepository(session=session).get_by_fixture(fixture.id)
+    if match is None:
+        return None
+    rows = await SqlAlchemyTeamStatisticsRepository(session=session).list_by_match(match.id)
+    if not rows:
+        return None
+    home_row = next((r for r in rows if r.team_id == fixture.home_team_id), None)
+    away_row = next((r for r in rows if r.team_id == fixture.away_team_id), None)
+    if home_row is None and away_row is None:
+        return None
+    return {
+        "home": home_row.stat_set if home_row else None,
+        "away": away_row.stat_set if away_row else None,
+    }
+
+
 async def _serialize_fixture(session: AsyncSession, fixture: Fixture, competition: Competition | None) -> dict:
     teams = SqlAlchemyTeamRepository(session=session)
     venues = SqlAlchemyVenueRepository(session=session)
@@ -225,6 +331,7 @@ async def _serialize_fixture(session: AsyncSession, fixture: Fixture, competitio
     venue = await venues.get(fixture.venue_id) if fixture.venue_id else None
     home_score, away_score = fixture.home_score, fixture.away_score
     sport = await SqlAlchemySportRepository(session=session).get(competition.sport_id) if competition else None
+    stats = await _fixture_stats(session, fixture)
     return {
         "id": str(fixture.id),
         "season_id": str(fixture.season_id),
@@ -248,6 +355,7 @@ async def _serialize_fixture(session: AsyncSession, fixture: Fixture, competitio
             {"home": home_score, "away": away_score} if home_score is not None or away_score is not None else None
         ),
         "period_scores": fixture.period_scores,
+        "stats": stats,
     }
 
 
@@ -256,7 +364,7 @@ async def _serialize_fixture(session: AsyncSession, fixture: Fixture, competitio
 
 @router.get("/{sport_code}/competitions")
 async def list_competitions(
-    sport_code: str, session: AsyncSession = Depends(get_session), _user: User = Depends(get_current_user)
+    sport_code: str, session: AsyncSession = Depends(get_session), _user: User = Depends(require_football_or_admin)
 ):
     sport = await _get_sport_or_404(session, sport_code)
     competitions = await SqlAlchemyCompetitionRepository(session=session).list_by_sport(sport.id)
@@ -280,11 +388,14 @@ async def get_competition(
 
 @router.get("/competitions/{competition_id}/standings")
 async def get_competition_standings(
-    competition_id: str, session: AsyncSession = Depends(get_session), _user: User = Depends(get_current_user)
+    competition_id: str,
+    season_id: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+    _user: User = Depends(get_current_user),
 ):
     cid = CompetitionId(_parse_uuid(competition_id, "competition_id"))
     seasons = await SqlAlchemySeasonRepository(session=session).list_by_competition(cid)
-    season = _pick_current_season(seasons)
+    season = await _resolve_requested_season(session, seasons, season_id)
     if season is None:
         return envelope([], meta={"season_id": None})
 
@@ -301,10 +412,17 @@ async def get_competition_standings(
     rows = []
     for standing in sorted(latest_by_team.values(), key=lambda s: s.rank):
         team = await teams.get(standing.team_id)
+        # A standing whose team_id no longer resolves (e.g. a stale snapshot surviving a team
+        # merge/dedup that never repointed it) has nothing honest to show — "Unknown" was a
+        # placeholder, not a real team, and displaying it as a table row misrepresents the
+        # competition's real roster. Drop it, matching sportsApi.competitionFixtures's own
+        # withResolvedTeams precedent on the frontend for the identical failure mode.
+        if team is None:
+            continue
         rows.append(
             {
                 "team_id": str(standing.team_id),
-                "team_name": team.name if team else "Unknown",
+                "team_name": team.name,
                 "rank": standing.rank,
                 "points": standing.points,
                 "record": standing.record,
@@ -317,6 +435,7 @@ async def get_competition_standings(
 async def get_competition_fixtures(
     competition_id: str,
     limit: int = Query(default=50, ge=1, le=200),
+    season_id: str | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
     _user: User = Depends(get_current_user),
 ):
@@ -326,7 +445,7 @@ async def get_competition_fixtures(
         raise HTTPException(status_code=404, detail="competition not found")
 
     seasons = await SqlAlchemySeasonRepository(session=session).list_by_competition(cid)
-    season = _pick_current_season(seasons)
+    season = await _resolve_requested_season(session, seasons, season_id)
     if season is None:
         return envelope([], meta={"count": 0})
 
@@ -357,7 +476,7 @@ async def list_competition_seasons(
 
 
 @router.get("/{sport_code}/teams")
-async def list_teams(sport_code: str, session: AsyncSession = Depends(get_session), _user: User = Depends(get_current_user)):
+async def list_teams(sport_code: str, session: AsyncSession = Depends(get_session), _user: User = Depends(require_football_or_admin)):
     sport = await _get_sport_or_404(session, sport_code)
     teams = await SqlAlchemyTeamRepository(session=session).list_by_sport(sport.id)
     venues = SqlAlchemyVenueRepository(session=session)
@@ -534,7 +653,7 @@ async def list_players(
     sport_code: str,
     limit: int = Query(default=100, ge=1, le=500),
     session: AsyncSession = Depends(get_session),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_football_or_admin),
 ):
     sport = await _get_sport_or_404(session, sport_code)
     players = await SqlAlchemyPlayerRepository(session=session).list_by_sport(sport.id, limit=limit)
@@ -619,6 +738,36 @@ async def get_fixture_statistics(
     return envelope(data=[{"team_id": str(s.team_id.value), "stats": s.stat_set} for s in stats])
 
 
+@router.get("/fixtures/{fixture_id}/lineups")
+async def get_fixture_lineups(
+    fixture_id: str, session: AsyncSession = Depends(get_session), _user: User = Depends(get_current_user),
+):
+    """Phase 3 audit fix — `reconcile_lineup`/`SqlAlchemyLineupRepository` have been real and
+    fully wired into the sync/reconciliation path since Milestone 5, but nothing ever read the
+    data back out via any endpoint. Same `Match` resolution pattern as `/fixtures/{id}/statistics`
+    above — `Lineup.match_id` is a `Match` id, not the fixture id directly. Coverage is honestly
+    sparse today (`sync_lineups` only fires for football/EPL fixtures inside a pre-kickoff
+    window — see `beat_schedule.py`), so a fixture with no synced lineup yet returns an empty
+    list, never a fabricated one. `EXPECTED_LINEUP` vs `CONFIRMED_LINEUP` distinction is carried
+    honestly via `availability_classification` (`VERIFIED_PRE_MATCH` vs `UNKNOWN_AVAILABILITY_TIME`)
+    rather than guessed from timing alone."""
+    fid = _parse_uuid(fixture_id, "fixture_id")
+    match = await SqlAlchemyMatchRepository(session=session).get_by_fixture(FixtureId(fid))
+    if match is None:
+        return envelope(data=[])
+    lineups = await SqlAlchemyLineupRepository(session=session).list_by_match(match.id)
+    players_repo = SqlAlchemyPlayerRepository(session=session)
+    data = []
+    for lineup in lineups:
+        player_names = {}
+        for slot in lineup.slots:
+            player = await players_repo.get(slot.player_id)
+            if player is not None:
+                player_names[str(slot.player_id)] = player.name
+        data.append(_serialize_lineup(lineup, player_names))
+    return envelope(data, meta={"count": len(data)})
+
+
 @router.get("/{sport_code}/fixtures")
 async def list_sport_fixtures(
     sport_code: str,
@@ -631,7 +780,7 @@ async def list_sport_fixtures(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_football_or_admin),
 ):
     """Cross-competition fixture browse for Match Center's default view and the Matches/Live
     discovery pages. Bounded N+1 (competitions -> current season -> fixtures) rather than a single

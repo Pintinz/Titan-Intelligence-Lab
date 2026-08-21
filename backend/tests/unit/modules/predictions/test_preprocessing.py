@@ -41,6 +41,24 @@ def test_impute_missing_rejects_unknown_strategy():
         impute_missing([], ["a"], strategy="median")
 
 
+def test_impute_missing_preserves_raw_goal_counts():
+    """Statistical-baseline charter Phase 3: raw_home_goals/raw_away_goals must survive this
+    reconstruction the same way reference_time already does — FootballGoalsPoissonAdapter.fit()
+    reads them directly, and their silent loss here made every market look data-insufficient for
+    the Poisson baseline even with a real historical backfill in place."""
+    samples = [
+        TrainingSample(features={"a": 1.0}, label=1.0, raw_home_goals=2, raw_away_goals=1),
+        TrainingSample(features={"a": 2.0}, label=0.0, raw_home_goals=None, raw_away_goals=None),
+    ]
+
+    imputed = impute_missing(samples, ["a"], strategy="zero")
+
+    assert imputed[0].raw_home_goals == 2
+    assert imputed[0].raw_away_goals == 1
+    assert imputed[1].raw_home_goals is None
+    assert imputed[1].raw_away_goals is None
+
+
 def test_detect_outliers_flags_extreme_value():
     samples = [TrainingSample(features={"x": 1.0 + i * 0.01}, label=0.0) for i in range(20)]
     samples.append(TrainingSample(features={"x": 1000.0}, label=1.0))

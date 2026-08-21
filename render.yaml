@@ -1,0 +1,133 @@
+# TitanIQ — Render Blueprint. Defines the full stack (API, Celery worker, Celery Beat, frontend,
+# managed Postgres, managed Redis) so Render can provision everything from one review-and-approve
+# step instead of manually clicking through 6 separate services.
+#
+# HOW TO USE THIS:
+#   1. Push this repo (with this file at the root) to GitHub.
+#   2. In the Render dashboard: New -> Blueprint -> connect this repo. Render reads this file and
+#      shows you a plan of every service below for review before creating anything.
+#   3. Render provisions titaniq-postgres/titaniq-redis automatically and wires their connection
+#      strings into TITANIQ_DB_URL/TITANIQ_REDIS_URL on every service below — you don't set those.
+#   4. Every env var marked `sync: false` needs a REAL value entered in the Render dashboard
+#      after the services are created (Render deliberately never stores these in a file you'd
+#      commit to git). See the comment above each one for what it needs to be.
+#   5. First deploy: the API service's start command runs migrations before starting uvicorn, so
+#      no separate manual migration step is needed for the first deploy or any deploy after.
+#
+# I could not run any of this myself — no Docker daemon and no Render credentials in this
+# environment (see the Production Readiness Audit's infra findings). This file is the concrete
+# next step; you run it from the Render dashboard, then share the resulting URL back.
+
+services:
+  - type: web
+    name: titaniq-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: starter
+    healthCheckPath: /api/v1/health
+    dockerCommand: "sh -c 'python -m alembic upgrade head && uvicorn apps.api.main:app --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-2}'"
+    envVars:
+      - key: TITANIQ_DB_URL
+        fromDatabase:
+          name: titaniq-postgres
+          property: connectionString
+      - key: TITANIQ_REDIS_URL
+        fromService:
+          type: redis
+          name: titaniq-redis
+          property: connectionString
+      - key: TITANIQ_SUPABASE_PROJECT_URL
+        value: https://irhnoilyaqgewfidhunx.supabase.co
+      - key: TITANIQ_CORS_ORIGINS
+        value: https://titaniq-frontend.onrender.com
+      - key: TITANIQ_ENABLE_OFFLINE_AUTH
+        value: "false"
+      - key: WEB_CONCURRENCY
+        value: "2"
+      # Fernet.generate_key() — a fresh key for this environment, never reused from local dev.
+      # Generate one locally with:  python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      - key: TITANIQ_ENCRYPTION_KEY
+        sync: false
+
+  - type: worker
+    name: titaniq-worker
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: celery -A apps.worker.bootstrap worker --loglevel=info
+    plan: starter
+    envVars:
+      - key: TITANIQ_DB_URL
+        fromDatabase:
+          name: titaniq-postgres
+          property: connectionString
+      - key: TITANIQ_REDIS_URL
+        fromService:
+          type: redis
+          name: titaniq-redis
+          property: connectionString
+      - key: TITANIQ_SUPABASE_PROJECT_URL
+        value: https://irhnoilyaqgewfidhunx.supabase.co
+      - key: TITANIQ_ENCRYPTION_KEY
+        sync: false
+
+  - type: worker
+    name: titaniq-beat
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: celery -A apps.worker.bootstrap beat --loglevel=info
+    plan: starter
+    envVars:
+      - key: TITANIQ_DB_URL
+        fromDatabase:
+          name: titaniq-postgres
+          property: connectionString
+      - key: TITANIQ_REDIS_URL
+        fromService:
+          type: redis
+          name: titaniq-redis
+          property: connectionString
+      - key: TITANIQ_SUPABASE_PROJECT_URL
+        value: https://irhnoilyaqgewfidhunx.supabase.co
+      - key: TITANIQ_ENCRYPTION_KEY
+        sync: false
+
+  # Render's native static-site build (not the Docker/nginx path in frontend/Dockerfile — that
+  # one's for a host without a native static-site product, e.g. a bare VPS via docker-compose).
+  # Render runs buildCommand as a real shell step, so these envVars are genuine environment
+  # variables Vite reads via import.meta.env at build time — no Docker ARG plumbing needed here.
+  - type: web
+    name: titaniq-frontend
+    runtime: static
+    buildCommand: cd frontend && npm ci && npm run build
+    staticPublishPath: frontend/dist
+    envVars:
+      - key: VITE_API_BASE_URL
+        value: https://titaniq-api.onrender.com
+      # Both of these are the real, already-public values from frontend/.env.example — Supabase's
+      # anon/publishable key is explicitly meant to ship in a browser bundle (RLS enforces access
+      # control server-side regardless), not a secret needing sync:false treatment.
+      - key: VITE_SUPABASE_URL
+        value: https://irhnoilyaqgewfidhunx.supabase.co
+      - key: VITE_SUPABASE_ANON_KEY
+        value: sb_publishable_rThsO5r97_EqobhVt73jbg_ia0UGAnd
+    routes:
+      # Client-side routing (react-router) — same reason frontend/nginx.conf's try_files exists
+      # for the Docker path: a hard refresh on e.g. /app/football must not 404 at the host.
+      - type: rewrite
+        source: /*
+        destination: /index.html
+
+  - type: redis
+    name: titaniq-redis
+    plan: starter
+    ipAllowList: []
+    maxmemoryPolicy: allkeys-lru
+
+databases:
+  - name: titaniq-postgres
+    plan: starter
+    databaseName: titaniq
+    user: titaniq

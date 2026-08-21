@@ -4,11 +4,15 @@ import asyncio
 from datetime import datetime, timezone
 from uuid import uuid4
 
+import fakeredis
 import pytest
 import pytest_asyncio
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+import apps.api.composition as composition
+import apps.api.main as main_module
 from apps.api.composition import get_jwt_validator, get_session
 from apps.api.main import app
 from modules.features.domain.entities import FeatureDefinition, FeatureValue
@@ -27,7 +31,9 @@ from modules.features.infrastructure.persistence.repositories import (
     SqlAlchemyFeatureDefinitionRepository,
     SqlAlchemyFeatureValueRepository,
 )
+from modules.identity.domain.value_objects import Email, Role
 from modules.identity.infrastructure.persistence.models import Base as IdentityBase
+from modules.identity.infrastructure.persistence.repositories import SqlAlchemyUserRepository
 from modules.identity.infrastructure.security import MockJWTValidator
 from modules.intelligence.infrastructure.persistence.models import Base as IntelligenceBase
 from modules.knowledge_graph.infrastructure.persistence.models import Base as KnowledgeGraphBase
@@ -81,11 +87,26 @@ async def db_session_factory():
 
 
 @pytest.fixture
-def client(db_session_factory):
+def client(db_session_factory, monkeypatch):
     async def override_get_session():
         async with db_session_factory() as session:
             yield session
             await session.commit()
+
+    # Same pattern as test_api_ingestion.py's `client` fixture — see test_api_predictions.py's
+    # identical fixture for the full rationale (build_prediction_cache_service's composition
+    # chain reaches get_redis_client(), which is @lru_cache'd process-wide).
+    from modules.admin.infrastructure.vault import get_vault_settings
+
+    fake_client = fakeredis.FakeAsyncRedis(decode_responses=True)
+    composition.get_redis_client.cache_clear()
+    composition.get_redis_lock.cache_clear()
+    composition.get_redis_sync_cache.cache_clear()
+    monkeypatch.setattr(composition, "get_redis_client", lambda: fake_client)
+    monkeypatch.setattr(main_module, "get_redis_client", lambda: fake_client)
+
+    monkeypatch.setenv("TITANIQ_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    get_vault_settings.cache_clear()
 
     app.dependency_overrides[get_session] = override_get_session
     app.dependency_overrides[get_jwt_validator] = lambda: MockJWTValidator()
@@ -95,6 +116,22 @@ def client(db_session_factory):
 
 def _auth_headers(client, email="analytics@titaniq.test", password="correct-horse-battery"):
     client.post("/api/v1/auth/register", json={"email": email, "password": password})
+    login = client.post("/api/v1/auth/login", json={"email": email, "password": password})
+    return {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
+
+
+def _admin_headers(client, db_session_factory, email="analytics-admin@titaniq.test", password="correct-horse-battery"):
+    client.post("/api/v1/auth/register", json={"email": email, "password": password})
+
+    async def _promote():
+        async with db_session_factory() as session:
+            users = SqlAlchemyUserRepository(session=session)
+            user = await users.get_by_email(Email(email))
+            user.role = Role.ADMINISTRATOR
+            await users.upsert(user)
+            await session.commit()
+
+    asyncio.run(_promote())
     login = client.post("/api/v1/auth/login", json={"email": email, "password": password})
     return {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
 
@@ -250,7 +287,9 @@ def test_fixture_review_reports_predicted_vs_actual(client, db_session_factory):
 
 def test_fixture_review_reports_unresolved_market_as_none(client, db_session_factory):
     headers = _auth_headers(client)
-    # first_half_goals has no registered outcome resolver — must stay unresolved, never guessed.
+    # first_half_goals has a real resolver (post-M24) but no fixture completion/outcome
+    # resolution ever runs in this test — no PredictionOutcome exists, so review must report
+    # unresolved honestly rather than guessing.
     asyncio.run(
         _seed_production_market(db_session_factory, "football.first_half_goals", "football.analytics_feature_unresolved")
     )
@@ -453,7 +492,10 @@ def test_ai_picks_excludes_below_threshold_draft_predictions(client, db_session_
 
 
 def test_ai_picks_filters_by_sport_code(client, db_session_factory):
-    headers = _auth_headers(client)
+    # Basketball is gated to administrators only (still under active development — see
+    # sports_router.require_football_or_admin and prediction_analytics_router._visible_to), so
+    # this exercises the sport_code filter as an admin, the only role that can see a basketball pick.
+    headers = _admin_headers(client, db_session_factory)
     asyncio.run(
         _seed_production_market(
             db_session_factory, "basketball.picks_market", "basketball.picks_feature_a", sport_code="basketball"
@@ -467,6 +509,21 @@ def test_ai_picks_filters_by_sport_code(client, db_session_factory):
     assert football_picks.json()["data"] == []
     assert len(basketball_picks.json()["data"]) == 1
     assert basketball_picks.json()["data"][0]["sport_code"] == "basketball"
+
+
+def test_ai_picks_hides_non_football_sports_from_regular_users(client, db_session_factory):
+    admin_headers = _admin_headers(client, db_session_factory)
+    asyncio.run(
+        _seed_production_market(
+            db_session_factory, "basketball.regular_user_picks_market", "basketball.regular_user_picks_feature", sport_code="basketball"
+        )
+    )
+    _generate(client, admin_headers, "basketball.regular_user_picks_market")
+
+    regular_headers = _auth_headers(client, email="picks-regular-user@titaniq.test")
+    basketball_picks = client.get("/api/v1/predictions/picks", params={"sport_code": "basketball"}, headers=regular_headers)
+
+    assert basketball_picks.json()["data"] == []
 
 
 def test_ai_picks_respects_limit(client, db_session_factory):

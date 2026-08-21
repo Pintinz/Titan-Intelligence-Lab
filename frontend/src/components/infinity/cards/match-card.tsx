@@ -1,8 +1,25 @@
 import { Link } from 'react-router-dom'
-import { Sparkles, MapPin, ChevronRight } from 'lucide-react'
+import { Sparkles, MapPin, ChevronRight, Goal, Target, Flag, Crosshair, ShieldCheck, PieChart, RectangleVertical } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { DOMAIN_COLOR_VAR, type DomainKey } from '../primitives/badge'
 import { InfinityFollowButton } from '../primitives/follow-button'
+import { buildMatchSnapshot, type SnapshotStatChip } from '@/lib/match-snapshot'
+
+const STAT_ICONS: Record<SnapshotStatChip['key'], typeof Goal> = {
+  goals: Goal,
+  btts: Target,
+  corners: Flag,
+  shots_on_target: Crosshair,
+  clean_sheet: ShieldCheck,
+  possession: PieChart,
+  cards: RectangleVertical,
+}
+
+/** One side's real match-statistics values, keyed the same way `team_statistics.stat_set`
+ * stores them on the backend (`possession_pct`, `shots_total`, `corners`, `cards_yellow`,
+ * `cards_red`, ...) — never fabricated, only present when a provider or historical source
+ * actually reported it. A key absent from the object (not `0`) means "unknown," not "zero." */
+export type MatchStatSide = Record<string, number | null | undefined>
 
 export interface MatchCardProps {
   sport: Extract<DomainKey, 'football' | 'basketball' | 'baseball' | 'table-tennis'>
@@ -18,6 +35,10 @@ export interface MatchCardProps {
   awayScore?: number
   homeLogoUrl?: string | null
   awayLogoUrl?: string | null
+  /** Real possession/shots/corners/cards for a completed match, when the source data exists.
+   * Omit (or leave both sides empty) to render no stat strip at all — most completed matches
+   * don't have this yet, and the card must never show a placeholder for missing data. */
+  stats?: { home?: MatchStatSide | null; away?: MatchStatSide | null } | null
   /** Whether TitanIQ has a market ready for this fixture — shows the AI badge when true. */
   aiAvailable?: boolean
   /** Omit both to render without a follow toggle (e.g. the design showcase). */
@@ -50,6 +71,7 @@ export function InfinityMatchCard({
   awayScore,
   homeLogoUrl,
   awayLogoUrl,
+  stats,
   aiAvailable,
   following,
   onToggleFollow,
@@ -57,6 +79,21 @@ export function InfinityMatchCard({
 }: MatchCardProps) {
   const isLive = status === 'live'
   const tone = DOMAIN_COLOR_VAR[sport]
+  // Completed matches read as an AI Match Snapshot rather than a bare score row — written from
+  // the home side's perspective (there's no other natural "point of view" in a neutral listing
+  // of fixtures, unlike a team's own page). Every chip/clause still comes straight from real
+  // recorded stats; buildMatchSnapshot omits anything this fixture's sync never captured.
+  const snapshot =
+    status === 'completed' && homeScore != null && awayScore != null
+      ? buildMatchSnapshot({
+          teamName: homeTeam,
+          perspectiveIsHome: true,
+          homeScore,
+          awayScore,
+          perspectiveStats: toMatchStats(stats?.home),
+          opponentStats: toMatchStats(stats?.away),
+        })
+      : null
   // Top edge echoes the status pill in a glance-able accent, the same "tone = at-a-glance
   // state" language the team page's Record cards use — live is always the live-red regardless
   // of sport, upcoming carries the sport's own color, completed stays neutral/settled.
@@ -113,6 +150,24 @@ export function InfinityMatchCard({
         <TeamRow name={homeTeam} score={homeScore} logoUrl={homeLogoUrl} />
         <TeamRow name={awayTeam} score={awayScore} logoUrl={awayLogoUrl} />
       </div>
+
+      {snapshot && (
+        <>
+          <div className="relative z-10 flex flex-wrap gap-1.5 border-t border-infinity-border-hairline pt-2.5">
+            {snapshot.stats.map((stat) => (
+              <StatChip key={stat.key} stat={stat} tone={tone} />
+            ))}
+          </div>
+          <div className="relative z-10 border-t border-infinity-border-hairline pt-2.5">
+            <p className="font-infinity-mono text-[9px] font-medium uppercase tracking-[0.07em] text-infinity-text-muted">
+              AI Match Snapshot
+            </p>
+            <p className="mt-1 font-infinity-body text-[12px] leading-relaxed text-infinity-text-secondary">
+              {snapshot.summary}
+            </p>
+          </div>
+        </>
+      )}
 
       {(venue || aiAvailable) && (
         <div className="relative z-10 flex items-center justify-between gap-2 border-t border-infinity-border-hairline pt-2.5">
@@ -184,6 +239,32 @@ function TeamCrest({ name, logoUrl }: { name: string; logoUrl?: string | null })
       className="flex size-7 shrink-0 items-center justify-center rounded-full bg-infinity-ground-2 font-infinity-mono text-[11px] font-semibold text-infinity-text-muted"
     >
       {name.charAt(0).toUpperCase()}
+    </span>
+  )
+}
+
+/** `MatchStatSide` allows `null`/`undefined` values (a key absent or null means "unknown, never
+ * fabricate a 0"); `buildMatchSnapshot` wants a plain `Record<string, number>`. Filtering here
+ * keeps that "absent means unknown" contract intact — a null/undefined field simply doesn't
+ * reach the snapshot builder, so it's treated exactly the same as a field that was never sent. */
+function toMatchStats(side?: MatchStatSide | null): Record<string, number> | undefined {
+  if (!side) return undefined
+  const out: Record<string, number> = {}
+  for (const [key, value] of Object.entries(side)) {
+    if (typeof value === 'number') out[key] = value
+  }
+  return out
+}
+
+function StatChip({ stat, tone }: { stat: SnapshotStatChip; tone: string }) {
+  const Icon = STAT_ICONS[stat.key]
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-infinity-full border border-infinity-border-hairline bg-infinity-ground-2 px-2.5 py-1">
+      <Icon className="size-3" style={{ color: tone }} aria-hidden="true" />
+      <span className="font-infinity-body text-[10.5px] text-infinity-text-muted">{stat.label}</span>
+      <span className="font-infinity-telemetry text-[11px] font-semibold tabular-nums text-infinity-text-primary">
+        {stat.value}
+      </span>
     </span>
   )
 }

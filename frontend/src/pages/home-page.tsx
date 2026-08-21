@@ -3,7 +3,7 @@ import { sportsApi } from '@/lib/api/sports'
 import { marketsApi } from '@/lib/api/markets'
 import { predictionsApi } from '@/lib/api/predictions'
 import { intelligenceApi } from '@/lib/api/intelligence'
-import { SPORT_SLUGS } from '@/lib/hooks/use-sport'
+import { useAvailableSports } from '@/lib/hooks/use-sport'
 import { useWatchlist } from '@/lib/hooks/use-watchlist'
 import { isLiveStatus } from '@/lib/sports-status'
 import { todayRange } from '@/lib/sports-date-ranges'
@@ -39,9 +39,12 @@ export default function HomePage() {
   const displayName = getDisplayNameFromEmail(profile?.email)
   const greeting = getTimeAwareGreeting()
   const isAdmin = !!profile && isAtLeast(profile.role, 'administrator')
+  // Basketball/Baseball/Table Tennis are still under development — regular users only see
+  // Football here, matching the same gate the backend enforces server-side.
+  const sports = useAvailableSports()
 
   const liveQueries = useQueries({
-    queries: SPORT_SLUGS.map((sport) => ({
+    queries: sports.map((sport) => ({
       queryKey: ['sports', sport.code, 'fixtures', 'home', 'live'],
       queryFn: () => sportsApi.listFixturesPaged(sport.code, { status: 'live', limit: 50 }),
       refetchInterval: 30_000,
@@ -49,37 +52,37 @@ export default function HomePage() {
   })
   const todayRangeValue = todayRange()
   const todayQueries = useQueries({
-    queries: SPORT_SLUGS.map((sport) => ({
+    queries: sports.map((sport) => ({
       queryKey: ['sports', sport.code, 'fixtures', 'home', 'today', todayRangeValue.from],
       queryFn: () => sportsApi.listFixturesPaged(sport.code, { date_from: todayRangeValue.from, date_to: todayRangeValue.to, limit: 50 }),
     })),
   })
   const marketQueries = useQueries({
-    queries: SPORT_SLUGS.map((sport) => ({
+    queries: sports.map((sport) => ({
       queryKey: ['markets', sport.code, 'production'],
       queryFn: () => marketsApi.list({ sport_code: sport.code, status: 'production' }),
       staleTime: 5 * 60 * 1000,
     })),
   })
-  const aiAvailableBySport = new Set(SPORT_SLUGS.filter((_, i) => (marketQueries[i].data?.length ?? 0) > 0).map((s) => s.code))
+  const aiAvailableBySport = new Set(sports.filter((_, i) => (marketQueries[i].data?.length ?? 0) > 0).map((s) => s.code))
 
   const anyLiveLoading = liveQueries.some((q) => q.isPending)
   const anyTodayLoading = todayQueries.some((q) => q.isPending)
 
-  const liveWithSport: FixtureCardItem[] = SPORT_SLUGS.flatMap((sport, i) => (liveQueries[i].data?.items ?? []).map((fixture) => ({ fixture, sport })))
-  const todayWithSport: FixtureCardItem[] = SPORT_SLUGS.flatMap((sport, i) => (todayQueries[i].data?.items ?? []).map((fixture) => ({ fixture, sport })))
+  const liveWithSport: FixtureCardItem[] = sports.flatMap((sport, i) => (liveQueries[i].data?.items ?? []).map((fixture) => ({ fixture, sport })))
+  const todayWithSport: FixtureCardItem[] = sports.flatMap((sport, i) => (todayQueries[i].data?.items ?? []).map((fixture) => ({ fixture, sport })))
   const todayNonLive = todayWithSport.filter((x) => !isLiveStatus(x.fixture.status))
 
   const todayIsEmpty = !anyTodayLoading && todayNonLive.length === 0
   const upcomingFallbackQueries = useQueries({
-    queries: SPORT_SLUGS.map((sport) => ({
+    queries: sports.map((sport) => ({
       queryKey: ['sports', sport.code, 'fixtures', 'home', 'upcoming-fallback'],
       queryFn: () => sportsApi.listFixturesPaged(sport.code, { status: 'scheduled', limit: 6 }),
       enabled: todayIsEmpty,
     })),
   })
   const anyFallbackLoading = todayIsEmpty && upcomingFallbackQueries.some((q) => q.isPending)
-  const upcomingFallbackWithSport: FixtureCardItem[] = SPORT_SLUGS.flatMap((sport, i) =>
+  const upcomingFallbackWithSport: FixtureCardItem[] = sports.flatMap((sport, i) =>
     (upcomingFallbackQueries[i].data?.items ?? []).map((fixture) => ({ fixture, sport })),
   )
   const showUpcomingFallback = todayIsEmpty && !anyFallbackLoading && upcomingFallbackWithSport.length > 0
@@ -92,7 +95,7 @@ export default function HomePage() {
   // dedupes these into the exact same network request, so the Overview tiles below cost nothing
   // extra even though they need a total this page doesn't otherwise compute.
   const competitionCountQueries = useQueries({
-    queries: SPORT_SLUGS.map((sport) => ({
+    queries: sports.map((sport) => ({
       queryKey: ['sports', sport.code, 'competitions', 'mission-control'],
       queryFn: () => sportsApi.listCompetitions(sport.code),
       staleTime: 5 * 60 * 1000,

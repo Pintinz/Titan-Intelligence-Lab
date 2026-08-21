@@ -155,6 +155,11 @@ class SqlAlchemyNewsEventRepository:
         ]
         return matches[:limit]
 
+    async def list_for_article(self, article_id: NewsArticleId) -> list[NewsEvent]:
+        stmt = select(NewsEventModel).where(NewsEventModel.article_id == article_id.value)
+        result = await self.session.execute(stmt)
+        return [mappers.event_to_domain(row) for row in result.scalars().all()]
+
     async def list_timeline(
         self, since: datetime | None = None, until: datetime | None = None, limit: int = 100
     ) -> list[NewsEvent]:

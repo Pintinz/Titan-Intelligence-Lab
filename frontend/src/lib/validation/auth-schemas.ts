@@ -1,14 +1,19 @@
 import { z } from 'zod'
 
+// Trimmed before the format check — a stray leading/trailing space from autofill or a
+// copy-paste would otherwise fail validation with a confusing "invalid email" for an email that
+// looks correct at a glance, a real source of registration/login friction.
+const emailField = z.string().trim().email('Enter a valid email address')
+
 export const loginSchema = z.object({
-  email: z.string().email('Enter a valid email address'),
+  email: emailField,
   password: z.string().min(1, 'Password is required'),
 })
 export type LoginValues = z.infer<typeof loginSchema>
 
 export const signupSchema = z
   .object({
-    email: z.string().email('Enter a valid email address'),
+    email: emailField,
     password: z.string().min(8, 'Use at least 8 characters'),
     confirmPassword: z.string(),
   })
@@ -19,7 +24,7 @@ export const signupSchema = z
 export type SignupValues = z.infer<typeof signupSchema>
 
 export const magicLinkSchema = z.object({
-  email: z.string().email('Enter a valid email address'),
+  email: emailField,
 })
 export type MagicLinkValues = z.infer<typeof magicLinkSchema>
 

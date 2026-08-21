@@ -42,19 +42,41 @@ from apps.api.composition import (
     get_session,
     get_sport_plugin_registry,
 )
+from apps.api.rate_limit import rate_limit_by_ip
 from modules.ingestion.domain.value_objects import SyncStatus
 from modules.knowledge_graph.domain.value_objects import EdgeType, NodeType
 from modules.predictions.domain.value_objects import PredictionStatus
-from modules.sports.domain.value_objects import FixtureId, FixtureStatus
+from modules.sports.domain.value_objects import (
+    CompetitionId,
+    CountryId,
+    FixtureId,
+    FixtureStatus,
+    PlayerId,
+    SportId,
+    TeamId,
+    VenueId,
+)
 from modules.sports.infrastructure.persistence.repositories import (
     SqlAlchemyCompetitionRepository,
+    SqlAlchemyCountryRepository,
     SqlAlchemyFixtureRepository,
+    SqlAlchemyPlayerRepository,
     SqlAlchemySeasonRepository,
     SqlAlchemySportRepository,
     SqlAlchemyTeamRepository,
+    SqlAlchemyVenueRepository,
 )
 
-router = APIRouter(prefix="/api/v1/public", tags=["public"])
+router = APIRouter(
+    prefix="/api/v1/public",
+    tags=["public"],
+    # These are the only endpoints in the service reachable without a session (see module
+    # docstring) — the in-process TTL cache above softens repeated *identical* requests, but does
+    # nothing against a scripted client varying `limit` or simply hammering the endpoint. IP-based
+    # throttling is the only identity available pre-auth (Production Readiness Audit §6: this
+    # router previously had no rate limiting of any kind).
+    dependencies=[Depends(rate_limit_by_ip("public_api", limit=120, window_seconds=60))],
+)
 
 
 def envelope(data=None, meta=None, error=None):
@@ -315,13 +337,60 @@ async def news_intelligence(limit: int = Query(default=6, ge=1, le=12), session:
 # -- Knowledge Graph preview --------------------------------------------------------------------------
 
 
+async def _resolve_node_label(session: AsyncSession, node_type: str, entity_ref: str) -> str | None:
+    """Best-effort real display name for a KG node, resolved from the same relational tables
+    entity_reconciliation writes — `KGNode.entity_ref` is that row's own id, never a slug, so
+    there's nothing to resolve without this lookup. Returns None (never a guess) for a ref that
+    doesn't parse as a UUID or a row that no longer exists; the caller falls back to the honest
+    `node_type` label in that case, same as before this resolver existed."""
+    try:
+        ref_id = uuid.UUID(entity_ref)
+    except ValueError:
+        return None
+
+    try:
+        if node_type == "team":
+            team = await SqlAlchemyTeamRepository(session=session).get(TeamId(ref_id))
+            return team.short_name if team else None
+        if node_type == "player":
+            player = await SqlAlchemyPlayerRepository(session=session).get(PlayerId(ref_id))
+            return player.name if player else None
+        if node_type == "sport":
+            sport = await SqlAlchemySportRepository(session=session).get(SportId(ref_id))
+            return sport.name if sport else None
+        if node_type == "competition":
+            competition = await SqlAlchemyCompetitionRepository(session=session).get(CompetitionId(ref_id))
+            return competition.name if competition else None
+        if node_type == "country":
+            country = await SqlAlchemyCountryRepository(session=session).get(CountryId(ref_id))
+            return country.name if country else None
+        if node_type == "venue":
+            venue = await SqlAlchemyVenueRepository(session=session).get(VenueId(ref_id))
+            return venue.name if venue else None
+        if node_type == "match":
+            fixture = await SqlAlchemyFixtureRepository(session=session).get(FixtureId(ref_id))
+            if fixture is None:
+                return None
+            teams_repo = SqlAlchemyTeamRepository(session=session)
+            home, away = await teams_repo.get(fixture.home_team_id), await teams_repo.get(fixture.away_team_id)
+            home_name = home.short_name if home else "TBD"
+            away_name = away.short_name if away else "TBD"
+            return f"{home_name} vs {away_name}"
+    except Exception:
+        # A lookup failing (bad data, unexpected id shape) degrades to the honest node_type
+        # label — it must never surface as a 500 on a public, cached, best-effort preview.
+        return None
+    return None
+
+
 @router.get("/knowledge-graph-preview")
 async def knowledge_graph_preview(session: AsyncSession = Depends(get_session)):
     """Real graph scale (node/edge counts by type) plus a real neighborhood around one real,
-    genuinely high-connectivity team node — never a fabricated relationship. Nodes are identified
-    by `node_type`/`entity_ref` only; this router does not resolve `entity_ref` to a display name
-    (no such resolver exists yet for every node type) — the frontend shows the real type/ref rather
-    than a guessed label."""
+    genuinely high-connectivity team node — never a fabricated relationship. Each node also
+    carries a best-effort real `label` resolved from the relational table its `entity_ref`
+    points at (team short name, "Home vs Away" for a match, etc.) — `label` is None, never a
+    guess, for a node type/ref this resolver can't look up; the frontend falls back to the
+    honest node_type in that case."""
     cached = _cached("kg-preview")
     if cached is not None:
         return envelope(cached)
@@ -336,13 +405,17 @@ async def knowledge_graph_preview(session: AsyncSession = Depends(get_session)):
     if top_teams:
         node, degree = top_teams[0]
         subgraph = await query_service.neighborhood(node_id=node.id, depth=1, max_nodes=12)
+        neighbor_nodes = [n for n in subgraph.nodes if n.id != node.id]
+
+        center_label = await _resolve_node_label(session, node.node_type.value, node.entity_ref)
+        neighbor_labels = [await _resolve_node_label(session, n.node_type.value, n.entity_ref) for n in neighbor_nodes]
+
         preview_entity = {
-            "node": {"id": str(node.id), "type": node.node_type.value, "entity_ref": node.entity_ref},
+            "node": {"id": str(node.id), "type": node.node_type.value, "entity_ref": node.entity_ref, "label": center_label},
             "connection_count": degree,
             "neighbors": [
-                {"id": str(n.id), "type": n.node_type.value, "entity_ref": n.entity_ref}
-                for n in subgraph.nodes
-                if n.id != node.id
+                {"id": str(n.id), "type": n.node_type.value, "entity_ref": n.entity_ref, "label": label}
+                for n, label in zip(neighbor_nodes, neighbor_labels)
             ],
             "relationships": [
                 {"from": str(e.from_node_id), "to": str(e.to_node_id), "type": e.edge_type.value} for e in subgraph.edges

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -11,6 +10,8 @@ from modules.predictions.application.experiment_tracking_service import (
     ExperimentTrackingService,
     InvalidExperimentDecisionError,
 )
+from modules.predictions.domain.ml_value_objects import MLAlgorithm, MLFramework
+from modules.predictions.domain.model_selection import CandidateSpec, ModelSelectionResult
 from modules.predictions.domain.validation import (
     CrossValidationResult,
     FoldResult,
@@ -20,31 +21,6 @@ from modules.predictions.domain.validation import (
     ValidationStrategy,
 )
 from modules.predictions.domain.value_objects import MarketId
-
-
-@dataclass
-class _InMemoryExperimentRepository:
-    store: dict = field(default_factory=dict)
-
-    async def get(self, experiment_id):
-        return self.store.get(experiment_id)
-
-    async def record(self, experiment):
-        self.store[experiment.id] = experiment
-        return experiment
-
-    async def update(self, experiment):
-        self.store[experiment.id] = experiment
-        return experiment
-
-    async def list_by_market(self, market_id, limit=50):
-        matches = [e for e in self.store.values() if e.market_id == market_id]
-        return matches[:limit]
-
-
-@pytest.fixture
-def experiment_repo():
-    return _InMemoryExperimentRepository()
 
 
 @pytest.fixture
@@ -106,6 +82,50 @@ class TestCompare:
 
         assert len(results) == 1
         assert results[0].market_id == market_id
+
+
+class TestRecordModelSelection:
+    async def test_persists_every_non_skipped_candidates_score_not_just_the_winners(self, service, market_id, now):
+        """Statistical-baseline charter audit fix: a losing baseline's score must survive in the
+        persisted `Experiment`, not just the winner's — this is what makes "did ML actually beat
+        the baseline" reconstructable later."""
+        winner = CandidateSpec(MLAlgorithm.RANDOM_FOREST, MLFramework.SKLEARN)
+        baseline = CandidateSpec(MLAlgorithm.RIDGE, MLFramework.SKLEARN, is_baseline=True)
+        skipped = CandidateSpec(MLAlgorithm.GAUSSIAN_NB, MLFramework.SKLEARN)
+
+        result = ModelSelectionResult(
+            winning_candidate=winner,
+            winning_model=object(),
+            ranking_metric="mae",
+            ranking_value=0.5,
+            all_candidates=(winner, baseline, skipped),
+            skipped_candidates=((skipped, "unsupported for target type"),),
+            candidate_scores=((winner, 0.5), (baseline, 0.9)),
+        )
+
+        experiment = await service.record_model_selection(market_id, result, now)
+
+        assert experiment.metrics["ranking.mae"] == 0.5
+        assert experiment.metrics["candidate.random_forest"] == 0.5
+        assert experiment.metrics["candidate.ridge"] == 0.9
+        assert "candidate.gaussian_nb" not in experiment.metrics
+        assert experiment.config["baseline_candidates"] == ["ridge"]
+        assert experiment.config["winner_is_baseline"] is False
+
+    async def test_flags_when_the_baseline_itself_wins(self, service, market_id, now):
+        baseline = CandidateSpec(MLAlgorithm.POISSON_GLM, MLFramework.SKLEARN, is_baseline=True)
+        result = ModelSelectionResult(
+            winning_candidate=baseline,
+            winning_model=object(),
+            ranking_metric="mae",
+            ranking_value=0.3,
+            all_candidates=(baseline,),
+            candidate_scores=((baseline, 0.3),),
+        )
+
+        experiment = await service.record_model_selection(market_id, result, now)
+
+        assert experiment.config["winner_is_baseline"] is True
 
 
 class TestDecide:

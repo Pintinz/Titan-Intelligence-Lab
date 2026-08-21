@@ -13,6 +13,7 @@ from modules.sports.infrastructure.providers.api_sports_adapter import (
     ApiBaseballAdapter,
     ApiBasketballAdapter,
     ApiFootballAdapter,
+    ProviderErrorKind,
     ProviderRequestError,
 )
 
@@ -55,6 +56,13 @@ def football_adapter():
                         "fixture": {"id": 100, "date": "2026-08-01T15:00:00+00:00", "venue": {"name": "Emirates"}},
                         "teams": {"home": {"id": 42}, "away": {"id": 43}},
                         "league": {"id": 39, "season": 2026},
+                        "goals": {"home": 2, "away": 1},
+                        "score": {
+                            "halftime": {"home": 1, "away": 0},
+                            "fulltime": {"home": 2, "away": 1},
+                            "extratime": {"home": None, "away": None},
+                            "penalty": {"home": None, "away": None},
+                        },
                     }
                 ]
             })
@@ -153,6 +161,35 @@ async def test_football_fetch_fixtures(football_adapter):
     assert fixtures[0].away_team_ref.external_id == "43"
     assert fixtures[0].competition_ref == "39"
     assert fixtures[0].season_label == "2026"
+    assert fixtures[0].home_score == 2
+    assert fixtures[0].away_score == 1
+    assert fixtures[0].period_scores == {"kind": "half", "home": [1], "away": [0]}
+
+
+@pytest.mark.asyncio
+async def test_football_fetch_fixtures_no_period_scores_before_halftime():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/fixtures"
+        return _json_response({
+            "response": [
+                {
+                    "fixture": {"id": 101, "date": "2026-08-01T15:00:00+00:00"},
+                    "teams": {"home": {"id": 42}, "away": {"id": 43}},
+                    "league": {"id": 39, "season": 2026},
+                    "goals": {"home": None, "away": None},
+                    "score": {
+                        "halftime": {"home": None, "away": None},
+                        "fulltime": {"home": None, "away": None},
+                    },
+                }
+            ]
+        })
+
+    adapter = ApiFootballAdapter(get_api_key=_get_key, client=_client_for(handler))
+
+    fixtures = await adapter.fetch_fixtures("39", "2026", NOW)
+
+    assert fixtures[0].period_scores is None
 
 
 @pytest.mark.asyncio
@@ -261,6 +298,94 @@ async def test_football_request_error_surfaces_api_level_errors():
 
     with pytest.raises(ProviderRequestError, match="Free plans do not have access"):
         await adapter.fetch_fixtures("39", "2025", NOW)
+
+
+# -- Retry-safety classification (POST-M24 Phase 2) --------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_5xx_response_classified_transient_and_retryable():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="service unavailable")
+
+    adapter = ApiFootballAdapter(get_api_key=_get_key, client=_client_for(handler))
+
+    with pytest.raises(ProviderRequestError) as excinfo:
+        await adapter.fetch_teams("39")
+    assert excinfo.value.kind is ProviderErrorKind.TRANSIENT
+
+
+@pytest.mark.asyncio
+async def test_429_response_classified_rate_limited_with_retry_after():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, text="too many requests", headers={"Retry-After": "7"})
+
+    adapter = ApiFootballAdapter(get_api_key=_get_key, client=_client_for(handler))
+
+    with pytest.raises(ProviderRequestError) as excinfo:
+        await adapter.fetch_teams("39")
+    assert excinfo.value.kind is ProviderErrorKind.RATE_LIMITED
+    assert excinfo.value.retry_after_seconds == 7.0
+
+
+@pytest.mark.asyncio
+async def test_401_response_classified_auth_not_retryable():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, text="invalid api key")
+
+    adapter = ApiFootballAdapter(get_api_key=_get_key, client=_client_for(handler))
+
+    with pytest.raises(ProviderRequestError) as excinfo:
+        await adapter.fetch_teams("39")
+    assert excinfo.value.kind is ProviderErrorKind.AUTH
+
+
+@pytest.mark.asyncio
+async def test_404_response_classified_permanent_not_retryable():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="not found")
+
+    adapter = ApiFootballAdapter(get_api_key=_get_key, client=_client_for(handler))
+
+    with pytest.raises(ProviderRequestError) as excinfo:
+        await adapter.fetch_teams("39")
+    assert excinfo.value.kind is ProviderErrorKind.PERMANENT
+
+
+@pytest.mark.asyncio
+async def test_network_error_classified_network_and_retryable():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    adapter = ApiFootballAdapter(get_api_key=_get_key, client=_client_for(handler))
+
+    with pytest.raises(ProviderRequestError) as excinfo:
+        await adapter.fetch_teams("39")
+    assert excinfo.value.kind is ProviderErrorKind.NETWORK
+
+
+@pytest.mark.asyncio
+async def test_in_body_rate_limit_error_classified_rate_limited():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response({"response": [], "errors": {"requests": "Too many requests, rate limit exceeded."}})
+
+    adapter = ApiFootballAdapter(get_api_key=_get_key, client=_client_for(handler))
+
+    with pytest.raises(ProviderRequestError) as excinfo:
+        await adapter.fetch_fixtures("39", "2025", NOW)
+    assert excinfo.value.kind is ProviderErrorKind.RATE_LIMITED
+
+
+@pytest.mark.asyncio
+async def test_in_body_plan_error_classified_permanent():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response({"response": [], "errors": {"plan": "Free plans do not have access to this season."}})
+
+    adapter = ApiFootballAdapter(get_api_key=_get_key, client=_client_for(handler))
+
+    with pytest.raises(ProviderRequestError) as excinfo:
+        await adapter.fetch_fixtures("39", "2025", NOW)
+    assert excinfo.value.kind is ProviderErrorKind.PERMANENT
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,7 @@ import pytest
 
 from modules.predictions.domain.value_objects import ModelId
 from modules.predictions.infrastructure.calibration.platt_scaling_calibrator import PlattScalingCalibrator
+from modules.predictions.infrastructure.persistence.repositories import SqlAlchemyCalibrationParametersRepository
 
 
 @pytest.fixture
@@ -86,3 +87,51 @@ async def test_calibration_is_per_model(model_id):
 
     assert fitted != pytest.approx(unfitted, abs=1e-3)
     assert unfitted == pytest.approx(0.9, abs=1e-4)
+
+
+# --- Phase 3 audit fix: cross-process durability via a real DB-backed repository -------------
+
+
+@pytest.mark.asyncio
+async def test_fit_persists_to_repository(model_id, sqlite_session):
+    repo = SqlAlchemyCalibrationParametersRepository(session=sqlite_session)
+    calibrator = PlattScalingCalibrator(repository=repo)
+    samples = [(0.9, True), (0.9, False)] * 25
+
+    await calibrator.fit(model_id, samples)
+    await sqlite_session.commit()
+
+    persisted = await repo.get(model_id)
+    assert persisted is not None
+    assert persisted.sample_count == 50
+    assert persisted.a != 1.0 or persisted.b != 0.0  # actually fitted, not the identity default
+
+
+@pytest.mark.asyncio
+async def test_calibrate_reads_through_repository_on_cache_miss(model_id, sqlite_session):
+    """The exact bug this fix closes: a `fit()` in one process (simulated here by a first
+    `PlattScalingCalibrator` instance) must reach `calibrate()` in a completely separate instance
+    with its own empty in-memory `_params` cache (simulating a different OS process) — proving a
+    fit reaches every process via the shared DB-backed repository, not just the process that ran
+    it."""
+    fitting_instance = PlattScalingCalibrator(repository=SqlAlchemyCalibrationParametersRepository(session=sqlite_session))
+    samples = [(0.95, True)] * 25 + [(0.05, False)] * 25
+    await fitting_instance.fit(model_id, samples)
+    await sqlite_session.commit()
+
+    serving_instance = PlattScalingCalibrator(repository=SqlAlchemyCalibrationParametersRepository(session=sqlite_session))
+    calibrated_high = await serving_instance.calibrate(model_id, 0.95)
+    calibrated_low = await serving_instance.calibrate(model_id, 0.05)
+
+    # If the fit never reached this instance, both would fall back to the identity default.
+    assert calibrated_high > 0.9
+    assert calibrated_low < 0.1
+
+
+@pytest.mark.asyncio
+async def test_calibrate_falls_back_to_identity_when_repository_has_no_row(model_id, sqlite_session):
+    calibrator = PlattScalingCalibrator(repository=SqlAlchemyCalibrationParametersRepository(session=sqlite_session))
+
+    calibrated = await calibrator.calibrate(model_id, 0.7)
+
+    assert calibrated == pytest.approx(0.7, abs=1e-4)

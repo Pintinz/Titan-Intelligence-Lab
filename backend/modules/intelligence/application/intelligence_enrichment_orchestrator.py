@@ -101,7 +101,25 @@ class IntelligenceEnrichmentOrchestrator:
         confidence tier and point-in-time provenance, scores real-world impact, and publishes
         every Feature Store entry that can be honestly derived from it — gated on
         `NewsEvent.is_feature_eligible()`. Returns the recorded `ImpactScore`s (empty if the
-        article named no extractable event)."""
+        article named no extractable event).
+
+        POST-M24 Phase 2: `NewsIngestionService`'s content-hash dedup already stops the same
+        article from being *ingested* twice, so this normally only ever runs once per article —
+        but nothing previously stopped a second call to `enrich_article` for the same
+        already-ingested article (an overlapping backfill/scheduled run, a retry after a partial
+        failure downstream) from re-extracting via Gemini. Reuses this article's canonical
+        identity (`NewsEvent.article_id`, already indexed) rather than inventing a second
+        content-hash/dedup mechanism: if events already exist for this article, skip the Gemini
+        call AND the classify/score/publish pipeline entirely, returning the already-recorded
+        `ImpactScore`s instead — `ImpactScoreRepositoryPort.record` is insert-only (one row per
+        `news_event_id`, enforced by a unique constraint), so re-running `_classify_and_persist`/
+        `news_impact.score` a second time for an already-scored event would violate it, not
+        harmlessly recompute the same values."""
+        events = await self.events.list_for_article(article.id)
+        if events:
+            recorded = [await self.news_impact.impact_scores.get_for_event(event.id) for event in events]
+            return [score for score in recorded if score is not None]
+
         events = await self.event_extraction.extract_and_record(
             article.raw_text, article.source_id, article.id, article.published_at, now
         )

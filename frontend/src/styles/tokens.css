@@ -9,12 +9,14 @@
   explicit opt-in. Toggled via `data-theme` on <html> (src/stores/theme-store.ts) — never
   `prefers-color-scheme` alone, since dark stays default regardless of OS theme.
 
-  Signature-color discipline: `--color-accent-primary` (signal teal) is the ONE brand hue used
-  for every interactive element AND for high-confidence intelligence — Bloomberg/F1 both build
-  identity from a single livery color, not a chrome-blue plus a separate "smart" color. Amber
-  marks medium confidence/warning. Violet is reserved and rare — peak-confidence and premium-tier
-  moments only. Crimson (`--color-live`) is reserved and rare in the other direction — live/alert
-  status only, never confidence, never everyday error UI (that stays a calmer `--color-danger`).
+  Signature-color discipline: `--color-accent-primary` (signal blue) is the ONE brand hue used
+  for every interactive element. Confidence intelligence deliberately does NOT share this hue —
+  `--color-confidence-high` reuses `--color-semantic-success` instead, so "high confidence" reads
+  as the universal green-means-good convention regardless of what the brand accent happens to be.
+  Amber marks medium confidence/warning. Violet is reserved and rare — peak-confidence and
+  premium-tier moments only. Crimson (`--color-live`) is reserved and rare in the other direction —
+  live/alert status only, never confidence, never everyday error UI (that stays a calmer
+  `--color-danger`).
 */
 
 :root,
@@ -34,11 +36,11 @@
   --color-text-muted: #5b6577;
   --color-text-inverse: #06080d;
 
-  /* color.accent.* — signal teal is the one brand/interactive hue; amber is the secondary
+  /* color.accent.* — signal blue is the one brand/interactive hue; amber is the secondary
      (premium surface fills, medium-confidence, warning) */
-  --color-accent-primary: #17e6b8;
-  --color-accent-primary-hover: #3eecc4;
-  --color-accent-primary-muted: rgba(23, 230, 184, 0.16);
+  --color-accent-primary: #18a3ff;
+  --color-accent-primary-hover: #4fc2ff;
+  --color-accent-primary-muted: rgba(24, 163, 255, 0.16);
   --color-accent-secondary: #f2b134;
   --color-accent-secondary-muted: rgba(242, 177, 52, 0.16);
 
@@ -62,10 +64,11 @@
   --color-semantic-info: #4f9fd9;
   --color-semantic-info-muted: rgba(79, 159, 217, 0.14);
 
-  /* color.confidence.* — a reliability signal, deliberately distinct from semantic success/danger.
-     High confidence IS the brand teal (the signature ConfidenceTelemetry component uses this
-     scale everywhere confidence appears, not just landing). */
-  --color-confidence-high: #17e6b8;
+  /* color.confidence.* — a reliability signal, deliberately distinct from the brand accent.
+     High confidence reuses semantic success green (the signature ConfidenceTelemetry component
+     uses this scale everywhere confidence appears, not just landing) — green-means-good stays
+     true regardless of what --color-accent-primary is. */
+  --color-confidence-high: var(--color-semantic-success);
   --color-confidence-medium: #f2b134;
   --color-confidence-low: #5b6577;
 
@@ -88,7 +91,7 @@
     var(--color-accent-primary-muted) 0%,
     var(--color-premium-muted) 100%
   );
-  --gradient-mesh-hero: radial-gradient(at 20% 20%, rgba(23, 230, 184, 0.22) 0px, transparent 50%),
+  --gradient-mesh-hero: radial-gradient(at 20% 20%, rgba(24, 163, 255, 0.22) 0px, transparent 50%),
     radial-gradient(at 80% 0%, rgba(155, 140, 255, 0.16) 0px, transparent 50%),
     radial-gradient(at 50% 100%, rgba(242, 177, 52, 0.12) 0px, transparent 50%);
   --gradient-confidence-high: linear-gradient(90deg, var(--color-confidence-high), transparent);
@@ -108,11 +111,11 @@
   --color-text-muted: #717983;
   --color-text-inverse: #ffffff;
 
-  /* Darker/more saturated teal for AA contrast on white — same pattern as every other accent
+  /* Darker/more saturated blue for AA contrast on white — same pattern as every other accent
      below: light mode always deepens the hue rather than reusing the dark-mode value verbatim. */
-  --color-accent-primary: #0e8f72;
-  --color-accent-primary-hover: #0b7660;
-  --color-accent-primary-muted: rgba(14, 143, 114, 0.1);
+  --color-accent-primary: #0b6fc7;
+  --color-accent-primary-hover: #0958a0;
+  --color-accent-primary-muted: rgba(11, 111, 199, 0.1);
   --color-accent-secondary: #a06f10;
   --color-accent-secondary-muted: rgba(160, 111, 16, 0.1);
 
@@ -131,7 +134,7 @@
   --color-semantic-info: #2d7fb3;
   --color-semantic-info-muted: rgba(45, 127, 179, 0.1);
 
-  --color-confidence-high: #0e8f72;
+  --color-confidence-high: var(--color-semantic-success);
   --color-confidence-medium: #a06f10;
   --color-confidence-low: #717983;
 
@@ -149,7 +152,7 @@
     var(--color-accent-primary-muted) 0%,
     var(--color-premium-muted) 100%
   );
-  --gradient-mesh-hero: radial-gradient(at 20% 20%, rgba(14, 143, 114, 0.1) 0px, transparent 50%),
+  --gradient-mesh-hero: radial-gradient(at 20% 20%, rgba(11, 111, 199, 0.1) 0px, transparent 50%),
     radial-gradient(at 80% 0%, rgba(106, 88, 224, 0.08) 0px, transparent 50%),
     radial-gradient(at 50% 100%, rgba(160, 111, 16, 0.08) 0px, transparent 50%);
   --gradient-confidence-high: linear-gradient(90deg, var(--color-confidence-high), transparent);
@@ -173,9 +176,9 @@
   --color-text-muted: #b8b8b8;
   --color-text-inverse: #000000;
 
-  --color-accent-primary: #4df0ce;
-  --color-accent-primary-hover: #75f4d9;
-  --color-accent-primary-muted: rgba(77, 240, 206, 0.28);
+  --color-accent-primary: #5cc4ff;
+  --color-accent-primary-hover: #8ad6ff;
+  --color-accent-primary-muted: rgba(92, 196, 255, 0.28);
   --color-accent-secondary: #ffcf6b;
   --color-accent-secondary-muted: rgba(255, 207, 107, 0.28);
 
@@ -194,7 +197,7 @@
   --color-semantic-info: #7ec4ff;
   --color-semantic-info-muted: rgba(126, 196, 255, 0.22);
 
-  --color-confidence-high: #4df0ce;
+  --color-confidence-high: var(--color-semantic-success);
   --color-confidence-medium: #ffcf6b;
   --color-confidence-low: #b8b8b8;
 

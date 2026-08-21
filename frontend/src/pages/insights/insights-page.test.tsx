@@ -83,6 +83,7 @@ function makePrediction(id: string, value: string, confidence: number): Predicti
     probability_distribution: { [value]: confidence },
     confidence_interval: null,
     expected_error: null,
+    contextual_review: null,
   }
 }
 

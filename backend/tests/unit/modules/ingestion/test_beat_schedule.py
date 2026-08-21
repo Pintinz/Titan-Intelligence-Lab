@@ -34,6 +34,7 @@ def test_beat_schedule_entries_reference_registered_task_names():
     from modules.admin.infrastructure.celery import tasks as admin_tasks  # noqa: F401 — ensures admin.* tasks are registered
     from modules.ingestion.infrastructure.celery import tasks  # noqa: F401 — ensures ingestion.* tasks are registered
     from modules.ingestion.infrastructure.celery.celery_app import celery_app
+    from modules.intelligence.infrastructure.celery import tasks as intelligence_tasks  # noqa: F401 — ensures intelligence.* tasks are registered
     from modules.predictions.infrastructure.celery import tasks as predictions_tasks  # noqa: F401 — ensures predictions.* tasks are registered
 
     for entry in BEAT_SCHEDULE.values():

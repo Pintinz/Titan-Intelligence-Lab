@@ -5,7 +5,10 @@ from datetime import datetime, timezone
 import pytest
 
 from modules.features.domain.value_objects import FeatureKey
-from modules.predictions.application.windowed_feature_engineering_service import basketball_form_calculator
+from modules.predictions.application.windowed_feature_engineering_service import (
+    basketball_fixture_form_differential_calculator,
+    basketball_form_calculator,
+)
 from modules.predictions.basketball.market_seeding import MARKETS, SINGLE_RECORD_FEATURES, BasketballMarketSeeder
 from modules.predictions.domain.value_objects import MarketStatus
 
@@ -19,6 +22,7 @@ def seeder(registration, store, market_registry, mapping_service, team_statistic
         markets=market_registry,
         mappings=mapping_service,
         windowed_calculator=basketball_form_calculator(registration, store, team_statistics_repo),
+        differential_calculator=basketball_fixture_form_differential_calculator(registration, store, team_statistics_repo),
     )
 
 

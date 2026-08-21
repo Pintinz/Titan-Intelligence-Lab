@@ -161,6 +161,14 @@ export default function MatchReviewPage() {
   if (fixtureQuery.isError) return <ErrorState error={fixtureQuery.error} onRetry={() => void fixtureQuery.refetch()} />
 
   const fixture = fixtureQuery.data!
+
+  // Some fixtures reference a team_id the backend can no longer resolve (e.g. after a team
+  // merge) and serialize home_team/away_team as null despite the DTO's non-null type — show an
+  // honest error rather than crashing on every downstream .name/.id/.logo_url access below.
+  if (!fixture.home_team || !fixture.away_team) {
+    return <ErrorState error={new Error('Team data is unavailable for this match.')} />
+  }
+
   const { homeScore, awayScore } = fixtureScores(fixture.final_state)
   const homeTeam: TeamRef = { name: fixture.home_team.name, logoUrl: fixture.home_team.logo_url }
   const awayTeam: TeamRef = { name: fixture.away_team.name, logoUrl: fixture.away_team.logo_url }

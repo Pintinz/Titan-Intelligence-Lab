@@ -42,6 +42,18 @@ def _regression_samples(n: int = 60) -> list[TrainingSample]:
     return samples
 
 
+def _count_regression_samples(n: int = 60) -> list[TrainingSample]:
+    """Non-negative, count-shaped labels — `PoissonRegressor`/`TweedieRegressor` (power in (1,2))
+    require `y >= 0`, unlike `_regression_samples()`'s signed labels."""
+    samples = []
+    for i in range(n):
+        x1 = float(i % 10)
+        x2 = float((i * 2) % 10)
+        label = max(0.0, round(0.5 * x1 + 0.3 * x2))
+        samples.append(TrainingSample(features={"x1": x1, "x2": x2}, label=label))
+    return samples
+
+
 MULTICLASS_LABELS = ("LOW", "MID", "HIGH")
 
 
@@ -321,3 +333,51 @@ class TestSklearnAdapter:
         result = adapter.predict_one({"x1": -4.0, "x2": 0.0})
         assert result.value == "LOW"
         assert sum(result.distribution.values()) == pytest.approx(1.0, abs=1e-6)
+
+
+STATISTICAL_BASELINE_ALGORITHMS = [MLAlgorithm.POISSON_GLM, MLAlgorithm.TWEEDIE_GLM]
+
+
+@pytest.mark.parametrize("algorithm", STATISTICAL_BASELINE_ALGORITHMS)
+class TestStatisticalBaselineAdapters:
+    """Poisson/Tweedie GLMs (statistical-baseline charter) — regression-only count models, added
+    to `SklearnAdapter`'s existing dispatch rather than a new adapter class."""
+
+    async def test_regression_fit_predict(self, algorithm):
+        adapter = SklearnAdapter(algorithm=algorithm, target_type=TargetType.REGRESSION)
+        metrics = await adapter.fit(_count_regression_samples())
+        assert metrics.sample_count == 60
+        assert adapter.is_fitted()
+
+        result = adapter.predict_one({"x1": 8.0, "x2": 8.0})
+        assert isinstance(result.raw_score, float)
+        # PoissonRegressor/TweedieRegressor(power in (1,2)) always predict a non-negative mean.
+        assert result.raw_score >= 0.0
+
+    async def test_has_no_classification_form(self, algorithm):
+        adapter = SklearnAdapter(algorithm=algorithm, target_type=TargetType.CLASSIFICATION)
+        with pytest.raises(UnsupportedAlgorithmForTargetTypeError):
+            await adapter.fit(_classification_samples())
+
+    async def test_fit_rejects_insufficient_samples(self, algorithm):
+        adapter = SklearnAdapter(algorithm=algorithm, target_type=TargetType.REGRESSION)
+        with pytest.raises(InsufficientTrainingDataError):
+            await adapter.fit(_count_regression_samples(n=5))
+
+    async def test_feature_importance_via_coef(self, algorithm):
+        adapter = SklearnAdapter(algorithm=algorithm, target_type=TargetType.REGRESSION)
+        await adapter.fit(_count_regression_samples())
+        importance = adapter.feature_importance()
+        assert set(importance.keys()) == {"x1", "x2"}
+        assert sum(importance.values()) == pytest.approx(1.0, abs=1e-6)
+
+    async def test_serialize_roundtrip(self, algorithm):
+        adapter = SklearnAdapter(algorithm=algorithm, target_type=TargetType.REGRESSION)
+        await adapter.fit(_count_regression_samples())
+        original = adapter.predict_one({"x1": 8.0, "x2": 8.0})
+
+        restored = SklearnAdapter()
+        restored.deserialize(adapter.serialize())
+        assert restored.algorithm is algorithm
+        again = restored.predict_one({"x1": 8.0, "x2": 8.0})
+        assert again.raw_score == pytest.approx(original.raw_score)

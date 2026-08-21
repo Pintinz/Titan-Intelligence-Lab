@@ -5,6 +5,7 @@ import pytest
 
 from modules.features.application.feature_quality_engine import FeatureNotFoundError, FeatureQualityEngine
 from modules.features.domain.entities import FeatureDefinition, FeatureValue
+from modules.features.domain.freshness import FreshnessStatus
 from modules.features.domain.value_objects import (
     EntityType,
     FeatureCategory,
@@ -166,6 +167,7 @@ async def test_freshness_score_full_within_ttl(engine, definition_repo, value_re
     snapshot = await engine.quality_snapshot(KEY.value, T0 + timedelta(minutes=30))
 
     assert snapshot.freshness_score == pytest.approx(100.0)
+    assert snapshot.freshness_status is FreshnessStatus.CURRENT
 
 
 @pytest.mark.asyncio
@@ -178,6 +180,7 @@ async def test_freshness_score_decays_after_ttl(engine, definition_repo, value_r
 
     assert 0 < snapshot.freshness_score < 100
     assert snapshot.freshness_score == pytest.approx(50.0, abs=1.0)
+    assert snapshot.freshness_status is FreshnessStatus.STALE
 
 
 @pytest.mark.asyncio
@@ -188,6 +191,17 @@ async def test_freshness_score_zero_when_very_stale(engine, definition_repo, val
     snapshot = await engine.quality_snapshot(KEY.value, T0 + timedelta(hours=10))
 
     assert snapshot.freshness_score == pytest.approx(0.0)
+    assert snapshot.freshness_status is FreshnessStatus.STALE  # a real (decayed) observation, not UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_freshness_status_is_unknown_when_no_values_exist(engine, definition_repo):
+    await definition_repo.upsert(_definition(online_ttl_seconds=3600))
+
+    snapshot = await engine.quality_snapshot(KEY.value, T0)
+
+    assert snapshot.freshness_score is None
+    assert snapshot.freshness_status is FreshnessStatus.UNKNOWN
 
 
 @pytest.mark.asyncio

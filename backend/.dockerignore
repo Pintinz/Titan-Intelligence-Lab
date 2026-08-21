@@ -1,0 +1,27 @@
+# Never bake local dev state into the image — dev.db alone is 170MB+ with a dozen timestamped
+# backups sitting next to it (Production Readiness Audit §9: no .dockerignore existed at all).
+dev.db
+dev.db.bak*
+dev.db-shm
+dev.db-wal
+celerybeat-schedule*
+.model_artifacts/
+.data_imports/
+catboost_info/
+.coverage
+.pytest_cache/
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Secrets — never shipped in an image layer, always injected at deploy time.
+.env
+.env.*
+!.env.example
+
+# Not needed at runtime.
+tests/
+docs/
+.git/
+.gitignore
