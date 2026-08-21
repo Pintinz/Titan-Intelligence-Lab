@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import Pool
@@ -24,6 +25,21 @@ class DatabaseSettings(BaseSettings):
     # transparently recycled, Production Readiness Audit §1). SQLite has no server-side connection
     # to go stale, so this only applies on the Postgres branch below.
     max_overflow: int = 5
+
+    @field_validator("url")
+    @classmethod
+    def _use_asyncpg_driver(cls, value: str) -> str:
+        """Every managed-Postgres provider (Render included) hands out a plain `postgresql://` or
+        `postgres://` connection string — psycopg2-flavored, the sync-driver default — but this
+        app is built entirely on SQLAlchemy's async engine, which needs `postgresql+asyncpg://`
+        explicitly. Rewriting it here means pasting a provider's connection string straight into
+        TITANIQ_DB_URL just works, instead of silently trying to load a sync driver this app
+        never installs and failing at engine-creation time with a confusing DBAPI import error."""
+        if value.startswith("postgres://"):
+            return "postgresql+asyncpg://" + value[len("postgres://") :]
+        if value.startswith("postgresql://"):
+            return "postgresql+asyncpg://" + value[len("postgresql://") :]
+        return value
 
 
 @lru_cache
