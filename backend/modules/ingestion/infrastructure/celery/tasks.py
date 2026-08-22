@@ -244,6 +244,24 @@ def sync_team_statistics_task(
     return _run_summary(asyncio.run(_do()))
 
 
+@celery_app.task(name="ingestion.sync_players_for_competition", bind=True, **_RETRY_KWARGS)
+@_logged("ingestion.sync_players_for_competition")
+def sync_players_for_competition_task(
+    self, sport_code: str, season_id_str: str, now_iso: str | None = None
+) -> list[dict | None]:
+    """Premier League data-enrichment audit (2026-08-22) — the missing Celery entry point for
+    `SyncOrchestrator.sync_players_for_competition` (see that method's own docstring for why it
+    didn't have one)."""
+    async def _do():
+        async with _get_orchestrator() as orchestrator:
+            return await orchestrator.sync_players_for_competition(
+                sport_code, SeasonId(UUID(season_id_str)), _resolve_now(now_iso)
+            )
+
+    runs = asyncio.run(_do())
+    return [_run_summary(r) for r in runs]
+
+
 @celery_app.task(name="ingestion.sync_upcoming_structured_intelligence", bind=True, **_RETRY_KWARGS)
 @_logged("ingestion.sync_upcoming_structured_intelligence")
 def sync_upcoming_structured_intelligence_task(

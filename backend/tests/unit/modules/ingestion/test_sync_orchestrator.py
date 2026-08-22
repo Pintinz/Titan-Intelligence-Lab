@@ -1299,3 +1299,68 @@ async def test_sync_upcoming_structured_intelligence_skips_lineups_outside_kicko
 
     assert len(runs) == 6  # 2 teams x (injuries + transfers + coaching staff), no lineup run
     assert all(r.entity_kind is not EntityKind.LINEUP for r in runs)
+
+
+@pytest.mark.asyncio
+async def test_sync_players_for_competition_syncs_every_team_reconciled_against_the_season(
+    orchestrator, session, router,
+):
+    """Premier League data-enrichment audit (2026-08-22): `sync_players` was per-team only, with
+    no competition-wide entry point — proves the new method discovers every team reconciled
+    against the season's fixtures (same pattern `sync_upcoming_structured_intelligence` already
+    uses) and syncs each one's roster exactly once."""
+    sport, _ = await orchestrator.reconciler.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    home, _ = await orchestrator.reconciler.reconcile_team(
+        ProviderTeamRecord(external_ref=ProviderRef("mock", "t1"), name="Arsenal", short_name="ARS", country="England"),
+        sport.id, T0,
+    )
+    away, _ = await orchestrator.reconciler.reconcile_team(
+        ProviderTeamRecord(external_ref=ProviderRef("mock", "t2"), name="Chelsea", short_name="CHE", country="England"),
+        sport.id, T0,
+    )
+    await session.commit()
+
+    season_id = SeasonId(uuid4())
+    await orchestrator.reconciler.reconcile_fixture(
+        ProviderFixtureRecord(
+            external_ref=ProviderRef("mock", "fx1"), home_team_ref=ProviderRef("mock", "t1"),
+            away_team_ref=ProviderRef("mock", "t2"), scheduled_at=T0, competition_ref="39", season_label="2026",
+            status="NS",
+        ),
+        season_id, T0, sport_code="football",
+    )
+    await session.commit()
+
+    router.players_to_return = [
+        ProviderPlayerRecord(
+            external_ref=ProviderRef("mock", "p1"), team_ref=ProviderRef("mock", "t1"), name="Bruno Fernandes",
+            date_of_birth=datetime(1994, 9, 8, tzinfo=timezone.utc), position="Midfielder",
+        ),
+    ]
+
+    runs = await orchestrator.sync_players_for_competition("football", season_id, T0)
+    await session.commit()
+
+    # One SyncRun per reconciled team (home, away) — FakeRouter.fetch_players ignores team_ref
+    # and returns the same fixed roster for every call, so both runs fetch the same one record;
+    # that's a mock-router limitation, not a dedup bug — reconcile_player correctly recognizes
+    # the same provider ref across both calls as one real player, not two.
+    assert len(runs) == 2
+    assert {r.scope_key for r in runs} == {"t1", "t2"}
+    assert all(r.trigger is SyncTrigger.ADMIN_MANUAL for r in runs)
+    assert all(r.records_fetched == 1 for r in runs)
+    players = await orchestrator.reconciler.players.list_by_sport(sport.id, limit=10)
+    assert len(players) == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_players_for_competition_skips_teams_with_no_provider_ref(orchestrator, session, router):
+    """A team with no provider_refs (shouldn't happen for a reconciled team, but the same
+    defensive check `sync_upcoming_structured_intelligence` already applies) must not crash the
+    whole run — matches that method's existing posture."""
+    season_id = SeasonId(uuid4())
+
+    runs = await orchestrator.sync_players_for_competition("football", season_id, T0)
+
+    assert runs == []

@@ -69,6 +69,10 @@ class FakeOrchestrator:
         self.calls.append(("sync_team_statistics_for_fixture", sport_code, fixture_ref, fixture_id))
         return self._respond()
 
+    async def sync_players_for_competition(self, sport_code, season_id, now):
+        self.calls.append(("sync_players_for_competition", sport_code, season_id))
+        return [self._respond()] if self.run_to_return or self.raise_error else []
+
     def _respond(self):
         if self.raise_error:
             raise self.raise_error
@@ -172,6 +176,20 @@ def test_sync_standings_alt_task_calls_orchestrator(fake_orchestrator):
     assert fake_orchestrator.calls[0][4] == season_id
 
 
+def test_sync_players_for_competition_task_calls_orchestrator(fake_orchestrator):
+    """Premier League data-enrichment audit (2026-08-22) — the missing Celery entry point for
+    the competition-wide player roster sync (see SyncOrchestrator.sync_players_for_competition's
+    own docstring for the gap this closes)."""
+    season_id = SeasonId(uuid4())
+
+    result = tasks_module.sync_players_for_competition_task.delay("football", str(season_id.value), T0.isoformat())
+
+    summaries = result.get()
+    assert len(summaries) == 1
+    assert summaries[0]["status"] == "succeeded"
+    assert fake_orchestrator.calls[0] == ("sync_players_for_competition", "football", season_id)
+
+
 def test_sync_odds_task_calls_orchestrator_with_reconstructed_provider_ref(fake_orchestrator):
     result = tasks_module.sync_odds_task.delay("football", "mock", "fx1", "fixture-id-1", T0.isoformat())
 
@@ -225,7 +243,8 @@ def test_every_registered_task_routes_to_the_worker_consumed_default_queue():
         "ingestion.sync_live_fixtures", "ingestion.sync_standings", "ingestion.sync_standings_alt",
         "ingestion.sync_upcoming_fixtures", "ingestion.sync_completed_fixtures",
         "ingestion.sync_upcoming_structured_intelligence", "ingestion.sync_odds",
-        "ingestion.sync_team_statistics", "admin.check_all_provider_health",
+        "ingestion.sync_team_statistics", "ingestion.sync_players_for_competition",
+        "admin.check_all_provider_health",
         "intelligence.sync_scheduled_news", "predictions.check_scheduled_calibration",
         "predictions.check_scheduled_calibration_validation",
         "predictions.check_scheduled_retraining",
@@ -251,7 +270,8 @@ def test_no_task_carries_its_own_queue_override():
         "ingestion.sync_live_fixtures", "ingestion.sync_standings", "ingestion.sync_standings_alt",
         "ingestion.sync_upcoming_fixtures", "ingestion.sync_completed_fixtures",
         "ingestion.sync_upcoming_structured_intelligence", "ingestion.sync_odds",
-        "ingestion.sync_team_statistics", "admin.check_all_provider_health",
+        "ingestion.sync_team_statistics", "ingestion.sync_players_for_competition",
+        "admin.check_all_provider_health",
         "intelligence.sync_scheduled_news", "predictions.check_scheduled_calibration",
         "predictions.check_scheduled_calibration_validation",
         "predictions.check_scheduled_retraining",

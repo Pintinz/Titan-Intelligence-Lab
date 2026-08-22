@@ -552,6 +552,35 @@ class SyncOrchestrator:
             fetch=fetch, process_one=process_one, force=force,
         )
 
+    async def sync_players_for_competition(
+        self, sport_code: str, season_id, now: datetime, *,
+        trigger=SyncTrigger.ADMIN_MANUAL, low_priority: bool = True, force: bool = False,
+        season_label: str | None = None,
+    ) -> list[SyncRun]:
+        """Premier League data-enrichment audit (2026-08-22): `sync_players` is real and fully
+        built but per-team only (needs a `team_ref`) — there was no competition-wide entry point
+        to sync every team's roster in one call, so it had no independent Celery task/Beat
+        schedule of its own. Discovers teams the same way `sync_upcoming_structured_intelligence`
+        already does (every team reconciled against this season's fixtures), reusing that
+        team-discovery pattern rather than inventing a second one. Unlike that method, this looks
+        at every fixture in the season, not just an upcoming window — a full roster sync doesn't
+        have a kickoff-proximity reason to wait."""
+        fixtures = await self.reconciler.fixtures.list_by_season(season_id)
+        team_ids = {team_id for f in fixtures for team_id in (f.home_team_id, f.away_team_id)}
+
+        runs: list[SyncRun] = []
+        for team_id in team_ids:
+            team = await self.reconciler.teams.get(team_id)
+            if team is None or not team.provider_refs:
+                continue
+            run = await self.sync_players(
+                sport_code, team.provider_refs[0], now,
+                trigger=trigger, low_priority=low_priority, force=force, season_label=season_label,
+            )
+            if run is not None:
+                runs.append(run)
+        return runs
+
     async def sync_lineups(
         self, sport_code: str, fixture_ref: ProviderRef, fixture_id: str, now: datetime, *,
         trigger=SyncTrigger.ADMIN_MANUAL, low_priority: bool = True, force: bool = False,

@@ -94,6 +94,22 @@ BEAT_SCHEDULE = {
         "task": "ingestion.sync_standings", "schedule": timedelta(seconds=STANDINGS_INTERVAL_SECONDS),
         "args": ("football", "39", "2023", "21521495-4dd4-4c50-a41d-d88642322804"),
     },
+    # Premier League data-enrichment audit (2026-08-22) — real gap: `ingestion.sync_teams` (club
+    # roster sync) had no Beat entry for ANY sport/competition, not just EPL. Reuses the existing
+    # generic task rather than a PL-specific one, matching this file's own established convention
+    # (one Beat entry per competition, same task name across sports/competitions).
+    "sync-teams-football-epl": {
+        "task": "ingestion.sync_teams", "schedule": timedelta(seconds=HISTORICAL_IMPORT_INTERVAL_SECONDS),
+        "args": ("football", "39"),
+    },
+    # Premier League data-enrichment audit (2026-08-22) — real gap: `sync_players` existed but had
+    # no competition-wide entry point (see SyncOrchestrator.sync_players_for_competition's own
+    # docstring). Same cadence as the club roster sync above — player rosters change about as
+    # often as squads do, not worth a separate, faster interval.
+    "sync-players-football-epl": {
+        "task": "ingestion.sync_players_for_competition", "schedule": timedelta(seconds=HISTORICAL_IMPORT_INTERVAL_SECONDS),
+        "args": ("football", "21521495-4dd4-4c50-a41d-d88642322804"),
+    },
     "sync-live-fixtures-football-epl": {
         "task": "ingestion.sync_live_fixtures", "schedule": timedelta(seconds=LIVE_FIXTURES_INTERVAL_SECONDS),
         "args": ("football", "39", "2023", "21521495-4dd4-4c50-a41d-d88642322804"),
