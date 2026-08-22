@@ -24,7 +24,10 @@ export function InfinityAppShell() {
       <div className="flex min-w-0 flex-1 flex-col">
         <InfinityTopbar onOpenMobileNav={() => setMobileNavOpen(true)} />
         <main className="flex-1 overflow-y-auto">
-          <div className="mx-auto max-w-[1600px] p-4 lg:p-6">
+          {/* Mobile keeps only a few px of side margin (px-2) so cards/tables reach near the
+              screen edge instead of the old p-4 (16px) eating usable width on a 375px viewport —
+              lg:p-6 (desktop) is unchanged, it already had room to spare. */}
+          <div className="mx-auto max-w-[1600px] px-2 py-4 lg:p-6">
             <ErrorBoundary>
               <Outlet />
             </ErrorBoundary>
