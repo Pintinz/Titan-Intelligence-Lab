@@ -59,7 +59,10 @@ export function SportShell() {
 
   return (
     <div>
-      <div className="border-b border-border-subtle px-4 pt-5 lg:px-8">
+      {/* No horizontal padding here — InfinityAppShell's `main` (p-4 lg:p-6) already pads every
+          /app/* page; stacking a second px-4/lg:px-8 here doubled the mobile side margins
+          (32px wasted per side at 375px width) on every Sport Intelligence Center page. */}
+      <div className="border-b border-border-subtle pt-5">
         <p className="font-telemetry text-xs font-semibold uppercase tracking-[0.16em] text-accent-primary">
           Intelligence Center
         </p>
@@ -88,7 +91,7 @@ export function SportShell() {
           ))}
         </nav>
       </div>
-      <div className="p-4 lg:p-8">
+      <div className="pt-4 lg:pt-8">
         <Outlet />
       </div>
     </div>
