@@ -175,6 +175,13 @@ class Fixture:
     home_score: int | None = None
     away_score: int | None = None
     period_scores: dict | None = None
+    # Real-world provenance, not a duplicate of `provider_ref`'s per-mutation optimistic-lock
+    # bookkeeping: the last time this fixture was actually confirmed against a live provider
+    # sync (EntityReconciliationService.reconcile_fixture), so a caller can tell "current" from
+    # "hasn't been re-verified in a while" without inferring it from `updated_at` (which also
+    # bumps for unrelated administrative edits). `source_ids`/cross-provider identity already
+    # live in ProviderRefIndexModel (modules.ingestion) — not duplicated here.
+    last_verified_at: datetime | None = None
 
     def transition_to(self, target: FixtureStatus) -> "Fixture":
         if not is_valid_fixture_transition(self.status, target):
@@ -192,6 +199,7 @@ class Fixture:
             home_score=self.home_score,
             away_score=self.away_score,
             period_scores=self.period_scores,
+            last_verified_at=self.last_verified_at,
         )
 
 

@@ -75,6 +75,7 @@ from modules.predictions.application.outcome_resolution_service import OutcomeRe
 from modules.predictions.application.windowed_feature_engineering_service import (
     FixtureFormDifferentialCalculator,
     LineupContinuityCalculator,
+    RollingTeamStatAverageCalculator,
     TransferActivityCalculator,
 )
 from modules.sports.ports.provider_gateway import (
@@ -242,6 +243,12 @@ class EntityReconciliationService:
     # pairs above, one engine instance handles both sides — `compute_and_write` takes a `side`
     # parameter instead, since it needs to scan a full roster per call regardless of side).
     news_market_impact_engines: dict[str, NewsMarketImpactEngine] = field(default_factory=dict)
+    # Premier League data-enrichment audit (2026-08-22) — sport_code -> its
+    # RollingTeamStatAverageCalculator(s), same dict-by-sport-code shape as the fields above.
+    # Unlike form_differential_calculators (pre-match, fixture-keyed), these are TEAM-keyed and
+    # only recomputed post-match (see _recompute_team_form) — a team's own rolling last-N form
+    # only changes once one of their matches actually completes with a real score.
+    team_form_calculators: dict[str, tuple[RollingTeamStatAverageCalculator, ...]] = field(default_factory=dict)
 
     # -- shared helpers -----------------------------------------------------------------------
 
@@ -500,6 +507,7 @@ class EntityReconciliationService:
             home_score=existing.home_score if score_locked else (record.home_score if record.home_score is not None else (existing.home_score if existing else None)),
             away_score=existing.away_score if score_locked else (record.away_score if record.away_score is not None else (existing.away_score if existing else None)),
             period_scores=existing.period_scores if score_locked else (record.period_scores if record.period_scores is not None else (existing.period_scores if existing else None)),
+            last_verified_at=now,
         )
         saved = await self.fixtures.upsert(entity)
         await self._record_ref(record.external_ref.provider, record.external_ref.external_id, EntityKind.FIXTURE, str(saved.id.value))
@@ -514,6 +522,7 @@ class EntityReconciliationService:
             await self._notify_fixture_status_change(saved, home_id, away_id, now)
         if saved.status is FixtureStatus.COMPLETED and saved.home_score is not None and saved.away_score is not None:
             await self._resolve_prediction_outcomes(saved, now)
+            await self._recompute_team_form(saved, sport_code, now)
         await self._compute_form_differential(saved, sport_code, now)
         await self._compute_transfer_activity(saved, sport_code, now)
         await self._compute_news_market_impact(saved, sport_code, now)
@@ -564,6 +573,23 @@ class EntityReconciliationService:
         calculators = self.form_differential_calculators.get(sport_code, ())
         for calculator in calculators:
             await calculator.compute_and_write(str(fixture.id.value), fixture.home_team_id, fixture.away_team_id, now)
+
+    async def _recompute_team_form(self, fixture: Fixture, sport_code: str | None, now: datetime) -> None:
+        """Premier League data-enrichment audit (2026-08-22) — a team's own rolling last-N form
+        average (`RollingTeamStatAverageCalculator`, `EntityType.TEAM`-keyed) previously had no
+        recurring trigger anywhere in the system; it was only ever computed as a one-off during
+        market seeding. Unlike `_compute_form_differential`/`_compute_transfer_activity` above,
+        this deliberately IS gated to COMPLETED-with-scores only (the caller's `if` block) — a
+        team's last-5/last-10 match list only actually changes once one of their matches
+        finishes, so recomputing on every pre-match sync would just rewrite the same average.
+        Silently skipped for a sport with no calculator registered or when the caller didn't
+        pass sport_code — same posture as every other calculator dispatch in this class."""
+        if sport_code is None:
+            return
+        calculators = self.team_form_calculators.get(sport_code, ())
+        for calculator in calculators:
+            await calculator.compute_and_write(fixture.home_team_id, now)
+            await calculator.compute_and_write(fixture.away_team_id, now)
 
     async def _resolve_prediction_outcomes(self, fixture: Fixture, now: datetime) -> None:
         if self.outcome_resolver is None:

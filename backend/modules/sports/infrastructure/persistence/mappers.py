@@ -261,6 +261,7 @@ def fixture_to_domain(model: FixtureModel) -> Fixture:
         home_score=model.home_score,
         away_score=model.away_score,
         period_scores=model.period_scores,
+        last_verified_at=model.last_verified_at,
     )
 
 
@@ -277,6 +278,7 @@ def fixture_to_model(entity: Fixture, model: FixtureModel | None = None) -> Fixt
     model.home_score = entity.home_score
     model.away_score = entity.away_score
     model.period_scores = entity.period_scores
+    model.last_verified_at = entity.last_verified_at
     return model
 
 

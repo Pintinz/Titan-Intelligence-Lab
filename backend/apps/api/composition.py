@@ -495,7 +495,26 @@ def build_entity_reconciliation_service(session: AsyncSession) -> EntityReconcil
         lineup_continuity_calculators={"football": build_football_lineup_continuity_calculators(session)},
         transfer_activity_calculators={"football": build_football_transfer_activity_calculators(session)},
         news_market_impact_engines={"football": build_football_news_market_impact_engine(session)},
+        team_form_calculators=_build_team_form_calculators(session),
     )
+
+
+def _build_team_form_calculators(session: AsyncSession) -> dict[str, tuple]:
+    """Premier League data-enrichment audit (2026-08-22) — one `RollingTeamStatAverageCalculator`
+    per sport, reusing the exact same `*_form_calculator` factories the market seeders already
+    use (`football_form_calculator` etc., below) rather than defining a second set of
+    feature_key/stat_key choices. Every sport with a seeder-registered form calculator gets one
+    here too, not just football — a team's own rolling form is a real post-match signal
+    regardless of which sport is still under active development."""
+    team_statistics = SqlAlchemyTeamStatisticsRepository(session=session)
+    registration = build_feature_registration_service(session)
+    store = build_feature_store_service(session)
+    return {
+        "football": (football_form_calculator(registration, store, team_statistics),),
+        "basketball": (basketball_form_calculator(registration, store, team_statistics),),
+        "baseball": (baseball_form_calculator(registration, store, team_statistics),),
+        "table_tennis": (table_tennis_form_calculator(registration, store, team_statistics),),
+    }
 
 
 def build_historical_import_service(session: AsyncSession) -> HistoricalImportService:

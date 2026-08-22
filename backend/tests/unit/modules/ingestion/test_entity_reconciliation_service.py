@@ -208,6 +208,48 @@ def service_with_form_differential(session):
     ), calculator
 
 
+class _RecordingTeamFormCalculator:
+    """Stub standing in for `RollingTeamStatAverageCalculator` — verifies only the *wiring*
+    (called for both teams, only on completion with a real score), not its own rolling-average
+    computation, which `test_windowed_feature_engineering_service.py` already covers directly."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def compute_and_write(self, team_id, now):
+        self.calls.append((team_id, now))
+        return None
+
+
+@pytest.fixture
+def service_with_team_form(session):
+    kg = KnowledgeGraphPopulationService(
+        nodes=SqlAlchemyKGNodeRepository(session=session), edges=SqlAlchemyKGEdgeRepository(session=session)
+    )
+    calculator = _RecordingTeamFormCalculator()
+    return EntityReconciliationService(
+        sports=SqlAlchemySportRepository(session=session),
+        countries=SqlAlchemyCountryRepository(session=session),
+        competitions=SqlAlchemyCompetitionRepository(session=session),
+        seasons=SqlAlchemySeasonRepository(session=session),
+        venues=SqlAlchemyVenueRepository(session=session),
+        teams=SqlAlchemyTeamRepository(session=session),
+        players=SqlAlchemyPlayerRepository(session=session),
+        fixtures=SqlAlchemyFixtureRepository(session=session),
+        matches=SqlAlchemyMatchRepository(session=session),
+        team_statistics=SqlAlchemyTeamStatisticsRepository(session=session),
+        lineups=SqlAlchemyLineupRepository(session=session),
+        standings=SqlAlchemyStandingRepository(session=session),
+        injuries=SqlAlchemyInjuryRepository(session=session),
+        transfers=SqlAlchemyTransferRepository(session=session),
+        coaching_staff=SqlAlchemyCoachingStaffRepository(session=session),
+        ref_index=SqlAlchemyProviderRefIndexRepository(session=session),
+        kg=kg,
+        timeline=SqlAlchemyTimelineEventRepository(session=session),
+        team_form_calculators={"football": (calculator,)},
+    ), calculator
+
+
 class _RecordingTransferActivityCalculator:
     """Stub standing in for `TransferActivityCalculator` — verifies only the *wiring* (called
     once per side, with the right args), not its own computation, which
@@ -1314,6 +1356,112 @@ async def test_reconcile_fixture_skips_form_differential_for_unregistered_sport(
     await session.commit()
 
     assert calculator.calls == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_fixture_recomputes_team_form_for_both_teams_on_completion(
+    service_with_team_form, session,
+):
+    """Premier League data-enrichment audit (2026-08-22): `RollingTeamStatAverageCalculator`
+    (a team's own rolling last-N form) had no recurring trigger anywhere in the system before
+    this fix. Must fire for BOTH home and away teams once a fixture completes with a real score
+    — that's the only moment either team's last-N match list actually changes."""
+    service, calculator = service_with_team_form
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    competition, _ = await service.reconcile_competition("39", "mock_football", sport.id, T0)
+    season, _ = await service.reconcile_season("39", "2026", "mock_football", competition.id, T0)
+    home, _ = await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+    away, _ = await service.reconcile_team(_team_record("t2", "Chelsea"), sport.id, T0)
+    await session.commit()
+
+    fixture_record = ProviderFixtureRecord(
+        external_ref=ProviderRef(provider="mock_football", external_id="fx-completed"),
+        home_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        away_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
+        scheduled_at=T0, competition_ref="39", season_label="2026",
+        status="FT", home_score=2, away_score=1,
+    )
+    await service.reconcile_fixture(fixture_record, season.id, T0, sport_code="football")
+    await session.commit()
+
+    assert calculator.calls == [(home.id, T0), (away.id, T0)]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_fixture_skips_team_form_when_not_yet_completed(
+    service_with_team_form, session,
+):
+    """A team's rolling form must not be recomputed on every pre-match sync — only once a match
+    genuinely finishes with a real score, mirroring `_resolve_prediction_outcomes`'s own gate."""
+    service, calculator = service_with_team_form
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    competition, _ = await service.reconcile_competition("39", "mock_football", sport.id, T0)
+    season, _ = await service.reconcile_season("39", "2026", "mock_football", competition.id, T0)
+    await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+    await service.reconcile_team(_team_record("t2", "Chelsea"), sport.id, T0)
+    await session.commit()
+
+    fixture_record = ProviderFixtureRecord(
+        external_ref=ProviderRef(provider="mock_football", external_id="fx-scheduled"),
+        home_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        away_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
+        scheduled_at=T0, competition_ref="39", season_label="2026", status="NS",
+    )
+    await service.reconcile_fixture(fixture_record, season.id, T0, sport_code="football")
+    await session.commit()
+
+    assert calculator.calls == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_fixture_sets_last_verified_at_to_the_sync_time(session):
+    """Premier League data-enrichment audit (2026-08-22): Fixture had no provenance timestamp
+    recording when it was last confirmed against a real provider sync. Every reconciliation —
+    not just completion — should stamp it, since even a pre-match resync re-verifies the
+    fixture's current known state."""
+    kg = KnowledgeGraphPopulationService(
+        nodes=SqlAlchemyKGNodeRepository(session=session), edges=SqlAlchemyKGEdgeRepository(session=session)
+    )
+    service = EntityReconciliationService(
+        sports=SqlAlchemySportRepository(session=session),
+        countries=SqlAlchemyCountryRepository(session=session),
+        competitions=SqlAlchemyCompetitionRepository(session=session),
+        seasons=SqlAlchemySeasonRepository(session=session),
+        venues=SqlAlchemyVenueRepository(session=session),
+        teams=SqlAlchemyTeamRepository(session=session),
+        players=SqlAlchemyPlayerRepository(session=session),
+        fixtures=SqlAlchemyFixtureRepository(session=session),
+        matches=SqlAlchemyMatchRepository(session=session),
+        team_statistics=SqlAlchemyTeamStatisticsRepository(session=session),
+        lineups=SqlAlchemyLineupRepository(session=session),
+        standings=SqlAlchemyStandingRepository(session=session),
+        injuries=SqlAlchemyInjuryRepository(session=session),
+        transfers=SqlAlchemyTransferRepository(session=session),
+        coaching_staff=SqlAlchemyCoachingStaffRepository(session=session),
+        ref_index=SqlAlchemyProviderRefIndexRepository(session=session),
+        kg=kg,
+        timeline=SqlAlchemyTimelineEventRepository(session=session),
+    )
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    competition, _ = await service.reconcile_competition("39", "mock_football", sport.id, T0)
+    season, _ = await service.reconcile_season("39", "2026", "mock_football", competition.id, T0)
+    await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+    await service.reconcile_team(_team_record("t2", "Chelsea"), sport.id, T0)
+    await session.commit()
+
+    fixture_record = ProviderFixtureRecord(
+        external_ref=ProviderRef(provider="mock_football", external_id="fx-provenance"),
+        home_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        away_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
+        scheduled_at=T0, competition_ref="39", season_label="2026",
+    )
+    fixture, _ = await service.reconcile_fixture(fixture_record, season.id, T0)
+    await session.commit()
+
+    assert fixture.last_verified_at == T0
 
 
 @pytest.mark.asyncio

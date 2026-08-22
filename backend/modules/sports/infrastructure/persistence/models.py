@@ -156,6 +156,8 @@ class FixtureModel(TimestampMixin, VersionedMixin, Base):
     # baseball) — {"kind": "quarter"|"inning", "home": [...], "away": [...]}. None when the
     # sport's provider doesn't report period scores (football) or hasn't been synced yet.
     period_scores: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # See modules.sports.domain.entities.Fixture.last_verified_at docstring.
+    last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class MatchModel(TimestampMixin, Base):
