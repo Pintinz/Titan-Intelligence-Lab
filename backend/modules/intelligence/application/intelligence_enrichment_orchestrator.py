@@ -52,6 +52,7 @@ from datetime import datetime, timedelta
 
 from modules.intelligence.application.event_extraction_service import EventExtractionService
 from modules.intelligence.application.feature_store_enrichment_service import FeatureStoreEnrichmentService
+from modules.intelligence.application.knowledge_graph_enrichment_service import KnowledgeGraphEnrichmentService
 from modules.intelligence.application.news_impact_engine import NewsImpactEngine
 from modules.intelligence.application.news_provenance import (
     ConfidenceInputs,
@@ -92,6 +93,13 @@ class IntelligenceEnrichmentOrchestrator:
     feature_store: FeatureStoreEnrichmentService
     sources: NewsSourceRepositoryPort
     events: NewsEventRepositoryPort
+    # Premier League data-enrichment audit (2026-08-22): KnowledgeGraphEnrichmentService already
+    # existed (TRANSFER -> PLAYS_FOR, MANAGER_CHANGE -> COACHED_BY edge updates) but had zero real
+    # call sites anywhere in the app — confirmed via docs/milestone13_verification_report.md
+    # ("the only code that calls TemporalGraphService.supersede_edge for a transfer has zero real
+    # call sites"). Optional/defaulted so existing test construction sites keep working unchanged;
+    # None means "skip KG enrichment", not an error.
+    kg_enrichment: KnowledgeGraphEnrichmentService | None = None
 
     async def enrich_article(
         self, article: NewsArticle, now: datetime, *,
@@ -145,6 +153,11 @@ class IntelligenceEnrichmentOrchestrator:
             scores.append(score)
             if event.is_feature_eligible():
                 await self._publish_event_features(event, score, reliability_score, now)
+                # Same provenance bar as feature publishing above, reused rather than inventing a
+                # second threshold — an event verified enough to influence prediction features is
+                # verified enough to update the graph's own relationship state.
+                if self.kg_enrichment is not None:
+                    await self.kg_enrichment.enrich_from_event(event, now)
         return scores
 
     async def _classify_and_persist(

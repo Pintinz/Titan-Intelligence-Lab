@@ -28,9 +28,12 @@ from modules.intelligence.infrastructure.persistence.repositories import (
     SqlAlchemySourceReliabilityRepository,
 )
 from modules.intelligence.ports.text_intelligence_provider import ExtractedEntity, ExtractedEvent
+from modules.intelligence.application.knowledge_graph_enrichment_service import KnowledgeGraphEnrichmentService
 from modules.knowledge_graph.application.entity_resolution_service import EntityResolutionService
+from modules.knowledge_graph.application.graph_query_service import GraphQueryService
 from modules.knowledge_graph.application.population_service import KnowledgeGraphPopulationService
-from modules.knowledge_graph.domain.value_objects import NodeType
+from modules.knowledge_graph.application.temporal_graph_service import TemporalGraphService
+from modules.knowledge_graph.domain.value_objects import EdgeType, NodeType
 from modules.knowledge_graph.infrastructure.persistence.models import Base as KnowledgeGraphBase
 from modules.knowledge_graph.infrastructure.persistence.repositories import (
     SqlAlchemyKGEdgeRepository,
@@ -83,6 +86,12 @@ class _FixedEventAdapter:
     provider_key: str = "gemini"
     mention_text: str | None = None
     mention_type: str | None = None
+    # Extra (text, type) mentions beyond the single mention_text/mention_type above — needed for
+    # an event that must resolve MORE THAN ONE entity type to enrich the graph (e.g. a transfer
+    # needs both a player and a team resolved before KnowledgeGraphEnrichmentService._transfer_edge
+    # can create a PLAYS_FOR edge; the single mention_text/mention_type field can only ever supply
+    # one).
+    extra_mentions: tuple[tuple[str, str], ...] = ()
 
     async def extract_events(self, text: str) -> list[ExtractedEvent]:
         return [ExtractedEvent(event_type=self.event_type, summary=f"{self.event_type} event", entities=self.entities, confidence=self.confidence)]
@@ -97,9 +106,10 @@ class _FixedEventAdapter:
         return "neutral"
 
     async def extract_entities(self, text):
-        if self.mention_text is None:
-            return []
-        return [ExtractedEntity(text=self.mention_text, entity_type=self.mention_type or "unknown", confidence=0.8)]
+        mentions = [ExtractedEntity(text=t, entity_type=ty, confidence=0.8) for t, ty in self.extra_mentions]
+        if self.mention_text is not None:
+            mentions.append(ExtractedEntity(text=self.mention_text, entity_type=self.mention_type or "unknown", confidence=0.8))
+        return mentions
 
     async def extract_relationships(self, text):
         return []
@@ -129,13 +139,15 @@ def _feature_store_enrichment() -> FeatureStoreEnrichmentService:
 async def _build_orchestrator(
     session, event_type: str, entity_refs: tuple[str, ...], *,
     mention_text: str | None = None, mention_type: str | None = None,
+    extra_mentions: tuple[tuple[str, str], ...] = (),
 ) -> IntelligenceEnrichmentOrchestrator:
     nodes = SqlAlchemyKGNodeRepository(session=session)
     edges = SqlAlchemyKGEdgeRepository(session=session)
     population = KnowledgeGraphPopulationService(nodes=nodes, edges=edges)
     resolution = EntityResolutionService(nodes=nodes, edges=edges, population=population)
     adapter = _FixedEventAdapter(
-        event_type=event_type, entities=entity_refs, mention_text=mention_text, mention_type=mention_type
+        event_type=event_type, entities=entity_refs, mention_text=mention_text, mention_type=mention_type,
+        extra_mentions=extra_mentions,
     )
     entity_extraction = EntityExtractionService(text_intelligence=adapter, entity_resolution=resolution)
     event_extraction = EventExtractionService(
@@ -147,6 +159,10 @@ async def _build_orchestrator(
         kg_nodes=nodes,
     )
     source_reliability = SourceReliabilityService(reliability=SqlAlchemySourceReliabilityRepository(session=session))
+    query = GraphQueryService(nodes=nodes, edges=edges)
+    kg_enrichment = KnowledgeGraphEnrichmentService(
+        population=population, temporal=TemporalGraphService(query=query, edges=edges, population=population), nodes=nodes
+    )
     return IntelligenceEnrichmentOrchestrator(
         event_extraction=event_extraction,
         news_impact=news_impact,
@@ -154,6 +170,7 @@ async def _build_orchestrator(
         feature_store=_feature_store_enrichment(),
         sources=SqlAlchemyNewsSourceRepository(session=session),
         events=SqlAlchemyNewsEventRepository(session=session),
+        kg_enrichment=kg_enrichment,
     )
 
 
@@ -346,6 +363,61 @@ async def test_backfill_trigger_persists_unknown_availability_through_the_real_p
 
     value = await orchestrator.feature_store.store.online.get(FeatureKey("intelligence.injury_impact"), EntityType.PLAYER, str(player.id))
     assert value is None
+
+
+async def test_transfer_event_creates_a_plays_for_edge_via_kg_enrichment(combined_session):
+    """Premier League data-enrichment audit (2026-08-22):
+    `KnowledgeGraphEnrichmentService.enrich_from_event` existed but had zero real call sites
+    anywhere in the app — confirmed via docs/milestone13_verification_report.md ("100 plays_for
+    edges exist, 0 have ever been superseded"). Now wired into the real, live-called
+    `enrich_article` path (gated on the same `is_feature_eligible()` bar as feature publishing).
+    This runs the REAL orchestrator end-to-end and reads the edge back from the real KG
+    repository — a resolved player and a resolved team must end up connected by PLAYS_FOR."""
+    nodes = SqlAlchemyKGNodeRepository(session=combined_session)
+    edges = SqlAlchemyKGEdgeRepository(session=combined_session)
+    population = KnowledgeGraphPopulationService(nodes=nodes, edges=edges)
+    player = await population.upsert_node(NodeType.PLAYER, "player-1", now=T0, aliases=["Test Player"])
+    new_team = await population.upsert_node(NodeType.TEAM, "team-1", now=T0, aliases=["New Club"])
+    await combined_session.commit()
+
+    orchestrator = await _build_orchestrator(
+        combined_session, "transfer", (str(player.id), str(new_team.id)),
+        extra_mentions=(("Test Player", "player"), ("New Club", "team")),
+    )
+    _source, article = await _seed_source_and_article(combined_session, "Star player signs for New Club.")
+
+    scores = await orchestrator.enrich_article(article, T0, trigger=SyncTrigger.LIVE_SCHEDULED)
+    await combined_session.commit()
+
+    assert len(scores) == 1
+    plays_for_edges = await edges.list_from(player.id, EdgeType.PLAYS_FOR)
+    assert len(plays_for_edges) == 1
+    assert plays_for_edges[0].to_node_id == new_team.id
+    assert plays_for_edges[0].is_current
+
+
+async def test_kg_enrichment_is_skipped_when_not_wired(combined_session):
+    """`kg_enrichment` defaults to None — an orchestrator built without it (any existing caller
+    that hasn't opted in) must keep working exactly as before this feature existed, not raise."""
+    nodes = SqlAlchemyKGNodeRepository(session=combined_session)
+    edges = SqlAlchemyKGEdgeRepository(session=combined_session)
+    population = KnowledgeGraphPopulationService(nodes=nodes, edges=edges)
+    player = await population.upsert_node(NodeType.PLAYER, "player-1", now=T0, aliases=["Test Player"])
+    new_team = await population.upsert_node(NodeType.TEAM, "team-1", now=T0, aliases=["New Club"])
+    await combined_session.commit()
+
+    orchestrator = await _build_orchestrator(
+        combined_session, "transfer", (str(player.id), str(new_team.id)),
+        extra_mentions=(("Test Player", "player"), ("New Club", "team")),
+    )
+    orchestrator.kg_enrichment = None
+    _source, article = await _seed_source_and_article(combined_session, "Star player signs for New Club.")
+
+    scores = await orchestrator.enrich_article(article, T0, trigger=SyncTrigger.LIVE_SCHEDULED)
+    await combined_session.commit()
+
+    assert len(scores) == 1
+    assert await edges.list_from(player.id, EdgeType.PLAYS_FOR) == []
 
 
 async def test_second_enrich_call_for_the_same_article_reuses_events_without_a_second_gemini_call(combined_session):

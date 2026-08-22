@@ -864,6 +864,7 @@ def build_intelligence_enrichment_orchestrator(session: AsyncSession) -> Intelli
         feature_store=build_feature_store_enrichment_service(session),
         sources=SqlAlchemyNewsSourceRepository(session=session),
         events=SqlAlchemyNewsEventRepository(session=session),
+        kg_enrichment=build_intelligence_kg_enrichment_service(session),
     )
 
 
