@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from modules.sports.domain.entities import (
@@ -35,6 +35,7 @@ from modules.sports.domain.value_objects import (
     CountryId,
     EntityId,
     FixtureId,
+    FixtureStatus,
     LineupId,
     MarketLineId,
     MatchId,
@@ -255,6 +256,36 @@ class SqlAlchemyFixtureRepository:
         )
         result = await self.session.execute(stmt)
         return [mappers.fixture_to_domain(row) for row in result.scalars().all()]
+
+    async def count_by_sport(self, sport_id: SportId, day_start: datetime, day_end: datetime) -> dict[str, int]:
+        """One grouped-aggregate query for live/completed/today-scheduled fixture counts across
+        every competition/season under this sport — replaces the season-by-season
+        `list_by_season` walk `public_router.platform_summary` used to do (fetching and
+        ORM-mapping every fixture row for every season just to count `.status` in a Python loop),
+        which on a real-scale dataset over a networked Postgres connection was the dominant cost
+        of that endpoint (each `list_by_season` round trip adds real network latency, and the walk
+        made one per season). Returns zeros for a sport with no fixtures."""
+        stmt = (
+            select(
+                func.sum(case((FixtureModel.status == FixtureStatus.LIVE.value, 1), else_=0)),
+                func.sum(case((FixtureModel.status == FixtureStatus.COMPLETED.value, 1), else_=0)),
+                func.sum(
+                    case(
+                        (
+                            (FixtureModel.scheduled_at >= day_start) & (FixtureModel.scheduled_at < day_end),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+            )
+            .select_from(FixtureModel)
+            .join(SeasonModel, FixtureModel.season_id == SeasonModel.id)
+            .join(CompetitionModel, SeasonModel.competition_id == CompetitionModel.id)
+            .where(CompetitionModel.sport_id == sport_id.value)
+        )
+        live, completed, today = (await self.session.execute(stmt)).one()
+        return {"live": live or 0, "completed": completed or 0, "today": today or 0}
 
 
 @dataclass

@@ -107,6 +107,13 @@ class FixtureRepositoryPort(Protocol):
         never matches the first provider's. Additive: no existing method changed."""
         ...
 
+    async def count_by_sport(self, sport_id: SportId, day_start: datetime, day_end: datetime) -> dict[str, int]:
+        """Aggregate live/completed/today-scheduled fixture counts across every competition/season
+        under this sport in a single grouped query — the aggregate the public
+        ``platform-summary`` endpoint needs without walking every season's full fixture list into
+        Python just to count. Additive: no existing method changed."""
+        ...
+
 
 class StandingRepositoryPort(Protocol):
     async def list_by_season(self, season_id: SeasonId) -> list[Standing]: ...

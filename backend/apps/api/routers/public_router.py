@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,7 +50,6 @@ from modules.sports.domain.value_objects import (
     CompetitionId,
     CountryId,
     FixtureId,
-    FixtureStatus,
     PlayerId,
     SportId,
     TeamId,
@@ -105,11 +104,6 @@ def _store(key: str, value):
     return value
 
 
-def _is_same_day(scheduled_at: datetime, now: datetime) -> bool:
-    aware = scheduled_at if scheduled_at.tzinfo is not None else scheduled_at.replace(tzinfo=now.tzinfo)
-    return aware.astimezone(now.tzinfo).date() == now.date()
-
-
 # -- Platform summary ------------------------------------------------------------------------------
 
 
@@ -124,12 +118,13 @@ async def platform_summary(session: AsyncSession = Depends(get_session)):
         return envelope(cached)
 
     now = _now()
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
     registry = get_sport_plugin_registry()
     plugins = registry.all()
 
     sports_repo = SqlAlchemySportRepository(session=session)
     competitions_repo = SqlAlchemyCompetitionRepository(session=session)
-    seasons_repo = SqlAlchemySeasonRepository(session=session)
     fixtures_repo = SqlAlchemyFixtureRepository(session=session)
 
     sports_data: list[dict] = []
@@ -141,20 +136,18 @@ async def platform_summary(session: AsyncSession = Depends(get_session)):
     for plugin in plugins:
         sport = await sports_repo.get_by_code(plugin.code)
         competitions = await competitions_repo.list_by_sport(sport.id) if sport is not None else []
-        live_count = 0
-        today_count = 0
-        completed_count = 0
-        for competition in competitions:
-            seasons = await seasons_repo.list_by_competition(competition.id)
-            for season in seasons:
-                fixtures = await fixtures_repo.list_by_season(season.id)
-                for fixture in fixtures:
-                    if fixture.status is FixtureStatus.LIVE:
-                        live_count += 1
-                    elif fixture.status is FixtureStatus.COMPLETED:
-                        completed_count += 1
-                    if _is_same_day(fixture.scheduled_at, now):
-                        today_count += 1
+        # One grouped aggregate query for this sport's fixture counts, not a season-by-season
+        # walk that fetches every fixture row just to count them in Python (see
+        # FixtureRepositoryPort.count_by_sport docstring) — this was the dominant cost of this
+        # endpoint on a real-scale, networked-Postgres dataset (~20s → sub-second).
+        counts = await fixtures_repo.count_by_sport(sport.id, day_start, day_end) if sport is not None else {
+            "live": 0,
+            "completed": 0,
+            "today": 0,
+        }
+        live_count = counts["live"]
+        today_count = counts["today"]
+        completed_count = counts["completed"]
         sports_data.append(
             {
                 "code": plugin.code.value,

@@ -16,6 +16,14 @@ class KGNodeRepositoryPort(Protocol):
     async def list_by_type(self, node_type: NodeType) -> list[KGNode]: ...
     async def upsert(self, node: KGNode) -> KGNode: ...
 
+    async def count_by_type(self, node_type: NodeType) -> int:
+        """Row count for this node type via a SQL COUNT, not `len(await list_by_type(...))` —
+        Graph Monitoring's scale metrics (Milestone 7) need only the count, and `list_by_type`
+        fetching and ORM-mapping every row of every type on a real-scale graph was the dominant
+        cost of the public `platform-summary`/`knowledge-graph-preview` endpoints. Additive: no
+        existing method changed."""
+        ...
+
 
 class KGEdgeRepositoryPort(Protocol):
     async def get_current(
@@ -27,3 +35,9 @@ class KGEdgeRepositoryPort(Protocol):
     async def upsert(self, edge: KGEdge) -> KGEdge: ...
     async def close(self, edge_id: KGEdgeId, valid_to: datetime) -> KGEdge | None: ...
     async def delete(self, edge_id: KGEdgeId) -> bool: ...
+
+    async def count_by_type(self, edge_type: EdgeType) -> int:
+        """Row count for this edge type via a SQL COUNT — mirrors
+        `KGNodeRepositoryPort.count_by_type`; see that docstring. Additive: no existing method
+        changed."""
+        ...

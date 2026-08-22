@@ -103,23 +103,27 @@ class GraphMonitoringService:
     cache: object | None = None  # duck-typed: anything exposing a `.hit_ratio` property
 
     async def node_count(self) -> int:
-        return sum(len(await self.nodes.list_by_type(node_type)) for node_type in NodeType)
+        return sum(await self.nodes.count_by_type(node_type) for node_type in NodeType)
 
     async def edge_count(self) -> int:
-        return sum(len(await self.edges.list_by_type(edge_type)) for edge_type in EdgeType)
+        return sum(await self.edges.count_by_type(edge_type) for edge_type in EdgeType)
 
     async def nodes_by_type(self) -> dict:
+        # SQL COUNT per type, not `len(await list_by_type(...))` — that fetched and ORM-mapped
+        # every row of every node type just to discard everything but a count, and was the
+        # dominant cost of the public platform-summary/knowledge-graph-preview endpoints on a
+        # real-scale graph (see KGNodeRepositoryPort.count_by_type docstring).
         return {
             node_type: count
             for node_type in NodeType
-            if (count := len(await self.nodes.list_by_type(node_type))) > 0
+            if (count := await self.nodes.count_by_type(node_type)) > 0
         }
 
     async def edges_by_type(self) -> dict:
         return {
             edge_type: count
             for edge_type in EdgeType
-            if (count := len(await self.edges.list_by_type(edge_type))) > 0
+            if (count := await self.edges.count_by_type(edge_type)) > 0
         }
 
     async def snapshot(self) -> GraphMetricsSnapshot:

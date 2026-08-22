@@ -96,6 +96,9 @@ class CachedKGNodeRepository:
     async def list_by_type(self, node_type: NodeType) -> list[KGNode]:
         return await self.inner.list_by_type(node_type)
 
+    async def count_by_type(self, node_type: NodeType) -> int:
+        return await self.inner.count_by_type(node_type)
+
     async def upsert(self, node: KGNode) -> KGNode:
         result = await self.inner.upsert(node)
         await self.cache.delete(f"kgnode:id:{result.id.value}")

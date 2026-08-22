@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from modules.knowledge_graph.domain.entities import KGEdge, KGNode
@@ -29,6 +29,10 @@ class SqlAlchemyKGNodeRepository:
         stmt = select(KGNodeModel).where(KGNodeModel.node_type == node_type.value)
         result = await self.session.execute(stmt)
         return [mappers.node_to_domain(row) for row in result.scalars().all()]
+
+    async def count_by_type(self, node_type: NodeType) -> int:
+        stmt = select(func.count()).select_from(KGNodeModel).where(KGNodeModel.node_type == node_type.value)
+        return (await self.session.execute(stmt)).scalar_one()
 
     async def upsert(self, node: KGNode) -> KGNode:
         existing = await self.session.get(KGNodeModel, node.id.value)
@@ -70,6 +74,10 @@ class SqlAlchemyKGEdgeRepository:
         stmt = select(KGEdgeModel).where(KGEdgeModel.edge_type == edge_type.value).limit(limit)
         result = await self.session.execute(stmt)
         return [mappers.edge_to_domain(row) for row in result.scalars().all()]
+
+    async def count_by_type(self, edge_type: EdgeType) -> int:
+        stmt = select(func.count()).select_from(KGEdgeModel).where(KGEdgeModel.edge_type == edge_type.value)
+        return (await self.session.execute(stmt)).scalar_one()
 
     async def upsert(self, edge: KGEdge) -> KGEdge:
         existing = await self.session.get(KGEdgeModel, edge.id.value)
