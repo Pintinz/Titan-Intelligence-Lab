@@ -1364,3 +1364,63 @@ async def test_sync_players_for_competition_skips_teams_with_no_provider_ref(orc
     runs = await orchestrator.sync_players_for_competition("football", season_id, T0)
 
     assert runs == []
+
+
+@pytest.mark.asyncio
+async def test_sync_players_for_competition_does_not_leak_across_competitions(orchestrator, session, router):
+    """Cross-league isolation (Premier League data-enrichment spec's explicit requirement,
+    section 2): a Premier-League-scoped player sync must never touch a different competition's
+    teams. Discovers teams by walking `season_id`'s own fixtures (SQL-filtered by season_id) —
+    not `teams.list_by_sport`, which would return every team across every competition for that
+    sport. Seeds two separate competitions/seasons (an EPL-shaped one and a La-Liga-shaped one,
+    sharing the same sport) and proves syncing one's season leaves the other's teams
+    untouched — the plausible bug class this test guards against."""
+    sport, _ = await orchestrator.reconciler.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    epl_home, _ = await orchestrator.reconciler.reconcile_team(
+        ProviderTeamRecord(external_ref=ProviderRef("mock", "epl-t1"), name="Arsenal", short_name="ARS", country="England"),
+        sport.id, T0,
+    )
+    epl_away, _ = await orchestrator.reconciler.reconcile_team(
+        ProviderTeamRecord(external_ref=ProviderRef("mock", "epl-t2"), name="Chelsea", short_name="CHE", country="England"),
+        sport.id, T0,
+    )
+    la_liga_home, _ = await orchestrator.reconciler.reconcile_team(
+        ProviderTeamRecord(external_ref=ProviderRef("mock", "ll-t1"), name="Real Madrid", short_name="RMA", country="Spain"),
+        sport.id, T0,
+    )
+    la_liga_away, _ = await orchestrator.reconciler.reconcile_team(
+        ProviderTeamRecord(external_ref=ProviderRef("mock", "ll-t2"), name="Barcelona", short_name="BAR", country="Spain"),
+        sport.id, T0,
+    )
+    await session.commit()
+
+    epl_season_id = SeasonId(uuid4())
+    await orchestrator.reconciler.reconcile_fixture(
+        ProviderFixtureRecord(
+            external_ref=ProviderRef("mock", "epl-fx1"), home_team_ref=ProviderRef("mock", "epl-t1"),
+            away_team_ref=ProviderRef("mock", "epl-t2"), scheduled_at=T0, competition_ref="39", season_label="2026",
+            status="NS",
+        ),
+        epl_season_id, T0, sport_code="football",
+    )
+    la_liga_season_id = SeasonId(uuid4())
+    await orchestrator.reconciler.reconcile_fixture(
+        ProviderFixtureRecord(
+            external_ref=ProviderRef("mock", "ll-fx1"), home_team_ref=ProviderRef("mock", "ll-t1"),
+            away_team_ref=ProviderRef("mock", "ll-t2"), scheduled_at=T0, competition_ref="140", season_label="2026",
+            status="NS",
+        ),
+        la_liga_season_id, T0, sport_code="football",
+    )
+    await session.commit()
+
+    router.players_to_return = []
+
+    runs = await orchestrator.sync_players_for_competition("football", epl_season_id, T0)
+    await session.commit()
+
+    synced_team_refs = {r.scope_key for r in runs}
+    assert synced_team_refs == {"epl-t1", "epl-t2"}
+    assert "ll-t1" not in synced_team_refs
+    assert "ll-t2" not in synced_team_refs
