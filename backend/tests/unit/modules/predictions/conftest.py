@@ -143,21 +143,37 @@ def model_repo():
 
 @dataclass
 class InMemoryFeatureValueRepository:
-    store: dict = field(default_factory=dict)  # (feature_key, entity_type, entity_id) -> FeatureValue
+    """Mirrors SqlAlchemyFeatureValueRepository's real semantics — `record()` appends (this is
+    "the audited historical record", never an overwrite-in-place), so multiple values can exist
+    for the same (feature_key, entity_type, entity_id) at different `as_of` times. Needed for
+    get_as_of() to mean anything real in a test — a single-value-per-key store can't distinguish
+    "the latest value" from "the value as of some earlier cutoff"."""
+
+    store: dict = field(default_factory=dict)  # (feature_key, entity_type, entity_id) -> list[FeatureValue]
 
     async def record(self, value: FeatureValue) -> FeatureValue:
-        self.store[(value.feature_key, value.entity_type, value.entity_id)] = value
+        self.store.setdefault((value.feature_key, value.entity_type, value.entity_id), []).append(value)
         return value
 
+    def _history(self, feature_key, entity_type, entity_id):
+        return sorted(self.store.get((feature_key, entity_type, entity_id), []), key=lambda v: v.as_of)
+
     async def get_latest(self, feature_key, entity_type, entity_id):
-        return self.store.get((feature_key, entity_type, entity_id))
+        history = self._history(feature_key, entity_type, entity_id)
+        return history[-1] if history else None
+
+    async def get_as_of(self, feature_key, entity_type, entity_id, as_of):
+        eligible = [v for v in self._history(feature_key, entity_type, entity_id) if v.as_of <= as_of]
+        return eligible[-1] if eligible else None
 
     async def list_history(self, feature_key, entity_type, entity_id, limit=100):
-        value = self.store.get((feature_key, entity_type, entity_id))
-        return [value] if value is not None else []
+        return list(reversed(self._history(feature_key, entity_type, entity_id)))[:limit]
 
     async def list_all_recent(self, feature_key, since=None, limit=5000):
-        return [v for k, v in self.store.items() if k[0] == feature_key]
+        values = [v for k, vs in self.store.items() if k[0] == feature_key for v in vs]
+        if since is not None:
+            values = [v for v in values if v.as_of >= since]
+        return values[:limit]
 
 
 @pytest.fixture

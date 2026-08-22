@@ -100,7 +100,16 @@ class PredictionContextBuilder:
         confidence_inputs: list[FeatureConfidenceInput] = []
         for mapping in mappings:
             feature_key = FeatureKey(mapping.feature_key)
-            feature_value = await self.feature_values.get_latest(feature_key, entity_type, entity_id)
+            # `get_as_of(now)`, not `get_latest()` — `now` here IS the prediction cutoff (the
+            # same value PredictionEngine.generate persists as Prediction.prediction_cutoff).
+            # `get_latest()` answers "what do we know right now" regardless of when this call
+            # happens to run; a feature recomputed moments after kickoff (e.g. the post-match
+            # rolling-form recompute) could otherwise leak into a prediction whose `now` was
+            # timestamped before that recompute ran. See FeatureValueRepositoryPort.get_as_of's
+            # own docstring: "Historical feature reconstruction must call this, never
+            # get_latest(), once a caller needs point-in-time correctness" — live generation
+            # needs exactly the same correctness, not just historical reconstruction.
+            feature_value = await self.feature_values.get_as_of(feature_key, entity_type, entity_id, now)
             is_present = feature_value is not None and isinstance(feature_value.value, (int, float)) and not isinstance(
                 feature_value.value, bool
             )

@@ -228,6 +228,14 @@ class Prediction:
     status: PredictionStatus = PredictionStatus.DRAFT
     generated_at: datetime | None = None
     data_freshness: datetime | None = None
+    # The leakage boundary this prediction was actually generated against — every feature read
+    # and every evidence item (news/injury/transfer/lineup) gathered for this prediction must be
+    # dated at or before this instant. Distinct from `generated_at` in *meaning* even though both
+    # are set to the same `now` at live-generation time: `generated_at` records when generation
+    # happened, `prediction_cutoff` records the temporal boundary that generation respected — the
+    # field a leakage audit/test binds to, and the one a future historical-reconstruction caller
+    # would set to something earlier than wall-clock `now`.
+    prediction_cutoff: datetime | None = None
     probability_distribution: dict = field(default_factory=dict)  # real label -> calibrated probability
     confidence_interval: tuple[float, float] | None = None  # (low, high), regression markets only
     expected_error: float | None = None  # historical MAE for this market, regression markets only

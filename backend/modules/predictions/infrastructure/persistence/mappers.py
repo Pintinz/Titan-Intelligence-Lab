@@ -272,6 +272,7 @@ def prediction_to_domain(model: PredictionModel) -> Prediction:
         status=PredictionStatus(model.status),
         generated_at=model.generated_at,
         data_freshness=model.data_freshness,
+        prediction_cutoff=model.prediction_cutoff,
         probability_distribution=dict(model.probability_distribution or {}),
         confidence_interval=(
             (model.confidence_interval_low, model.confidence_interval_high)
@@ -296,6 +297,7 @@ def prediction_to_model(entity: Prediction, model: PredictionModel | None = None
     model.status = entity.status.value
     model.generated_at = entity.generated_at
     model.data_freshness = entity.data_freshness
+    model.prediction_cutoff = entity.prediction_cutoff
     model.probability_distribution = dict(entity.probability_distribution)
     model.confidence_interval_low = entity.confidence_interval[0] if entity.confidence_interval else None
     model.confidence_interval_high = entity.confidence_interval[1] if entity.confidence_interval else None

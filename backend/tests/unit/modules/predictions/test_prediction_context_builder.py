@@ -251,3 +251,51 @@ async def test_freshness_uses_each_feature_own_registered_ttl_not_a_global_hardc
     context = await builder.build(market.market_key, EntityType.FIXTURE, "fixture-1", now=T0)
 
     assert context.feature_confidence_inputs[0].freshness_score == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_build_never_reads_a_feature_value_written_after_the_prediction_cutoff(
+    builder, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo
+):
+    """The leakage regression this fix closes: a feature recomputed AFTER a prediction's own
+    `now` (e.g. the post-match rolling-form recompute, which can write a fresh value moments
+    after full time) must never be visible to that prediction — even though it genuinely is the
+    "latest" value in the store by the time anything queries it. `build()` must resolve the
+    value that was actually knowable at `now`, not whatever the newest row happens to be."""
+    market, _ = await _production_market_with_champion(market_registry, model_registry, key="football.leakage_check")
+    definition = await _active_feature(feature_definition_repo, "football.team.form_index_last5")
+    await mapping_service.map_feature(
+        market_key=market.market_key, feature_key=str(definition.feature_key), is_required=True
+    )
+    # The value legitimately known at prediction time.
+    await feature_value_repo.record(
+        FeatureValue(
+            id=FeatureValueId(uuid4()),
+            feature_key=definition.feature_key,
+            entity_type=EntityType.FIXTURE,
+            entity_id="fixture-1",
+            as_of=T0 - timedelta(hours=1),
+            value=0.4,
+            quality_flags=(QualityFlag.OK,),
+        )
+    )
+    # A later recompute — e.g. triggered by the same match completing — that must not leak
+    # backward into a prediction whose cutoff was before it was written.
+    await feature_value_repo.record(
+        FeatureValue(
+            id=FeatureValueId(uuid4()),
+            feature_key=definition.feature_key,
+            entity_type=EntityType.FIXTURE,
+            entity_id="fixture-1",
+            as_of=T0 + timedelta(hours=1),
+            value=0.95,
+            quality_flags=(QualityFlag.OK,),
+        )
+    )
+    await market_registry.submit_for_review(market.market_key)
+    await market_registry.approve(market.market_key, reviewer="cto", now=T0)
+    await market_registry.promote_to_production(market.market_key, now=T0)
+
+    context = await builder.build(market.market_key, EntityType.FIXTURE, "fixture-1", now=T0)
+
+    assert context.resolved_features == {"football.team.form_index_last5": 0.4}

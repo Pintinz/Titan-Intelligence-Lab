@@ -114,6 +114,10 @@ class PredictionModel(Base):
     status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
     generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     data_freshness: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # See modules.predictions.domain.entities.Prediction.prediction_cutoff docstring — the
+    # persisted leakage boundary, nullable only because rows from before this column existed have
+    # none (migration 0047 backfills them from generated_at, the value they actually used).
+    prediction_cutoff: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Universal Probability Engine (2026-08-02) — see modules.predictions.domain.entities.Prediction
     # docstring for the CLASSIFICATION-vs-REGRESSION field-group split these five columns store.
     probability_distribution: Mapped[dict] = mapped_column(JSON, default=dict)

@@ -182,6 +182,7 @@ class PredictionEngine:
             status=PredictionStatus.DRAFT,
             generated_at=now,
             data_freshness=now,
+            prediction_cutoff=now,
             probability_distribution=probability_distribution,
             confidence_interval=confidence_interval,
             expected_error=expected_error,
