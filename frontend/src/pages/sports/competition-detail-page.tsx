@@ -117,7 +117,7 @@ export default function CompetitionDetailPage() {
   if (!sport) return null
   if (competitionQuery.isPending) {
     return (
-      <div className="command-deck space-y-6 rounded-[var(--cd-radius-xl)]" style={{ backgroundColor: 'var(--cd-bg)', padding: '1.5rem' }}>
+      <div className="command-deck space-y-6 rounded-[var(--cd-radius-xl)] bg-[var(--cd-bg)] p-3 sm:p-4 lg:p-6">
         <div className="h-32 animate-pulse rounded-[var(--cd-radius-xl)]" style={{ background: 'var(--cd-card-surface)' }} />
         <MissionSkeletonGrid count={3} />
       </div>
@@ -125,7 +125,7 @@ export default function CompetitionDetailPage() {
   }
   if (competitionQuery.isError || !competitionQuery.data) {
     return (
-      <div className="command-deck rounded-[var(--cd-radius-xl)]" style={{ backgroundColor: 'var(--cd-bg)', padding: '1.5rem' }}>
+      <div className="command-deck rounded-[var(--cd-radius-xl)] bg-[var(--cd-bg)] p-3 sm:p-4 lg:p-6">
         <ErrorState error={competitionQuery.error} onRetry={() => void competitionQuery.refetch()} />
       </div>
     )
@@ -160,7 +160,7 @@ export default function CompetitionDetailPage() {
   }
 
   return (
-    <div className="command-deck space-y-6 rounded-[var(--cd-radius-xl)]" style={{ backgroundColor: 'var(--cd-bg)', padding: '1.5rem' }}>
+    <div className="command-deck space-y-6 rounded-[var(--cd-radius-xl)] bg-[var(--cd-bg)] p-3 sm:p-4 lg:p-6">
       <Link
         to={`/app/${sport.slug}/competitions`}
         className="inline-flex items-center gap-1 font-[var(--cd-font-body)] text-[13px] transition-colors"

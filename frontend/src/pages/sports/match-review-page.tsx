@@ -156,7 +156,7 @@ export default function MatchReviewPage() {
 
   if (!sport) return null
   if (fixtureQuery.isPending) {
-    return <div className="command-deck rounded-[var(--cd-radius-xl)] p-6" style={{ backgroundColor: 'var(--cd-bg)' }} />
+    return <div className="command-deck rounded-[var(--cd-radius-xl)] bg-[var(--cd-bg)] p-3 sm:p-4 lg:p-6" />
   }
   if (fixtureQuery.isError) return <ErrorState error={fixtureQuery.error} onRetry={() => void fixtureQuery.refetch()} />
 
@@ -176,7 +176,7 @@ export default function MatchReviewPage() {
   const meta = reviewQuery.data?.meta
 
   return (
-    <div className="command-deck space-y-6 rounded-[var(--cd-radius-xl)]" style={{ backgroundColor: 'var(--cd-bg)', padding: '1.5rem' }}>
+    <div className="command-deck space-y-6 rounded-[var(--cd-radius-xl)] bg-[var(--cd-bg)] p-3 sm:p-4 lg:p-6">
       <Link
         to={`/app/${sport.slug}/matches/${fixture.id}`}
         className="inline-flex items-center gap-1 font-[var(--cd-font-body)] text-[13px]"

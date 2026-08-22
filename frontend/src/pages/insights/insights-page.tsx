@@ -246,7 +246,7 @@ export default function InsightsPage() {
   }, [focused?.kind, focused?.id, canGenerate])
 
   return (
-    <div className="command-deck space-y-5 rounded-[var(--cd-radius-xl)]" style={{ backgroundColor: 'var(--cd-bg)', padding: '1.5rem' }}>
+    <div className="command-deck space-y-5 rounded-[var(--cd-radius-xl)] bg-[var(--cd-bg)] p-3 sm:p-4 lg:p-6">
       <WorkspaceHero
         sport={sport}
         onSportChange={(s) => { setSport(s); setQuery('') }}

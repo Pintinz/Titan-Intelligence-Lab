@@ -108,7 +108,7 @@ export default function AiPicksPage() {
   const hasVisibleResults = (showUpcoming && dateFilteredUpcoming.length > 0) || (showCompleted && completed.length > 0)
 
   return (
-    <div className="command-deck space-y-6 rounded-[var(--cd-radius-xl)]" style={{ backgroundColor: 'var(--cd-bg)', padding: '1.5rem' }}>
+    <div className="command-deck space-y-6 rounded-[var(--cd-radius-xl)] bg-[var(--cd-bg)] p-3 sm:p-4 lg:p-6">
       <div>
         <span className="font-[var(--cd-font-telemetry)] text-[11px] font-medium uppercase tracking-[0.08em]" style={{ color: 'var(--cd-accent)' }}>
           AI Picks

@@ -113,7 +113,7 @@ export default function MatchListPage() {
   const isSearching = trimmedSearch.length > 0
 
   return (
-    <div className="command-deck space-y-6 rounded-[var(--cd-radius-xl)]" style={{ backgroundColor: 'var(--cd-bg)', padding: '1.5rem' }}>
+    <div className="command-deck space-y-6 rounded-[var(--cd-radius-xl)] bg-[var(--cd-bg)] p-3 sm:p-4 lg:p-6">
       <DiscoveryHero
         sport={sport}
         search={search}

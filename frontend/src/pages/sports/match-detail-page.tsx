@@ -147,7 +147,7 @@ export default function MatchDetailPage() {
       {/* Command Deck — Phase 1 scope: Hero, AI Match Snapshot, Prediction Laboratory, Generated
           Intelligence. A deliberate, disclosed visual-world seam: everything below (Recent Form,
           Match Coverage, Match Context) stays on Infinity in this pass. */}
-      <div className="command-deck space-y-6 rounded-[var(--cd-radius-xl)]" style={{ backgroundColor: 'var(--cd-bg)', padding: '1.5rem' }}>
+      <div className="command-deck space-y-6 rounded-[var(--cd-radius-xl)] bg-[var(--cd-bg)] p-3 sm:p-4 lg:p-6">
         <CommandDeckHero
           competition={fixture.competition_name}
           aiAvailable={aiAvailable}

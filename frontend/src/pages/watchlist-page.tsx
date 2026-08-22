@@ -113,7 +113,7 @@ export default function WatchlistPage() {
   const allEmpty = watchlist.data && entries.length === 0
 
   return (
-    <div className="command-deck space-y-8 rounded-[var(--cd-radius-xl)]" style={{ backgroundColor: 'var(--cd-bg)', padding: '1.5rem' }}>
+    <div className="command-deck space-y-8 rounded-[var(--cd-radius-xl)] bg-[var(--cd-bg)] p-3 sm:p-4 lg:p-6">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <p className="font-[var(--cd-font-telemetry)] text-[11px] font-medium uppercase tracking-[0.08em]" style={{ color: 'var(--cd-accent)' }}>

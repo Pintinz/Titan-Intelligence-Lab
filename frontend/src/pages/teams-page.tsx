@@ -86,7 +86,7 @@ export default function TeamsPage() {
   }
 
   return (
-    <div className="command-deck space-y-8 rounded-[var(--cd-radius-xl)]" style={{ backgroundColor: 'var(--cd-bg)', padding: '1.5rem' }}>
+    <div className="command-deck space-y-8 rounded-[var(--cd-radius-xl)] bg-[var(--cd-bg)] p-3 sm:p-4 lg:p-6">
       <TeamHero sport={sport} onSportChange={setSport} search={search} onSearchChange={setSearch} backdropLogos={backdropLogos} />
 
       {isError && <ErrorState error={error} onRetry={() => void refetch()} />}
