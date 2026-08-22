@@ -1,5 +1,5 @@
 import { lazy, Suspense, type ComponentType } from 'react'
-import { createBrowserRouter } from 'react-router-dom'
+import { createBrowserRouter, Navigate, useParams } from 'react-router-dom'
 import { PageLoader } from '@/components/layout/page-loader'
 import LoginPage from '@/pages/login-page'
 import LandingPage from '@/pages/landing-page'
@@ -107,14 +107,14 @@ const playerDetailPage = lazyPage(() => import('@/pages/sports/player-detail-pag
 const competitionListPage = lazyPage(() => import('@/pages/sports/competition-list-page'))
 const competitionDetailPage = lazyPage(() => import('@/pages/sports/competition-detail-page'))
 const predictionLabPage = lazyPage(() => import('@/pages/sports/prediction-lab-page'))
-const sportNewsPage = lazyPage(() => import('@/pages/sports/sport-news-page'))
-const sportCommunityPage = lazyPage(() => import('@/pages/sports/sport-community-page'))
-const newsIntelligencePage = lazyPage(() => import('@/pages/intelligence/news-intelligence-page'))
 const learningIntelligencePage = lazyPage(() => import('@/pages/intelligence/learning-intelligence-page'))
 const insightsPage = lazyPage(() => import('@/pages/insights/insights-page'))
 const livePage = lazyPage(() => import('@/pages/live-page'))
 const competitionsPage = lazyPage(() => import('@/pages/competitions-page'))
 const teamsPage = lazyPage(() => import('@/pages/teams-page'))
+const playersPage = lazyPage(() => import('@/pages/players-page'))
+const matchesPage = lazyPage(() => import('@/pages/matches-page'))
+const contextPage = lazyPage(() => import('@/pages/context-page'))
 const profilePage = lazyPage(() => import('@/pages/profile-page'))
 const knowledgeGraphPage = lazyPage(() => import('@/pages/knowledge-graph-page'))
 const aiPicksPage = lazyPage(() => import('@/pages/ai-picks-page'))
@@ -140,6 +140,15 @@ function lazyPageWithProps<P extends object>(loader: () => Promise<{ default: Co
 const MatchListViewAllPage = lazyPageWithProps<{ scope: MatchesScope }>(
   () => import('@/pages/sports/match-list-view-all-page'),
 )
+
+// Information-architecture restructure: `/app/:sport/news` and `/app/:sport/community` had no
+// nav entry and no in-app callers (confirmed via a full repo audit before removing them) — real
+// content folds into the new cross-sport `/app/context` page instead of a second, orphaned
+// per-sport surface. Redirects (not deletes) so no old bookmark/deep-link breaks.
+function SportContextRedirect() {
+  const { sport } = useParams<{ sport: string }>()
+  return <Navigate to={sport ? `/app/context?sport=${sport}` : '/app/context'} replace />
+}
 
 // Phase 11.0 — dev-only verification fixture, see devInfinityShowcaseRoute below.
 const infinityShowcasePage = lazyPage(() => import('@/pages/infinity-showcase-page'))
@@ -288,15 +297,21 @@ export const router = createBrowserRouter([
               </RoleRoute>
             ),
           },
-          { path: 'news', element: sportNewsPage },
-          { path: 'community', element: sportCommunityPage },
+          { path: 'news', element: <SportContextRedirect /> },
+          { path: 'community', element: <SportContextRedirect /> },
         ],
       },
 
+      { path: 'matches', element: matchesPage },
       { path: 'live', element: livePage },
       { path: 'competitions', element: competitionsPage },
       { path: 'teams', element: teamsPage },
-      { path: 'news', element: newsIntelligencePage },
+      { path: 'players', element: playersPage },
+      { path: 'context', element: contextPage },
+      // Consolidated into Context (spec: "News -> consolidate into Context") — real content
+      // (search/impact/timeline) is now part of the richer Context page; redirected, not
+      // deleted, so no old bookmark/deep-link breaks.
+      { path: 'news', element: <Navigate to="/app/context" replace /> },
       { path: 'learning', element: learningIntelligencePage },
       { path: 'insights', element: insightsPage },
       { path: 'analytics', element: <RebuildingPage title="Analytics" phase="Phase 7" /> },

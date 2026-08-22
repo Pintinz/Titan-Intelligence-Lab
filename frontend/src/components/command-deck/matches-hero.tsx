@@ -4,15 +4,13 @@ import { domainTint } from './primitives/domain'
 import { SportSegmentedControl } from './primitives/sport-segmented-control'
 
 /**
- * PlayerHero — Player Intelligence's opening instrument, same stadium-glow/telemetry-grid
- * atmosphere as Team/Competition Hero. `onSportChange` is optional, same convention `TeamHero`
- * established: omitted on the sport-scoped route (`/app/:sport/players`, where `SportShell`
- * already owns sport switching one level up), supplied on the cross-sport `/app/players`
- * destination. Backdrop crests are the same sport's real team logos (joined in by
- * `usePlayerIntelligence`), never stock player photography — the backend exposes no player
- * headshots.
+ * MatchesHero — the cross-sport Matches destination's opening instrument, same stadium-glow/
+ * telemetry-grid template as Team/Competition/Player Hero. Discovery-purposed per the shaped
+ * brief ("do not turn this into another Intelligence Center") — search + sport switcher only, no
+ * KPI strip (that belongs to Intelligence Center's own Live Intelligence rail, not duplicated
+ * here).
  */
-export function PlayerHero({
+export function MatchesHero({
   sport,
   onSportChange,
   search,
@@ -20,7 +18,7 @@ export function PlayerHero({
   backdropLogos,
 }: {
   sport: SportMeta
-  onSportChange?: (sport: SportMeta) => void
+  onSportChange: (sport: SportMeta) => void
   search: string
   onSearchChange: (value: string) => void
   backdropLogos: string[]
@@ -37,7 +35,7 @@ export function PlayerHero({
         />
         <div
           className="animate-hero-glow motion-reduce:animate-none absolute -right-[6%] -top-[10%] h-[340px] w-[340px] rounded-full opacity-40"
-          style={{ background: `radial-gradient(circle, ${domainTint('knowledge-graph', 22)} 0%, transparent 70%)`, animationDelay: '3s' }}
+          style={{ background: `radial-gradient(circle, ${domainTint('predictions', 22)} 0%, transparent 70%)`, animationDelay: '3s' }}
         />
         <div
           className="absolute inset-0 opacity-[0.04]"
@@ -49,7 +47,7 @@ export function PlayerHero({
             WebkitMaskImage: 'radial-gradient(ellipse 85% 65% at 50% 0%, black 0%, transparent 72%)',
           }}
         />
-        {backdropLogos.slice(0, 4).map((url, i) => (
+        {backdropLogos.slice(0, 5).map((url, i) => (
           <img
             key={url + i}
             src={url}
@@ -67,10 +65,10 @@ export function PlayerHero({
             className="font-[var(--cd-font-display)] text-[28px] font-semibold leading-tight tracking-[-0.015em] sm:text-[34px]"
             style={{ color: 'var(--cd-text-primary)' }}
           >
-            Player Intelligence
+            Matches
           </h1>
           <p className="mt-2.5 max-w-xl font-[var(--cd-font-body)] text-[13.5px] leading-relaxed sm:text-[15px]" style={{ color: 'var(--cd-text-secondary)' }}>
-            Explore every {sport.label} player TitanIQ tracks, and jump straight to their team's AI intelligence.
+            Find any {sport.label} match — live, upcoming or completed — and open its full intelligence.
           </p>
         </div>
 
@@ -80,21 +78,22 @@ export function PlayerHero({
             type="search"
             value={search}
             onChange={(e) => onSearchChange(e.target.value)}
-            placeholder="Search players, teams, positions…"
+            placeholder="Search teams or competitions…"
             className="h-11 w-full rounded-[var(--cd-radius-md)] border pl-10 pr-3.5 backdrop-blur-md font-[var(--cd-font-body)] text-[13.5px] outline-none transition-colors duration-[var(--cd-motion-snap)] focus:border-[var(--cd-accent)]"
             style={{ borderColor: 'var(--cd-border-default)', backgroundColor: 'color-mix(in srgb, var(--cd-surface-2) 65%, transparent)', color: 'var(--cd-text-primary)' }}
           />
         </div>
 
-        {onSportChange && <SportSegmentedControl sport={sport} onSportChange={onSportChange} />}
+        <SportSegmentedControl sport={sport} onSportChange={onSportChange} />
       </div>
     </div>
   )
 }
 
 const LOGO_POSITIONS: Array<{ top?: string; bottom?: string; left?: string; right?: string; transform?: string }> = [
-  { top: '8%', right: '14%', transform: 'rotate(-8deg)' },
-  { bottom: '-6%', right: '28%', transform: 'rotate(6deg)' },
-  { top: '38%', right: '2%', transform: 'rotate(-4deg)' },
-  { bottom: '10%', left: '48%', transform: 'rotate(10deg)' },
+  { top: '6%', right: '10%', transform: 'rotate(-8deg)' },
+  { bottom: '-8%', right: '24%', transform: 'rotate(6deg)' },
+  { top: '40%', right: '0%', transform: 'rotate(-4deg)' },
+  { bottom: '12%', left: '46%', transform: 'rotate(10deg)' },
+  { top: '10%', left: '4%', transform: 'rotate(5deg)' },
 ]

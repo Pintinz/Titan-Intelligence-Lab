@@ -63,7 +63,7 @@ export function IntelligenceFeed() {
       title="Intelligence Feed"
       subtitle="News, breaking events and community signal in one stream"
       icon={<Rss className="size-4" aria-hidden="true" />}
-      viewAllHref={newsQuery.data && newsQuery.data.length > 0 ? '/app/news' : undefined}
+      viewAllHref={newsQuery.data && newsQuery.data.length > 0 ? '/app/context' : undefined}
     >
       {isLoading && (
         <div className="space-y-2.5">

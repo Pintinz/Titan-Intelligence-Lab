@@ -1,13 +1,12 @@
 import type { LucideIcon } from 'lucide-react'
 import {
   LayoutGrid,
-  Radio,
+  CalendarDays,
   Trophy,
   Users,
-  Target,
-  Star,
-  Bell,
-  BrainCircuit,
+  UserRound,
+  Newspaper,
+  Share2,
   ServerCog,
   FlaskConical,
   Settings,
@@ -32,32 +31,34 @@ export interface NavGroup {
 }
 
 /**
- * TitanIQ IA — task-first primary sidebar (Home/Live/Competitions/Teams/AI Picks/Watchlist/
- * Alerts/Assistant), not sport-first. Sport is a filter within Live/Competitions/Teams/AI Picks,
- * not a nav destination — the four Sport Intelligence Center routes (/app/:sport/*) still exist
- * and are still how Match/Team/Competition/Player detail pages are reached, just not listed here
- * directly anymore.
+ * TitanIQ IA — information-architecture restructure (shaped brief): eight real, distinct
+ * primary destinations (Intelligence Center / Matches / Teams / Players / Competitions /
+ * Context / Knowledge Graph / Account), not a task-first grab-bag. Sport is a filter within
+ * each destination, not a nav destination itself — the four Sport Intelligence Center routes
+ * (/app/:sport/*) still exist and are still how Match/Team/Competition/Player detail pages are
+ * reached, just not listed here directly.
  *
- * News Intelligence, Knowledge Graph, Learning Intelligence, and Analytics are deliberately
- * absent — per product direction, these are platform capabilities surfaced contextually inside
- * Match/Team/Competition/AI Picks/Assistant pages, not standalone nav destinations. Learning
- * Intelligence specifically stays an administrator capability inside Operations Center (its
- * existing /app/ops/ml page); end users consume its outputs through predictions, confidence,
- * and explainability, not a dedicated page. Their routes are not deleted, only unlinked from
- * primary nav — still reachable directly and via the command palette.
+ * Live, AI Picks, Watchlist, and Intelligence Workspace are deliberately absent from this list —
+ * per the confirmed shaped brief ("reorganize, remove nothing"), all three stay real, fully
+ * functional pages, demoted to the same contextual-reachability tier Knowledge Graph and News
+ * already occupied before this restructure: linked from Intelligence Center's own sections
+ * (Live Intelligence, Today's Top AI Intelligence, Following, the Workspace teaser all already
+ * link to their real pages) rather than a permanent sidebar row. Alerts is reachable from the
+ * topbar's own persistent bell icon on every page, same as before. Learning Intelligence stays
+ * an administrator capability inside Operations Center (/app/ops/ml); end users consume its
+ * outputs through predictions/confidence/explainability, not a dedicated page.
  */
 export const NAV_GROUPS: NavGroup[] = [
   {
     label: 'Explore',
     items: [
-      { label: 'Home', href: '/app', icon: LayoutGrid },
-      { label: 'Live', href: '/app/live', icon: Radio },
-      { label: 'Competitions', href: '/app/competitions', icon: Trophy },
+      { label: 'Intelligence Center', href: '/app', icon: LayoutGrid },
+      { label: 'Matches', href: '/app/matches', icon: CalendarDays },
       { label: 'Teams', href: '/app/teams', icon: Users },
-      { label: 'AI Picks', href: '/app/picks', icon: Target },
-      { label: 'Watchlist', href: '/app/watchlist', icon: Star },
-      { label: 'Alerts', href: '/app/notifications', icon: Bell },
-      { label: 'Intelligence Workspace', href: '/app/insights', icon: BrainCircuit },
+      { label: 'Players', href: '/app/players', icon: UserRound },
+      { label: 'Competitions', href: '/app/competitions', icon: Trophy },
+      { label: 'Context', href: '/app/context', icon: Newspaper },
+      { label: 'Knowledge Graph', href: '/app/graph', icon: Share2 },
     ],
   },
   {

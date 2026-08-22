@@ -38,7 +38,7 @@ export function MissionHero({
   const defaultSport = SPORT_SLUGS[0].slug
 
   const secondaryActions = [
-    { label: 'Browse Matches', href: `/app/${defaultSport}/matches`, icon: CalendarDays },
+    { label: 'Browse Matches', href: '/app/matches', icon: CalendarDays },
     ...(isAdmin ? [{ label: 'Prediction Laboratory', href: `/app/${defaultSport}/lab`, icon: FlaskConical }] : []),
     { label: 'Knowledge Graph', href: '/app/graph', icon: Waypoints },
     { label: 'Open Workspace', href: '/app/insights', icon: LayoutGrid },
