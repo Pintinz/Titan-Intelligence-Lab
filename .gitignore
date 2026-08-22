@@ -31,6 +31,23 @@ dev.db*
 .env.*
 !.env.example
 
+# Claude Code local settings — "local" is the project's own naming convention for
+# machine-specific config never meant to be shared; this one has recorded real exported secret
+# values from past shell commands (e.g. TITANIQ_ENCRYPTION_KEY) in its permissions allowlist.
+.claude/settings.local.json
+
+# Capacitor native projects — android/ and ios/ themselves ARE committed (Capacitor's own
+# convention: they hold real project config, not just generated output), only their per-machine
+# build/dependency-cache output is excluded here.
+frontend/android/app/build/
+frontend/android/.gradle/
+frontend/android/local.properties
+frontend/ios/App/Pods/
+frontend/ios/App/build/
+frontend/ios/DerivedData/
+frontend/**/*.xcuserstate
+frontend/**/xcuserdata/
+
 # OS
 .DS_Store
 Thumbs.db

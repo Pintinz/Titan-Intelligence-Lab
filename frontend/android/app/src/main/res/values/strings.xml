@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">TitanIQ</string>
+    <string name="title_activity_main">TitanIQ</string>
+    <string name="package_name">com.titaniq.sports</string>
+    <string name="custom_url_scheme">com.titaniq.sports</string>
+</resources>
