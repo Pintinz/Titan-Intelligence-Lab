@@ -54,8 +54,20 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 # Readiness Audit §9 — the app previously only ever ran as a single bare `uvicorn` process, no
 # `--workers`, no process manager). Override WEB_CONCURRENCY per deploy target's CPU budget.
 #
-# This one image also runs the Celery worker and Beat scheduler — override CMD at deploy time
-# rather than building separate images, since it's the same dependency set either way:
+# `alembic upgrade head &&` — found live (2026-08-23): the actual deployed Render web service was
+# created manually (outside the render.yaml Blueprint, which does specify this via its own
+# dockerCommand), and neither a Docker Command override nor a Pre-Deploy Command was ever
+# configured on it — meaning no migration had ever run automatically on any deploy of this
+# service. Every prior schema change only ever took effect because it was applied by a manual
+# one-off script against production, never as a real part of the deploy process itself. Putting
+# it in the image's own default CMD (rather than depending on a per-service dashboard field that's
+# easy to forget, exactly as happened here) means every deploy of this service is correct by
+# construction, not by remembering to configure something outside the repo. `alembic upgrade
+# head` is a no-op when already current, so this is always safe to run on every start.
+#
+# This one image also runs the Celery worker and Beat scheduler — those override this CMD entirely
+# at deploy time (their own Docker Command field on Render), so they never inherit the migration
+# step below and never race each other applying it:
 #   docker run <image> celery -A apps.worker.bootstrap worker --loglevel=info
 #   docker run <image> celery -A apps.worker.bootstrap beat --loglevel=info
-CMD ["sh", "-c", "uvicorn apps.api.main:app --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-4}"]
+CMD ["sh", "-c", "alembic upgrade head && uvicorn apps.api.main:app --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-4}"]
