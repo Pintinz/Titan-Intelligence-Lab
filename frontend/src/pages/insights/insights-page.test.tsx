@@ -142,7 +142,11 @@ describe('InsightsPage (Intelligence Workspace)', () => {
 
     await userEvent.click(screen.getByText('Teams'))
     await userEvent.type(screen.getByPlaceholderText(/Search matches, teams, competitions/), 'Arsenal')
-    await userEvent.click(await screen.findByText('Arsenal'))
+    // The results panel intentionally renders twice (under the hero search box and under the
+    // empty-state's "Ask TitanIQ" box, per insights-page.tsx's own docs) — either button pins
+    // the same real team, so the first match is as good as any.
+    const arsenalMatches = await screen.findAllByText('Arsenal')
+    await userEvent.click(arsenalMatches[0])
 
     await waitFor(() => expect(predictionsApi.history).toHaveBeenCalledWith('t1'))
     expect(await screen.findByText('Mission Brief')).toBeInTheDocument()
