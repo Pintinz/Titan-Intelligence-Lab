@@ -9,7 +9,7 @@ import { isLiveStatus } from '@/lib/sports-status'
 import { todayRange } from '@/lib/sports-date-ranges'
 import { useAuthStore } from '@/stores/auth-store'
 import { isAtLeast } from '@/lib/api/types'
-import { getDisplayNameFromEmail, getTimeAwareGreeting } from '@/lib/user-display-name'
+import { getDisplayNameFromUser, getTimeAwareGreeting } from '@/lib/user-display-name'
 import { MissionHero, type MissionHeroStatus, type SystemStatusTone } from '@/components/command-deck/mission-control/mission-hero'
 import { IntelligenceNow } from '@/components/command-deck/mission-control/intelligence-now'
 import { PriorityIntelligence } from '@/components/command-deck/mission-control/priority-intelligence'
@@ -42,7 +42,8 @@ import { MissionAmbientBackground } from '@/components/command-deck/mission-cont
  */
 export default function HomePage() {
   const profile = useAuthStore((s) => s.profile)
-  const displayName = getDisplayNameFromEmail(profile?.email)
+  const session = useAuthStore((s) => s.session)
+  const displayName = getDisplayNameFromUser(session?.user)
   const greeting = getTimeAwareGreeting()
   const isAdmin = !!profile && isAtLeast(profile.role, 'administrator')
   // Basketball/Baseball/Table Tennis are still under development — regular users only see

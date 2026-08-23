@@ -11,6 +11,32 @@ export function getDisplayNameFromEmail(email: string | null | undefined): strin
   return words.map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ')
 }
 
+/** Minimal shape this reads off a Supabase `User` — narrower than importing the real type so
+ * callers can pass `session?.user` (or a test double) without a `@supabase/supabase-js` import. */
+interface DisplayNameUser {
+  email?: string | null
+  app_metadata?: { provider?: string | null } | null
+  user_metadata?: Record<string, unknown> | null
+}
+
+/** Real display name for the signed-in user, provider-aware. Google (and any other real OAuth
+ * provider — anything that isn't Supabase's own "email" provider) hands back an actual name in
+ * `user_metadata` (`full_name`, then `name`, then `given_name` — whichever the provider actually
+ * populated), so that's shown verbatim rather than mangled from the address. Plain email/password
+ * accounts have no such field — Supabase only ever collects email + password for those (see
+ * `AuthFlow.handleSignup`) — so those fall back to the email-derived name, same as before. Null
+ * only when there's truly nothing to show. */
+export function getDisplayNameFromUser(user: DisplayNameUser | null | undefined): string | null {
+  const provider = user?.app_metadata?.provider
+  if (provider && provider !== 'email') {
+    const metadata = user.user_metadata ?? {}
+    const providerName = [metadata.full_name, metadata.name, metadata.given_name]
+      .find((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    if (providerName) return providerName.trim()
+  }
+  return getDisplayNameFromEmail(user?.email)
+}
+
 /** Real local-clock greeting band — 05:00-11:59 morning, 12:00-17:59 afternoon, everything else
  * (18:00-04:59) evening. Never "good night", per product direction. */
 export function getTimeAwareGreeting(now: Date = new Date()): string {

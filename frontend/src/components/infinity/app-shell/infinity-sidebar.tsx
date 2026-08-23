@@ -6,7 +6,7 @@ import { cn } from '@/lib/cn'
 import { useAuthStore } from '@/stores/auth-store'
 import { isAtLeast } from '@/lib/api/types'
 import { useUnreadAlertCount } from '@/lib/hooks/use-alerts'
-import { getDisplayNameFromEmail } from '@/lib/user-display-name'
+import { getDisplayNameFromUser } from '@/lib/user-display-name'
 import { NAV_GROUPS, BRAND } from '@/components/layout/nav-config'
 
 const PIN_STORAGE_KEY = 'titaniq:sidebar-pinned'
@@ -33,6 +33,7 @@ const PROFILE_MENU_ITEM_CLASS =
  */
 export function InfinitySidebar() {
   const profile = useAuthStore((s) => s.profile)
+  const session = useAuthStore((s) => s.session)
   const signOut = useAuthStore((s) => s.signOut)
   const role = profile?.role
   const unreadAlerts = useUnreadAlertCount()
@@ -72,7 +73,7 @@ export function InfinitySidebar() {
   }
 
   const collapsed = !expanded && !pinned
-  const displayName = getDisplayNameFromEmail(profile?.email)
+  const displayName = getDisplayNameFromUser(session?.user)
   const initial = (displayName ?? profile?.email ?? '?').charAt(0).toUpperCase()
   const navGroups = NAV_GROUPS.filter((g) => g.label !== 'Account')
 
