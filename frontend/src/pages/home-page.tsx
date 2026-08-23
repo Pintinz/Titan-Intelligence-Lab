@@ -4,18 +4,20 @@ import { marketsApi } from '@/lib/api/markets'
 import { predictionsApi } from '@/lib/api/predictions'
 import { intelligenceApi } from '@/lib/api/intelligence'
 import { useAvailableSports } from '@/lib/hooks/use-sport'
-import { useWatchlist } from '@/lib/hooks/use-watchlist'
+import { usePriorityIntelligence } from '@/lib/hooks/use-priority-intelligence'
 import { isLiveStatus } from '@/lib/sports-status'
 import { todayRange } from '@/lib/sports-date-ranges'
 import { useAuthStore } from '@/stores/auth-store'
 import { isAtLeast } from '@/lib/api/types'
 import { getDisplayNameFromEmail, getTimeAwareGreeting } from '@/lib/user-display-name'
 import { MissionHero, type MissionHeroStatus, type SystemStatusTone } from '@/components/command-deck/mission-control/mission-hero'
-import { AiOperationsOverview, type OperationsMetric } from '@/components/command-deck/mission-control/ai-operations-overview'
+import { IntelligenceNow } from '@/components/command-deck/mission-control/intelligence-now'
+import { PriorityIntelligence } from '@/components/command-deck/mission-control/priority-intelligence'
 import { LiveIntelligence, type FixtureCardItem } from '@/components/command-deck/mission-control/live-intelligence'
 import { AiReadyFixtures } from '@/components/command-deck/mission-control/ai-ready-fixtures'
 import { TopAiIntelligence } from '@/components/command-deck/mission-control/top-ai-intelligence'
 import { IntelligenceFeed } from '@/components/command-deck/mission-control/intelligence-feed'
+import { KnowledgeGraphTeaser } from '@/components/command-deck/mission-control/knowledge-graph-teaser'
 import { CompetitionsUnderWatch } from '@/components/command-deck/mission-control/competitions-under-watch'
 import { RecentlyCompletedCrossSport } from '@/components/command-deck/mission-control/recently-completed-cross-sport'
 import { FollowingSection } from '@/components/command-deck/mission-control/following-section'
@@ -23,19 +25,20 @@ import { WorkspaceTeaser } from '@/components/command-deck/mission-control/works
 import { MissionAmbientBackground } from '@/components/command-deck/mission-control/mission-ambient-background'
 
 /**
- * Mission Control — Command Deck. Every section here caps at 6 cards and reads from a real,
- * already-existing backend endpoint; nothing is fabricated. Several sections reuse an existing
- * component outright (`AiPickCard`+dedup for Top AI Intelligence, `RecentlyCompletedIntelligence`
- * generalized across sports) instead of a second implementation. Data-fetching for Live/AI Ready/
- * Overview all lives here once (this page's own cross-sport `useQueries` pattern) so no section
- * below re-fetches what this page already has; sections that are self-contained (Intelligence
- * Feed, Competitions Under Watch, Following, Top AI Intelligence) use the exact same React Query
- * keys a sibling section already reads where the same data applies, so TanStack Query dedupes the
- * network call automatically rather than this page prop-drilling every value.
+ * Mission Control — Command Deck. A ranked cascade, not a wall of equal-weight sections:
+ * Intelligence Now (rank 0 of the confidence-ranked pick pool) -> Priority Intelligence (ranks
+ * 1-3) -> ... -> Top Intelligence (rank 4+) share one pool via `usePriorityIntelligence`/
+ * `rankPicks` so the same match never appears twice. The former 8-tile "AI Operations Overview"
+ * is gone outright (not folded elsewhere) — each of its numbers already lives on its owning page
+ * (Watchlist, Competitions, Context); the 4 that earned a new home moved into Intelligence Now's
+ * compact snapshot panel instead. Data-fetching for Live/AI Ready lives here once (this page's own
+ * cross-sport `useQueries` pattern) so no section below re-fetches what this page already has;
+ * self-contained sections (Intelligence Feed, Competitions Under Watch, Following, Top
+ * Intelligence) use the exact same React Query keys a sibling section already reads where the same
+ * data applies, so TanStack Query dedupes the network call automatically.
  */
 export default function HomePage() {
   const profile = useAuthStore((s) => s.profile)
-  const watchlist = useWatchlist()
   const displayName = getDisplayNameFromEmail(profile?.email)
   const greeting = getTimeAwareGreeting()
   const isAdmin = !!profile && isAtLeast(profile.role, 'administrator')
@@ -91,18 +94,8 @@ export default function HomePage() {
 
   const monitoringQuery = useQuery({ queryKey: ['predictions', 'monitoring', 'summary', 'home'], queryFn: () => predictionsApi.monitoringSummary() })
 
-  // Same query key Competitions Under Watch / Intelligence Feed use internally — TanStack Query
-  // dedupes these into the exact same network request, so the Overview tiles below cost nothing
-  // extra even though they need a total this page doesn't otherwise compute.
-  const competitionCountQueries = useQueries({
-    queries: sports.map((sport) => ({
-      queryKey: ['sports', sport.code, 'competitions', 'mission-control'],
-      queryFn: () => sportsApi.listCompetitions(sport.code),
-      staleTime: 5 * 60 * 1000,
-    })),
-  })
-  const trackedCompetitions = competitionCountQueries.reduce((sum, q) => sum + (q.data?.length ?? 0), 0)
-
+  // Same query key Intelligence Feed uses internally — TanStack Query dedupes this into the exact
+  // same network request. Doubles as the Intelligence Snapshot's real "Context updates" count.
   const newsCountQuery = useQuery({ queryKey: ['intelligence', 'news', 'mission-control'], queryFn: () => intelligenceApi.searchNews({ limit: 8 }) })
 
   // Real "when did TitanIQ last pull data from a provider" reading, not derived from unrelated
@@ -123,16 +116,8 @@ export default function HomePage() {
     lastSync,
   }
 
-  const overviewMetrics: OperationsMetric[] = [
-    { label: 'Live matches', value: anyLiveLoading ? null : liveWithSport.length, description: 'Fixtures live across every covered sport right now.', status: liveWithSport.length > 0 ? { label: 'Live', tone: 'live' } : undefined },
-    { label: "Today's fixtures", value: anyTodayLoading ? null : todayWithSport.length, description: "Everything scheduled today, across every covered sport." },
-    { label: 'AI ready matches', value: aiReadyLoading || marketQueries.some((q) => q.isPending) ? null : aiReadyItems.filter((i) => aiAvailableBySport.has(i.sport.code)).length, description: 'Fixtures with a trained market ready to generate intelligence.', domain: 'predictions' },
-    { label: 'Published intelligence', value: monitoringQuery.isPending ? null : ((monitoringQuery.data?.predictions_by_status as Record<string, number> | undefined)?.published ?? 0), description: 'Published predictions in the most recent sample.', domain: 'predictions' },
-    { label: 'Tracked competitions', value: competitionCountQueries.some((q) => q.isPending) ? null : trackedCompetitions, description: 'Competitions under TitanIQ coverage across every sport.', domain: 'operations' },
-    { label: 'Breaking stories', value: newsCountQuery.isPending ? null : newsCountQuery.data?.length ?? 0, description: 'Recently synced news articles.', domain: 'news' },
-    { label: 'Following', value: watchlist.isPending ? null : (watchlist.data?.length ?? 0), description: 'Matches, teams and competitions you follow.' },
-    { label: 'System health', value: undefined, description: 'Prediction Engine and live monitoring status.', status: { label: predictionEngineStatus.label, tone: predictionEngineStatus.tone }, domain: 'operations' },
-  ]
+  const priority = usePriorityIntelligence()
+  const aiReadyCount = aiReadyLoading || marketQueries.some((q) => q.isPending) ? null : aiReadyItems.filter((i) => aiAvailableBySport.has(i.sport.code)).length
 
   return (
     <div className="command-deck relative isolate space-y-8 rounded-[var(--cd-radius-xl)] bg-[var(--cd-bg)] p-3 sm:p-4 lg:p-6">
@@ -140,15 +125,28 @@ export default function HomePage() {
 
       <MissionHero greeting={greeting} name={displayName} isAdmin={isAdmin} status={heroStatus} />
 
-      <AiOperationsOverview metrics={overviewMetrics} />
+      <IntelligenceNow
+        item={priority.heroItem}
+        isLoading={priority.isLoading}
+        snapshot={{
+          live: anyLiveLoading ? null : liveWithSport.length,
+          today: anyTodayLoading ? null : todayWithSport.length,
+          aiReady: aiReadyCount,
+          contextUpdates: newsCountQuery.isPending ? null : (newsCountQuery.data?.length ?? 0),
+        }}
+      />
 
-      <LiveIntelligence items={sortByKickoff(liveWithSport)} isLoading={anyLiveLoading} aiAvailableBySport={aiAvailableBySport} />
+      <PriorityIntelligence items={priority.priorityItems} isLoading={priority.isLoading} />
 
       <AiReadyFixtures items={aiReadyItems} isLoading={aiReadyLoading} isFallback={showUpcomingFallback} aiAvailableBySport={aiAvailableBySport} />
 
-      <TopAiIntelligence />
+      <LiveIntelligence items={sortByKickoff(liveWithSport)} isLoading={anyLiveLoading} aiAvailableBySport={aiAvailableBySport} />
 
       <IntelligenceFeed />
+
+      <TopAiIntelligence rankOffset={priority.topIntelligenceRankOffset} />
+
+      <KnowledgeGraphTeaser />
 
       <CompetitionsUnderWatch liveFixtures={liveWithSport} upcomingFixtures={todayWithSport} />
 

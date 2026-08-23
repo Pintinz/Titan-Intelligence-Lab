@@ -109,13 +109,11 @@ export function MissionHero({
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-t pt-4" style={{ borderColor: 'var(--cd-border-hairline)' }}>
-          <StatusItem label="AI Models" statusLabel="Online" tone="ready" />
-          <StatusItem label="Prediction Engine" statusLabel={status.predictionEngine.label} tone={status.predictionEngine.tone} />
-          <StatusItem label="Live Monitoring" statusLabel={status.liveMonitoring.label} tone={status.liveMonitoring.tone} />
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-t pt-4" style={{ borderColor: 'var(--cd-border-hairline)' }}>
+          <CombinedStatus predictionEngine={status.predictionEngine} liveMonitoring={status.liveMonitoring} />
           {status.lastSync && (
             <span className="font-[var(--cd-font-telemetry)] text-[11px]" style={{ color: 'var(--cd-text-muted)' }}>
-              Last sync <span className="font-[var(--cd-font-tabular)] tabular-nums">{status.lastSync}</span>
+              · Updated <span className="font-[var(--cd-font-tabular)] tabular-nums">{status.lastSync}</span>
             </span>
           )}
         </div>
@@ -124,13 +122,18 @@ export function MissionHero({
   )
 }
 
-function StatusItem({ label, statusLabel, tone }: { label: string; statusLabel: string; tone: SystemStatusTone }) {
-  return (
-    <div className="flex items-center gap-2">
-      <span className="font-[var(--cd-font-body)] text-[11px]" style={{ color: 'var(--cd-text-muted)' }}>
-        {label}
-      </span>
-      <CDStatusDot label={statusLabel} tone={tone === 'ready' ? 'ready' : tone === 'building' ? 'building' : 'idle'} />
-    </div>
-  )
+/** One combined status line, not a row of infrastructure tiles — the common case ("everything's
+ * fine") stays a single quiet dot; a real degradation on either the prediction engine or live
+ * monitoring is the only thing that earns a named warning. */
+function CombinedStatus({
+  predictionEngine,
+  liveMonitoring,
+}: {
+  predictionEngine: { label: string; tone: SystemStatusTone }
+  liveMonitoring: { label: string; tone: SystemStatusTone }
+}) {
+  if (predictionEngine.tone === 'idle') return <CDStatusDot label="Prediction engine unavailable" tone="idle" />
+  if (liveMonitoring.tone === 'idle') return <CDStatusDot label="Live monitoring offline" tone="idle" />
+  if (predictionEngine.tone === 'building' || liveMonitoring.tone === 'building') return <CDStatusDot label="Intelligence connecting" tone="building" />
+  return <CDStatusDot label="Intelligence online" tone="ready" />
 }

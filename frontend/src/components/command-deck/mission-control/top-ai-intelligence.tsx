@@ -4,37 +4,33 @@ import { BrainCircuit } from 'lucide-react'
 import { predictionsApi } from '@/lib/api/predictions'
 import { sportsApi } from '@/lib/api/sports'
 import { SPORT_SLUGS } from '@/lib/hooks/use-sport'
-import { dedupeByFixture } from '@/lib/predictions/dedupe-by-fixture'
+import { rankPicks } from '@/lib/predictions/dedupe-by-fixture'
 import { fixtureCardStatus } from '@/lib/sports-status'
-import { AiPickCard, AI_PICK_CONFIDENCE_FLOOR } from '../ai-picks/ai-pick-card'
+import { AiPickCard } from '../ai-picks/ai-pick-card'
 import { MissionSection, MissionCardGrid, MissionSkeletonGrid, MissionEmptyState } from './mission-section'
 import type { PredictionPickDto, FixtureSummaryDto } from '@/lib/api/types'
 
-const DISPLAY_LIMIT = 6
+const DISPLAY_LIMIT = 4
 
 function sportSlugFor(code: string): string {
   return SPORT_SLUGS.find((s) => s.code === code)?.slug ?? code
 }
 
 /**
- * Today's Top AI Intelligence — the exact `AiPickCard` + fixture-dedup + confidence-floor logic
- * shipped for `/app/picks`, capped at 6 for the Mission Control preview. Never a second
- * implementation of "one card per match" — same shared `dedupeByFixture` helper, same floor
- * constant, so the two surfaces can't drift.
+ * Top Intelligence — the next tier of the same ranked pick pool Intelligence Now and Priority
+ * Intelligence already consumed. `rankOffset` skips whatever rank those two sections already
+ * claimed (0 and 1-3) so the same match is never shown three times on one page — same shared
+ * `rankPicks` helper as `/app/picks`, so no surface can drift on what "ranked" means.
  */
-export function TopAiIntelligence() {
+export function TopAiIntelligence({ rankOffset = 0 }: { rankOffset?: number } = {}) {
   const query = useQuery({
     queryKey: ['predictions', 'picks', 'mission-control'],
     queryFn: () => predictionsApi.picks({ limit: 100 }),
   })
 
   const topPicks = useMemo(
-    () =>
-      dedupeByFixture(query.data ?? [])
-        .filter((pick) => pick.confidence_composite >= AI_PICK_CONFIDENCE_FLOOR)
-        .sort((a, b) => b.confidence_composite - a.confidence_composite)
-        .slice(0, DISPLAY_LIMIT),
-    [query.data],
+    () => rankPicks(query.data ?? []).slice(rankOffset, rankOffset + DISPLAY_LIMIT),
+    [query.data, rankOffset],
   )
 
   const fixtureQueries = useQueries({
@@ -55,8 +51,8 @@ export function TopAiIntelligence() {
   return (
     <MissionSection
       id="top-ai-intelligence"
-      title="Today's Top AI Intelligence"
-      subtitle="The strongest ranked predictions across every sport"
+      title="Top Intelligence"
+      subtitle="More AI-ranked signals across every sport"
       icon={<BrainCircuit className="size-4" aria-hidden="true" />}
       domain="predictions"
       viewAllHref="/app/picks"
