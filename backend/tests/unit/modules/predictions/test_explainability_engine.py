@@ -256,3 +256,53 @@ async def test_explain_broken_cache_backend_degrades_to_always_miss_not_error(re
     bundle = await engine.explain("fixture-1", "football.match_result", output, probability=0.55)
 
     assert bundle.ai_explanation == "explained football.match_result at p=0.55"  # a broken cache never blocks a good result
+
+
+@pytest.mark.asyncio
+async def test_explain_provider_failure_degrades_to_empty_explanation_not_error(retrieval_service):
+    """The base prediction (value/probability/confidence) is already fully computed by the time
+    this runs — a Gemini/provider failure (quota, network, an undecryptable stored credential)
+    must degrade `ai_explanation` to "", never raise and take the whole prediction down with it."""
+
+    class _FailingTextIntelligenceProvider:
+        provider_key = "failing"
+
+        async def explain(self, context: dict) -> str:
+            raise RuntimeError("credential ciphertext is invalid or was encrypted with a different key")
+
+    engine = ExplainabilityEngine(retrieval=retrieval_service, text_intelligence=_FailingTextIntelligenceProvider(), top_n=3)
+    output = PredictorOutput(raw_score=0.1, probability=0.55, value="positive", feature_contributions={"a": 0.1})
+
+    bundle = await engine.explain("fixture-1", "football.match_result", output, probability=0.55)
+
+    assert bundle.ai_explanation == ""
+    assert bundle.top_positive_features == (("a", 0.1),)  # the rest of the bundle is unaffected
+
+
+@pytest.mark.asyncio
+async def test_explain_provider_failure_does_not_populate_cache(retrieval_service):
+    """A failed narration must not poison the cache with an empty result — the next call (once the
+    provider recovers) should try Gemini again, not serve the empty string forever."""
+
+    class _FlakyTextIntelligenceProvider:
+        provider_key = "flaky"
+
+        def __init__(self):
+            self.call_count = 0
+
+        async def explain(self, context: dict) -> str:
+            self.call_count += 1
+            if self.call_count == 1:
+                raise RuntimeError("transient provider failure")
+            return f"explained {context['market_key']} at p={context['probability']}"
+
+    provider = _FlakyTextIntelligenceProvider()
+    engine = ExplainabilityEngine(retrieval=retrieval_service, text_intelligence=provider, top_n=3, cache=_FakeSyncCache())
+    output = PredictorOutput(raw_score=0.1, probability=0.55, value="positive", feature_contributions={"a": 0.1})
+
+    first = await engine.explain("fixture-1", "football.match_result", output, probability=0.55)
+    second = await engine.explain("fixture-1", "football.match_result", output, probability=0.55)
+
+    assert first.ai_explanation == ""
+    assert second.ai_explanation == "explained football.match_result at p=0.55"
+    assert provider.call_count == 2

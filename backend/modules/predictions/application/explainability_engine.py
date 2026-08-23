@@ -81,24 +81,34 @@ class ExplainabilityEngine:
                 ai_explanation = None
 
         if ai_explanation is None:
-            ai_explanation = await self.text_intelligence.explain(
-                {
-                    "market_key": market_key,
-                    "subject_ref": subject_ref,
-                    "probability": probability,
-                    "top_positive_features": positive,
-                    "top_negative_features": negative,
-                    "feature_importance": [{"feature_key": key, "importance": value} for key, value in ranked],
-                    "knowledge_graph_evidence": knowledge_graph_evidence,
-                    "news_contribution": news_contribution,
-                    "community_contribution": community_contribution,
-                }
-            )
-            if self.cache is not None:
-                try:
-                    await self.cache.set(cache_key, ai_explanation, _CACHE_TTL_SECONDS)
-                except Exception:  # noqa: BLE001 — a broken cache backend must never block a good result
-                    pass
+            try:
+                ai_explanation = await self.text_intelligence.explain(
+                    {
+                        "market_key": market_key,
+                        "subject_ref": subject_ref,
+                        "probability": probability,
+                        "top_positive_features": positive,
+                        "top_negative_features": negative,
+                        "feature_importance": [{"feature_key": key, "importance": value} for key, value in ranked],
+                        "knowledge_graph_evidence": knowledge_graph_evidence,
+                        "news_contribution": news_contribution,
+                        "community_contribution": community_contribution,
+                    }
+                )
+            except Exception:  # noqa: BLE001 — the quantitative prediction (value/probability/
+                # confidence) is already fully computed above; a Gemini/provider failure (quota,
+                # network, an undecryptable stored credential) must degrade the narration to
+                # missing, never take down the entire prediction — same posture already used for
+                # the optional contextual_review/football_explanation narrations. `ExplanationBundle
+                # .ai_explanation` is a plain `str` (default `""`), never `Optional` — "" is the
+                # correct missing-value sentinel here, not `None`.
+                ai_explanation = ""
+            else:
+                if self.cache is not None:
+                    try:
+                        await self.cache.set(cache_key, ai_explanation, _CACHE_TTL_SECONDS)
+                    except Exception:  # noqa: BLE001 — a broken cache backend must never block a good result
+                        pass
 
         return ExplanationBundle(
             top_positive_features=positive,
