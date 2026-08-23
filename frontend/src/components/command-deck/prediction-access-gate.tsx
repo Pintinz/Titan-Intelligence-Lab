@@ -38,7 +38,7 @@ type AdFlowState =
   | { phase: 'confirming' }
   | { phase: 'rewarded' }
   | { phase: 'confirm_timeout' }
-  | { phase: 'outcome'; outcome: Exclude<RewardOutcome['status'], 'rewarded'> }
+  | { phase: 'outcome'; outcome: Exclude<RewardOutcome['status'], 'rewarded'> | 'account_not_ready' }
 
 /** Polls `/predictions/entitlement` for up to 20s waiting for the balance to actually rise — the
  * AdMob SDK confirming "rewarded" client-side is not the same claim as the backend's SSV callback
@@ -62,7 +62,15 @@ export function PredictionAccessExhaustedCard() {
   const [state, setState] = useState<AdFlowState>({ phase: 'idle' })
 
   async function handleWatchAd() {
-    if (!profile) return
+    // `profile` loads asynchronously after sign-in (auth-store.ts's `refreshProfile()` is
+    // fire-and-forget) — a bare `return` here on a slow/failed profile fetch left the button
+    // silently doing nothing when clicked (no video, no message, no error), reported live as
+    // "clicking watch video did not pop up any video." Surfacing it as a real outcome state means
+    // the user always sees *something* happened, never silence.
+    if (!profile) {
+      setState({ phase: 'outcome', outcome: 'account_not_ready' })
+      return
+    }
     if (!isNativePlatform()) {
       setState({ phase: 'outcome', outcome: 'unavailable_on_web' })
       return
@@ -152,7 +160,7 @@ function StatusLine({
   )
 }
 
-function OutcomeMessage({ outcome }: { outcome: Exclude<RewardOutcome['status'], 'rewarded'> }) {
+function OutcomeMessage({ outcome }: { outcome: Exclude<RewardOutcome['status'], 'rewarded'> | 'account_not_ready' }) {
   switch (outcome) {
     case 'dismissed_without_reward':
       return <StatusLine icon={TriangleAlert} label="Reward not completed." />
@@ -163,5 +171,7 @@ function OutcomeMessage({ outcome }: { outcome: Exclude<RewardOutcome['status'],
       return <StatusLine icon={WifiOff} label="An internet connection is required to load the rewarded video." />
     case 'unavailable_on_web':
       return <StatusLine icon={MonitorSmartphone} label="Rewarded unlocks are available in the TitanIQ mobile app." />
+    case 'account_not_ready':
+      return <StatusLine icon={TriangleAlert} label="Still loading your account — please try again in a moment." />
   }
 }

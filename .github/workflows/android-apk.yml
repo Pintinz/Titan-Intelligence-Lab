@@ -31,7 +31,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # @capacitor/cli@8.5.0 hard-requires Node >=22 — `npx cap sync android` fails instantly
+          # ("[fatal] The Capacitor CLI requires NodeJS >=22.0.0") under Node 20, confirmed by
+          # reproducing this exact failure locally before bumping this. ci.yml's separate
+          # frontend-build job intentionally stays on Node 20 (npm run build/test don't need 22);
+          # this workflow needs the newer version specifically for the Capacitor CLI step.
+          node-version: "22"
           cache: "npm"
           cache-dependency-path: frontend/package-lock.json
 

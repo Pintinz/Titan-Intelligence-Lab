@@ -48,6 +48,27 @@ describe('PredictionAccessIndicator', () => {
 })
 
 describe('PredictionAccessExhaustedCard', () => {
+  it('shows a real "account not ready" message instead of silently doing nothing when profile has not loaded yet', async () => {
+    // Live bug (2026-08-23): `profile` loads asynchronously after sign-in (auth-store.ts's
+    // fire-and-forget `refreshProfile()`); a bare `if (!profile) return` on click meant a user who
+    // reached this card before that resolved saw nothing happen at all — no video, no message —
+    // reported as "clicking watch video did not pop up any video."
+    useAuthStore.setState({ profile: null })
+    vi.mocked(isNativePlatform).mockReturnValue(true)
+    vi.mocked(predictionsApi.entitlement).mockResolvedValue({
+      available_predictions: 0,
+      initial_free_predictions: 5,
+      rewarded_predictions_granted: 0,
+      requires_rewarded_ad: true,
+    })
+
+    renderWithProviders(<PredictionAccessExhaustedCard />)
+    await userEvent.click(await screen.findByText(/Watch Video & Unlock/))
+
+    expect(await screen.findByText(/Still loading your account/)).toBeInTheDocument()
+    expect(showRewardedPredictionAd).not.toHaveBeenCalled()
+  })
+
   it('shows the web fallback message and never calls the native AdMob SDK — spec Phase 4', async () => {
     vi.mocked(isNativePlatform).mockReturnValue(false)
     vi.mocked(predictionsApi.entitlement).mockResolvedValue({
