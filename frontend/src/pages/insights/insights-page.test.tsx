@@ -173,7 +173,11 @@ describe('InsightsPage (Intelligence Workspace)', () => {
     renderPage(['/app/insights?pin_type=fixture&pin_id=f1'])
     await waitFor(async () => expect((await screen.findAllByText('ARS vs CHE')).length).toBeGreaterThan(0))
 
-    await userEvent.click(screen.getByRole('button', { name: 'Predictions' }))
+    // Passed locally but flaked in CI's slower environment: the previous line's findAllByText
+    // waits for the fixture name, but not for the "Predictions" tab itself to finish rendering —
+    // findByRole (not getByRole) closes that race instead of relying on the two happening to land
+    // in the same tick.
+    await userEvent.click(await screen.findByRole('button', { name: 'Predictions' }))
     await userEvent.click(await screen.findByText('View evidence →'))
 
     await waitFor(() => expect(predictionsApi.get).toHaveBeenCalledWith('p1'))
