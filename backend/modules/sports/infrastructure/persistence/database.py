@@ -18,13 +18,23 @@ class DatabaseSettings(BaseSettings):
 
     url: str
     echo: bool = False
-    pool_size: int = 10
+    # Real prod incident (2026-08-23): these were sized as if 10+5=15 was this *worker's own*
+    # generous budget — actually the full ceiling Supabase's port-5432 "session mode" pooler
+    # allowed *shared across every worker and every other client*. Once TITANIQ_DB_URL moved to
+    # port 6543 ("transaction mode" — much higher effective capacity, Supabase's own documented
+    # fix for a multi-connection app server), the same 10+5 became the bottleneck one level down:
+    # `sqlalchemy.exc.TimeoutError: QueuePool limit of size 10 overflow 5 reached` under real
+    # concurrent load, since 4 uvicorn workers each independently cap out this low with pages like
+    # Team/Player/Competition Intelligence firing 5-6 concurrent queries per load. Raised now that
+    # the upstream constraint that justified the old low value is gone; still well under a
+    # transaction-mode pooler's real ceiling even across all 4 workers (4 * (20+10) = 120 total).
+    pool_size: int = 20
     # Recycles a connection SQLAlchemy hasn't verified is still alive before handing it to a
     # caller (a real production gap without this — a Postgres failover or an idle-connection
     # timeout on the DB side previously surfaced as a runtime error mid-request instead of being
     # transparently recycled, Production Readiness Audit §1). SQLite has no server-side connection
     # to go stale, so this only applies on the Postgres branch below.
-    max_overflow: int = 5
+    max_overflow: int = 10
 
     @field_validator("url")
     @classmethod
