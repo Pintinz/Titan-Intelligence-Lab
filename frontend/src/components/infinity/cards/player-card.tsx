@@ -7,6 +7,7 @@ export interface PlayerCardProps {
   /** Real fields — populated from `PlayerSummaryDto`. */
   team?: string | null
   position?: string | null
+  photoUrl?: string | null
   /** Demo-only — no fixture-to-player lineup link exists in the backend yet, so real
    * callers must omit availability/stat rather than fabricate them. */
   statLabel?: string
@@ -14,9 +15,10 @@ export interface PlayerCardProps {
   available?: boolean
 }
 
-/** Identity-first shell — a flat hairline card with a domain-tinted initials medallion, not the
- * corner-tick evidence-panel treatment: a roster is scanned for who's who, not read for proof. */
-export function InfinityPlayerCard({ name, domain, team, position, statLabel, statValue, available }: PlayerCardProps) {
+/** Identity-first shell — a flat hairline card with the player's real headshot when the provider
+ * has one, falling back to a domain-tinted initials medallion otherwise; not the corner-tick
+ * evidence-panel treatment: a roster is scanned for who's who, not read for proof. */
+export function InfinityPlayerCard({ name, domain, team, position, photoUrl, statLabel, statValue, available }: PlayerCardProps) {
   const subtitle = [team, position].filter(Boolean).join(' · ')
   const tone = `var(--infinity-domain-${domain})`
   return (
@@ -28,11 +30,14 @@ export function InfinityPlayerCard({ name, domain, team, position, statLabel, st
     >
       <div className="flex items-center gap-3">
         <div
-          className="flex size-11 shrink-0 items-center justify-center rounded-infinity-sm border font-infinity-display text-[13px] font-semibold"
+          className="flex size-11 shrink-0 items-center justify-center overflow-hidden rounded-infinity-sm border font-infinity-display text-[13px] font-semibold"
           style={{ borderColor: `${tone}40`, color: tone }}
-          aria-hidden="true"
         >
-          {name.split(' ').map((p) => p[0]).slice(0, 2).join('')}
+          {photoUrl ? (
+            <img src={photoUrl} alt="" className="size-full object-cover" loading="lazy" />
+          ) : (
+            <span aria-hidden="true">{name.split(' ').map((p) => p[0]).slice(0, 2).join('')}</span>
+          )}
         </div>
         <div className="min-w-0 flex-1">
           <p className="truncate font-infinity-display text-[14px] font-semibold text-infinity-text-primary">{name}</p>

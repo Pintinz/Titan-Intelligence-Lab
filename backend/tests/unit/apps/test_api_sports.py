@@ -150,7 +150,10 @@ async def seeded(db_session_factory):
         )
 
         player = await SqlAlchemyPlayerRepository(session=session).upsert(
-            Player(id=PlayerId(uuid.uuid4()), sport_id=sport.id, name="Test Striker", date_of_birth=None, position="FW", team_id=home.id)
+            Player(
+                id=PlayerId(uuid.uuid4()), sport_id=sport.id, name="Test Striker", date_of_birth=None, position="FW",
+                team_id=home.id, photo_url="https://media.api-sports.io/football/players/1.png",
+            )
         )
 
         competition = await SqlAlchemyCompetitionRepository(session=session).upsert(
@@ -837,6 +840,7 @@ def test_list_players_for_sport(client, auth_headers, seeded):
     assert len(data) == 1
     assert data[0]["name"] == "Test Striker"
     assert data[0]["team_name"] == "Liverpool FC"
+    assert data[0]["photo_url"] == "https://media.api-sports.io/football/players/1.png"
 
 
 def test_get_player(client, auth_headers, seeded):
@@ -844,6 +848,7 @@ def test_get_player(client, auth_headers, seeded):
     response = client.get(f"/api/v1/sports/players/{player_id}", headers=auth_headers)
     assert response.status_code == 200
     assert response.json()["data"]["name"] == "Test Striker"
+    assert response.json()["data"]["photo_url"] == "https://media.api-sports.io/football/players/1.png"
 
 
 def test_get_unknown_player_returns_404(client, auth_headers):

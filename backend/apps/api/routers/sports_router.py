@@ -246,6 +246,7 @@ def _serialize_player_summary(p: Player, team_name: str | None) -> dict:
         "position": p.position,
         "team_id": str(p.team_id) if p.team_id else None,
         "team_name": team_name,
+        "photo_url": p.photo_url,
     }
 
 

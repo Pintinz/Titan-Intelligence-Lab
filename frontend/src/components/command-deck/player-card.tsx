@@ -7,9 +7,9 @@ import type { EnrichedPlayer } from '@/lib/hooks/use-player-intelligence'
 
 /**
  * PlayerCard — Player Intelligence's card unit, same flat-bordered/Vercel-grammar shape as
- * `TeamCard`. The backend exposes no player headshot, so the avatar tile shows the player's real
- * team crest (joined via `team_id`) instead of a stock silhouette or fabricated photo; players
- * with no team fall back to an initial like an unlogo'd team does. "Generate Intelligence" only
+ * `TeamCard`. The avatar tile shows the player's own real headshot when the provider has one;
+ * otherwise it falls back to their team crest (joined via `team_id`), then to an initial like an
+ * unlogo'd team does — never a stock silhouette or fabricated photo. "Generate Intelligence" only
  * renders when the player's team has a real next fixture — there is no player-level generate
  * endpoint, so this deep-links to the team's actual next scheduled fixture, same honesty rule as
  * `TeamCard`'s own CTA.
@@ -54,7 +54,9 @@ export function PlayerCard({
           className="flex shrink-0 items-center justify-center overflow-hidden rounded-[var(--cd-radius-sm)] border"
           style={{ width: 40, height: 40, borderColor: 'var(--cd-border-default)', backgroundColor: 'var(--cd-surface-3)' }}
         >
-          {player.teamLogoUrl ? (
+          {player.photo_url ? (
+            <img src={player.photo_url} alt="" className="size-full object-cover" loading="lazy" />
+          ) : player.teamLogoUrl ? (
             <img src={player.teamLogoUrl} alt="" className="object-contain" style={{ width: 26, height: 26 }} loading="lazy" />
           ) : (
             <span aria-hidden="true" className="font-[var(--cd-font-display)] text-[13px] font-semibold" style={{ color: domainColor }}>

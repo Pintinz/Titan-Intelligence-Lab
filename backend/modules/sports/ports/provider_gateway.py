@@ -74,6 +74,7 @@ class ProviderPlayerRecord:
     name: str
     date_of_birth: datetime | None
     position: str | None
+    photo_url: str | None = None
 
 
 @dataclass(frozen=True)

@@ -261,6 +261,7 @@ class ApiFootballAdapter(_ApiSportsHttpAdapterBase):
                     name=player.get("name", ""),
                     date_of_birth=datetime.fromisoformat(birth_date) if birth_date else None,
                     position=(games.get("position") or "").lower() or None,
+                    photo_url=player.get("photo"),
                 )
             )
         return records

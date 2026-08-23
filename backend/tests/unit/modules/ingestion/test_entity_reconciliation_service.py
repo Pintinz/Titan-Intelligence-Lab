@@ -547,6 +547,37 @@ async def test_reconcile_player_resolves_team_id(service, session):
 
 
 @pytest.mark.asyncio
+async def test_reconcile_player_keeps_existing_photo_when_a_later_sync_reports_none(service, session):
+    """Matches `reconcile_team`'s `logo_url` fallback: a resync that doesn't report a photo (e.g.
+    a provider outage returning a partial record) must never blank out a real one already on file."""
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    team, _ = await service.reconcile_team(_team_record(), sport.id, T0)
+    await session.commit()
+
+    ref = ProviderRef(provider="mock_football", external_id="p1")
+    team_ref = ProviderRef(provider="mock_football", external_id="t1")
+    first = ProviderPlayerRecord(
+        external_ref=ref, team_ref=team_ref, name="Alex Carter",
+        date_of_birth=datetime(1998, 1, 1, tzinfo=timezone.utc), position="forward",
+        photo_url="https://media.api-sports.io/football/players/1.png",
+    )
+    player, _ = await service.reconcile_player(first, sport.id, T0)
+    await session.commit()
+    assert player.photo_url == "https://media.api-sports.io/football/players/1.png"
+
+    second = ProviderPlayerRecord(
+        external_ref=ref, team_ref=team_ref, name="Alex Carter",
+        date_of_birth=datetime(1998, 1, 1, tzinfo=timezone.utc), position="forward", photo_url=None,
+    )
+    player, created = await service.reconcile_player(second, sport.id, T0)
+    await session.commit()
+
+    assert not created
+    assert player.photo_url == "https://media.api-sports.io/football/players/1.png"
+
+
+@pytest.mark.asyncio
 async def test_reconcile_fixture_raises_when_teams_unresolved(service, session):
     sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
     await session.commit()

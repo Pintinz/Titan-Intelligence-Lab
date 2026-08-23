@@ -118,6 +118,7 @@ class PlayerModel(TimestampMixin, VersionedMixin, Base):
     name: Mapped[str] = mapped_column(String(200))
     date_of_birth: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     position: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    photo_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
 
 class CoachingStaffModel(TimestampMixin, VersionedMixin, Base):

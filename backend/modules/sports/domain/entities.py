@@ -134,6 +134,7 @@ class Player:
     team_id: TeamId | None = None
     version: int = 1
     provider_refs: tuple[ProviderRef, ...] = field(default_factory=tuple)
+    photo_url: str | None = None
 
 
 @dataclass

@@ -179,6 +179,7 @@ def player_to_domain(model: PlayerModel) -> Player:
         team_id=TeamId(model.team_id) if model.team_id else None,
         version=model.version,
         provider_refs=_provider_refs_from_dict(model.provider_ref),
+        photo_url=model.photo_url,
     )
 
 
@@ -191,6 +192,7 @@ def player_to_model(entity: Player, model: PlayerModel | None = None) -> PlayerM
     model.team_id = entity.team_id.value if entity.team_id else None
     model.version = entity.version
     model.provider_ref = _provider_refs_to_dict(entity.provider_refs)
+    model.photo_url = entity.photo_url
     return model
 
 

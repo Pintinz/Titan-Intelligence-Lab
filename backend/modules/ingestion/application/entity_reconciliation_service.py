@@ -412,6 +412,7 @@ class EntityReconciliationService:
             team_id=TeamId(_as_uuid(team_id_str)) if team_id_str else (existing.team_id if existing else None),
             version=(existing.version + 1) if existing else 1,
             provider_refs=_merge_ref(existing.provider_refs if existing else (), record.external_ref),
+            photo_url=record.photo_url or (existing.photo_url if existing else None),
         )
         saved = await self.players.upsert(entity)
         await self._record_ref(record.external_ref.provider, record.external_ref.external_id, EntityKind.PLAYER, str(saved.id.value))

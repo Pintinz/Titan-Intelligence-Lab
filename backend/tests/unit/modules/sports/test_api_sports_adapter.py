@@ -69,7 +69,10 @@ def football_adapter():
         if path == "/players":
             return _json_response({
                 "response": [
-                    {"player": {"id": 7, "name": "Alex Carter", "birth": {"date": "1998-05-01"}}, "statistics": [{"games": {"position": "Forward"}}]},
+                    {
+                        "player": {"id": 7, "name": "Alex Carter", "birth": {"date": "1998-05-01"}, "photo": "https://media.api-sports.io/football/players/7.png"},
+                        "statistics": [{"games": {"position": "Forward"}}],
+                    },
                 ]
             })
         if path == "/standings":
@@ -199,6 +202,7 @@ async def test_football_fetch_players(football_adapter):
     assert players[0].name == "Alex Carter"
     assert players[0].position == "forward"
     assert players[0].date_of_birth.year == 1998
+    assert players[0].photo_url == "https://media.api-sports.io/football/players/7.png"
 
 
 @pytest.mark.asyncio
