@@ -189,6 +189,56 @@ async def test_valid_gemini_response_produces_supported_review_and_persists():
 
 
 @pytest.mark.asyncio
+async def test_hallucinated_source_id_in_a_supporting_or_risk_factor_is_stripped():
+    """Professional Gemini Analyst Upgrade §21 — Gemini attaches `source_ids` to its own
+    `supporting_factors`/`risk_factors`; before this fix nothing validated those ids against the
+    evidence TitanIQ actually supplied, so a hallucinated id (e.g. a fabricated H2H source) would
+    reach the API untouched. `filter_valid_source_ids` must strip it here, the same as the football
+    explanation path already does for evidence narration."""
+    market = _market()
+    prediction = _prediction(market)
+    evidence = GatheredEvidence(
+        items_by_category={"news": (EvidenceItem(source_id="real-news-1", category="news", summary="Real item"),)}
+    )
+    gemini_json = json.dumps(
+        {
+            "prediction_review": {
+                "status": "SUPPORTED",
+                "overall_assessment": "Evidence agrees with the base prediction.",
+                "confidence": {"level": "MEDIUM", "score": 0.6},
+            },
+            "contextual_assessment": {},
+            "supporting_factors": [
+                {
+                    "factor": "Recent news", "impact": "POSITIVE", "strength": "MEDIUM",
+                    "evidence": "Real item supports this.", "source_ids": ["real-news-1", "fake:h2h"],
+                }
+            ],
+            "risk_factors": [
+                {
+                    "factor": "Fabricated risk", "impact": "NEGATIVE", "strength": "LOW",
+                    "evidence": "Also fabricated.", "source_ids": ["fake:standings"],
+                }
+            ],
+            "missing_context": [],
+            "prediction_reconsideration": {
+                "direction": "SUPPORTS_BASE_PREDICTION", "material_change": False, "reason": "Agrees.",
+            },
+            "evidence_quality": {
+                "overall": "MEDIUM", "source_count": 1, "timestamp_valid": True,
+                "pre_event_only": True, "conflicting_information": False,
+            },
+        }
+    )
+    service = _service(evidence=_FakeEvidenceGatherer(evidence=evidence), text_intelligence=_FakeTextIntelligence(responses=[gemini_json]))
+
+    review = await service.review(prediction, market, T0)
+
+    assert review.supporting_factors[0].source_ids == ("real-news-1",)  # fake:h2h dropped
+    assert review.risk_factors[0].source_ids == ()  # entirely fabricated -> empty, never surfaced
+
+
+@pytest.mark.asyncio
 async def test_gemini_unavailable_degrades_to_insufficient_context_without_raising():
     market = _market()
     prediction = _prediction(market)

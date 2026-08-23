@@ -20,6 +20,7 @@ from pydantic import ValidationError
 
 from modules.ingestion.ports.cache import SyncCachePort
 from modules.intelligence.ports.text_intelligence_provider import TextIntelligenceProviderPort
+from modules.predictions.domain.evidence_source_validation import filter_valid_source_ids
 from modules.predictions.domain.contextual_reasoning import (
     ConfidenceLevel,
     ContextualCategoryAssessment,
@@ -119,6 +120,7 @@ def _review_from_validated(
     all_source_ids = tuple(
         item.source_id for items in evidence.items_by_category.values() for item in items
     )
+    valid_source_ids = set(all_source_ids)
     return ContextualReview(
         review_status=parsed.prediction_review.status,
         overall_assessment=parsed.prediction_review.overall_assessment,
@@ -136,11 +138,12 @@ def _review_from_validated(
             for category, value in parsed.contextual_assessment.items()
         },
         supporting_factors=tuple(
-            SupportingFactor(f.factor, f.impact, f.strength, f.evidence, f.source_ids)
+            SupportingFactor(f.factor, f.impact, f.strength, f.evidence, filter_valid_source_ids(f.source_ids, valid_source_ids))
             for f in parsed.supporting_factors
         ),
         risk_factors=tuple(
-            RiskFactor(f.factor, f.impact, f.strength, f.evidence, f.source_ids) for f in parsed.risk_factors
+            RiskFactor(f.factor, f.impact, f.strength, f.evidence, filter_valid_source_ids(f.source_ids, valid_source_ids))
+            for f in parsed.risk_factors
         ),
         missing_context=tuple(parsed.missing_context) or evidence.missing_context,
         reconsideration=PredictionReconsideration(

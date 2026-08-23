@@ -24,7 +24,13 @@ _CONCEPTS: dict[str, str] = {
     "football.fixture.form_cards_yellow_diff_last5": "recent disciplinary pattern",
     "football.fixture.expected_home_goals": "modeled home scoring rate",
     "football.fixture.expected_away_goals": "modeled away scoring rate",
-    "football.fixture.odds_implied_probability": "market-implied expectation",
+    # Real keys per `market_seeding.py`'s catalog — "market expectation" phrasing deliberately,
+    # never "TitanIQ's prediction": this is bookmaker-derived evidence the model weighs alongside
+    # its own form/attacking signals, not a claim TitanIQ is making itself (professional-analyst
+    # upgrade §12 — a market signal must read as external evidence, not as the platform's own view).
+    "football.market.implied_probability_home": "market expectation for the home side",
+    "football.market.implied_probability_away": "market expectation for the away side",
+    "football.market.overround": "bookmaker margin across the market",
     "football.fixture.injured_players_count": "squad availability burden",
     "football.fixture.key_players_unavailable": "absence of important contributors",
     "football.fixture.lineup_continuity": "starting-XI continuity",

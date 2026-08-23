@@ -41,6 +41,7 @@ from modules.predictions.application.dataset_builder_service import DatasetBuild
 from modules.predictions.application.prediction_consistency_gate import PredictionConsistencyGate
 from modules.predictions.domain import football_semantic_mapping as mapping
 from modules.predictions.domain.entities import MarketDefinition, ModelDefinition, Prediction
+from modules.predictions.domain.evidence_source_validation import filter_valid_source_ids
 from modules.predictions.domain.football_explanation import (
     AttributionMethod,
     ContextItem,
@@ -242,7 +243,8 @@ def _narrate_evidence(evidence, category: str, narration_items) -> tuple[Narrate
     surfaced as if it were real. An item TitanIQ supplied but Gemini didn't narrate still appears,
     with `analysis=""`, so real evidence is never hidden for lack of narration."""
     real_items = {item.source_id: item for item in evidence.items_by_category.get(category, ())}
-    analysis_by_source = {n.source_id: n.analysis for n in narration_items if n.source_id in real_items}
+    valid_ids = set(filter_valid_source_ids((n.source_id for n in narration_items), real_items.keys()))
+    analysis_by_source = {n.source_id: n.analysis for n in narration_items if n.source_id in valid_ids}
     return tuple(
         NarratedEvidence(
             source_id=item.source_id, category=category, summary=item.summary, entity_ref=item.entity_ref,

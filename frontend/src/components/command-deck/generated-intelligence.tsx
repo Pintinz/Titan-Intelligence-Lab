@@ -243,18 +243,42 @@ export function GeneratedIntelligencePanel({
     .slice(0, 6)
   const expectedHomeGoals = prediction.feature_snapshot?.['football.fixture.expected_home_goals']
   const expectedAwayGoals = prediction.feature_snapshot?.['football.fixture.expected_away_goals']
+  // The legacy always-on `ExplainabilityEngine` evidence list + `ai_explanation` prose below covers
+  // the exact same ground `FootballExplanationSection`'s "Why this prediction" does — real feature
+  // attribution, narrated — just with raw feature labels and no counter-signal/verdict/market-analysis
+  // structure. Once the richer panel is actually available, showing both is pure duplication (the
+  // Manchester City example this replaced), so this legacy block only renders as the fallback for
+  // whatever the richer panel can't cover: every non-football sport (never requests
+  // `football_explanation`) and any football prediction where that pipeline genuinely failed.
+  const showLegacyEvidence = prediction.football_explanation?.status !== 'available'
   const hasExpectedGoals = typeof expectedHomeGoals === 'number' && typeof expectedAwayGoals === 'number'
 
   return (
     <CDPanel accent>
       <div className="flex items-center justify-between gap-2">
         <CDLabel tone="accent">{marketName}</CDLabel>
-        <span
-          className="rounded-full px-2 py-0.5 font-[var(--cd-font-telemetry)] text-[10px] font-semibold uppercase tracking-[0.06em]"
-          style={{ backgroundColor: 'var(--cd-accent-muted)', color: 'var(--cd-accent)' }}
-        >
-          {prediction.status}
-        </span>
+        <div className="flex items-center gap-1.5">
+          {/* Real prod incident audit (2026-08-23): a corrupt/missing Champion artifact silently
+              falls back to a generic statistical formula — never hidden here, never alarming
+              either (this is a handled, expected fallback path, not an error the user needs to
+              act on). Renders nothing when `champion_status` is "ACTIVE" or "UNKNOWN" (predictions
+              generated before this field existed get no claim either way). */}
+          {prediction.champion_status === 'FALLBACK' && (
+            <span
+              className="rounded-full px-2 py-0.5 font-[var(--cd-font-telemetry)] text-[10px] font-semibold uppercase tracking-[0.06em]"
+              style={{ backgroundColor: 'var(--cd-negative-muted, var(--cd-accent-muted))', color: 'var(--cd-negative, var(--cd-accent))' }}
+              title="TitanIQ's trained Champion model couldn't be loaded for this prediction, so a statistical formula served it instead."
+            >
+              Statistical fallback
+            </span>
+          )}
+          <span
+            className="rounded-full px-2 py-0.5 font-[var(--cd-font-telemetry)] text-[10px] font-semibold uppercase tracking-[0.06em]"
+            style={{ backgroundColor: 'var(--cd-accent-muted)', color: 'var(--cd-accent)' }}
+          >
+            {prediction.status}
+          </span>
+        </div>
       </div>
 
       <div className="mt-5 flex flex-col items-center gap-6 sm:flex-row sm:items-center sm:justify-between">
@@ -379,7 +403,7 @@ export function GeneratedIntelligencePanel({
         </div>
       )}
 
-      {(prediction.explanation.top_positive_features.length > 0 || prediction.explanation.top_negative_features.length > 0) && (
+      {showLegacyEvidence && (prediction.explanation.top_positive_features.length > 0 || prediction.explanation.top_negative_features.length > 0) && (
         <div className="mt-6 border-t pt-5" style={{ borderColor: 'var(--cd-border-hairline)' }}>
           <CDLabel>Evidence</CDLabel>
           <ul className="mt-3 grid gap-2 sm:grid-cols-2">
@@ -425,7 +449,7 @@ export function GeneratedIntelligencePanel({
         </div>
       )}
 
-      {prediction.explanation.ai_explanation && (
+      {showLegacyEvidence && prediction.explanation.ai_explanation && (
         <div className="mt-6 border-t pt-5" style={{ borderColor: 'var(--cd-border-hairline)' }}>
           <CDLabel>Why TitanIQ believes this</CDLabel>
           <p className="mt-2 font-[var(--cd-font-body)] text-[13px] leading-relaxed" style={{ color: 'var(--cd-text-secondary)' }}>
@@ -515,6 +539,30 @@ function FootballExplanationSection({ explanation }: { explanation: NonNullable<
                 {reason.analysis && (
                   <p className="mt-0.5 font-[var(--cd-font-body)] text-[12px] leading-relaxed" style={{ color: 'var(--cd-text-muted)' }}>
                     {reason.analysis}
+                  </p>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {explanation.counter_signals.length > 0 && (
+        <ul className="mt-4 space-y-3 border-t pt-3" style={{ borderColor: 'var(--cd-border-hairline)' }}>
+          <CDLabel>Counter-signals</CDLabel>
+          {explanation.counter_signals.map((signal, index) => (
+            <li key={index} className="mt-1 flex items-start gap-2">
+              <TriangleAlert className="mt-0.5 size-3.5 shrink-0" style={{ color: 'var(--cd-negative)' }} aria-hidden="true" />
+              <div className="min-w-0">
+                <span className="font-[var(--cd-font-body)] text-[12px]" style={{ color: 'var(--cd-text-secondary)' }}>
+                  {signal.football_concept}{' '}
+                  <span className="font-[var(--cd-font-tabular)] tabular-nums" style={{ color: 'var(--cd-negative)' }}>
+                    {signal.contribution.toFixed(2)}
+                  </span>
+                </span>
+                {signal.analysis && (
+                  <p className="mt-0.5 font-[var(--cd-font-body)] text-[12px] leading-relaxed" style={{ color: 'var(--cd-text-muted)' }}>
+                    {signal.analysis}
                   </p>
                 )}
               </div>
