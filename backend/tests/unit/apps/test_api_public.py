@@ -402,26 +402,30 @@ def test_featured_intelligence_caps_one_pick_per_market(client, db_session_facto
 
 def test_featured_intelligence_prefers_live_and_upcoming_over_completed(client, db_session_factory, seeded_fixture):
     """A landing-page hero showing a prediction for a match that already finished reads as stale.
-    `seeded_fixture` is SCHEDULED by default; a second, COMPLETED fixture gets a prediction on its
-    own market (same seeding pattern, so confidence is at least as good, never engineered lower) —
-    the scheduled one must still rank first, proving status beats raw confidence in the ordering."""
+    Uses real wall-clock time, not the fixture suite's fixed T0 (T0 + a few days is itself already
+    in the past relative to "now" — exactly the staleness this endpoint now has to defend against,
+    confirmed live: 9 of 380 locally-seeded "scheduled" fixtures already had a past `scheduled_at`)
+    — a genuinely future-dated SCHEDULED fixture must still rank first, proving status+timing beats
+    raw confidence in the ordering, over a COMPLETED fixture seeded with the same pattern (so
+    confidence is at least as good, never engineered lower)."""
     headers = _auth_headers(client)
-    subject_ref_scheduled = str(seeded_fixture["fixture"].id)
+    real_now = datetime.now(timezone.utc)
 
-    async def _completed_fixture():
+    async def _fixture(status, scheduled_at):
         async with db_session_factory() as session:
             season = seeded_fixture["season"]
             home, away = seeded_fixture["home"], seeded_fixture["away"]
             fixture = await SqlAlchemyFixtureRepository(session=session).upsert(
                 Fixture(
                     id=FixtureId(uuid.uuid4()), season_id=season.id, home_team_id=home.id, away_team_id=away.id,
-                    venue_id=None, scheduled_at=T0 - timedelta(days=4), status=FixtureStatus.COMPLETED,
+                    venue_id=None, scheduled_at=scheduled_at, status=status,
                 )
             )
             await session.commit()
             return str(fixture.id)
 
-    subject_ref_completed = asyncio.run(_completed_fixture())
+    subject_ref_scheduled = asyncio.run(_fixture(FixtureStatus.SCHEDULED, real_now + timedelta(days=3)))
+    subject_ref_completed = asyncio.run(_fixture(FixtureStatus.COMPLETED, real_now - timedelta(days=4)))
 
     asyncio.run(
         _seed_production_market(db_session_factory, "football.timing_market_scheduled", "football.timing_feature_scheduled", subject_ref_scheduled)
@@ -439,6 +443,51 @@ def test_featured_intelligence_prefers_live_and_upcoming_over_completed(client, 
     fixture_ids = [pick["fixture_id"] for pick in data]
     assert fixture_ids.index(subject_ref_scheduled) < fixture_ids.index(subject_ref_completed)
     assert data[0]["status"] == "scheduled"
+
+
+def test_featured_intelligence_does_not_trust_a_stale_scheduled_status(client, db_session_factory, seeded_fixture):
+    """Real bug, found live: a fixture whose sync job never flipped it from SCHEDULED to COMPLETED
+    after its real kickoff time passed (verified: HUL vs MUN, scheduled_at 2026-08-22, still
+    "scheduled" with real "now" at 2026-08-23) was ranking ahead of a genuinely future fixture,
+    because the endpoint trusted the raw `status` label alone. A SCHEDULED fixture whose
+    `scheduled_at` has already passed must not outrank a SCHEDULED fixture that's actually
+    upcoming — the `status` field is necessary but not sufficient for "this is upcoming"."""
+    headers = _auth_headers(client)
+    real_now = datetime.now(timezone.utc)
+
+    async def _fixture(scheduled_at):
+        async with db_session_factory() as session:
+            season = seeded_fixture["season"]
+            home, away = seeded_fixture["home"], seeded_fixture["away"]
+            fixture = await SqlAlchemyFixtureRepository(session=session).upsert(
+                Fixture(
+                    id=FixtureId(uuid.uuid4()), season_id=season.id, home_team_id=home.id, away_team_id=away.id,
+                    venue_id=None, scheduled_at=scheduled_at, status=FixtureStatus.SCHEDULED,
+                )
+            )
+            await session.commit()
+            return str(fixture.id)
+
+    subject_ref_upcoming = asyncio.run(_fixture(real_now + timedelta(days=3)))
+    # "scheduled" but its own kickoff time already passed — the sync-lag scenario found live.
+    subject_ref_stale = asyncio.run(_fixture(real_now - timedelta(hours=6)))
+
+    asyncio.run(
+        _seed_production_market(db_session_factory, "football.stale_market_upcoming", "football.stale_feature_upcoming", subject_ref_upcoming)
+    )
+    asyncio.run(
+        _seed_production_market(db_session_factory, "football.stale_market_stale", "football.stale_feature_stale", subject_ref_stale)
+    )
+    _generate(client, headers, "football.stale_market_upcoming", subject_ref_upcoming)
+    _generate(client, headers, "football.stale_market_stale", subject_ref_stale)
+
+    response = client.get("/api/v1/public/featured-intelligence", params={"limit": 6})
+    assert response.status_code == 200
+    data = response.json()["data"]
+
+    fixture_ids = [pick["fixture_id"] for pick in data]
+    assert fixture_ids.index(subject_ref_upcoming) < fixture_ids.index(subject_ref_stale)
+    assert data[0]["fixture_id"] == subject_ref_upcoming
 
 
 def test_platform_summary_reflects_seeded_competition(client, seeded_fixture):

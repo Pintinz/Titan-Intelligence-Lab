@@ -239,11 +239,33 @@ async def featured_intelligence(limit: int = Query(default=3, ge=1, le=6), sessi
 
     # A landing-page hero showcasing a prediction for a match that already finished last week reads
     # as stale, not "sports intelligence in action" — resolve every diversified candidate's fixture
-    # up front and prefer LIVE, then SCHEDULED (upcoming), over anything else (completed/postponed/
-    # cancelled), confidence only breaking ties within the same tier. Never fabricates a live/
-    # upcoming match that doesn't exist: if no published prediction covers one, the ranking falls
-    # back to the real highest-confidence pick regardless of timing, same as before this change.
-    _STATUS_PRIORITY = {"live": 0, "scheduled": 1}
+    # up front and prefer LIVE, then a genuinely-upcoming SCHEDULED fixture, over anything else
+    # (completed/postponed/cancelled), confidence only breaking ties within the same tier. Never
+    # fabricates a live/upcoming match that doesn't exist: if no published prediction covers one,
+    # the ranking falls back to the real highest-confidence pick regardless of timing, same as
+    # before this change.
+    #
+    # A fixture's own `status` field is not fully trustworthy on its own — the sync job that
+    # flips SCHEDULED -> COMPLETED after real kickoff can lag or gap (verified live: 9 of 380
+    # locally-seeded "scheduled" fixtures already have a past `scheduled_at`, HUL vs MUN among
+    # them, 2026-08-22 with "now" at 2026-08-23). A "scheduled" fixture whose kickoff has already
+    # passed is trusted for neither tier — it might be live, finished, or genuinely delayed, and
+    # showing it as "upcoming" would misrepresent something that may already be over.
+    now = _now()
+
+    def _is_reliably_upcoming(fixture) -> bool:
+        scheduled_at = fixture.scheduled_at
+        if scheduled_at.tzinfo is None:
+            scheduled_at = scheduled_at.replace(tzinfo=timezone.utc)
+        return scheduled_at > now
+
+    def _timing_tier(fixture) -> int:
+        if fixture.status.value == "live":
+            return 0
+        if fixture.status.value == "scheduled" and _is_reliably_upcoming(fixture):
+            return 1
+        return 2
+
     with_fixtures: list[tuple] = []
     for prediction, market in picks:
         try:
@@ -253,7 +275,7 @@ async def featured_intelligence(limit: int = Query(default=3, ge=1, le=6), sessi
         if fixture is None:
             continue
         with_fixtures.append((prediction, market, fixture))
-    with_fixtures.sort(key=lambda pmf: (_STATUS_PRIORITY.get(pmf[2].status.value, 2), -pmf[0].confidence.composite))
+    with_fixtures.sort(key=lambda pmf: (_timing_tier(pmf[2]), -pmf[0].confidence.composite))
 
     data: list[dict] = []
     for prediction, market, fixture in with_fixtures:
