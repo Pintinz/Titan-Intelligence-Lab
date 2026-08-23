@@ -3,8 +3,10 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { FlaskConical } from 'lucide-react'
 import { sportsApi } from '@/lib/api/sports'
 import { marketsApi } from '@/lib/api/markets'
-import { predictionsApi } from '@/lib/api/predictions'
+import { predictionsApi, REWARDED_AD_CREDIT_GRANT } from '@/lib/api/predictions'
+import { ApiError } from '@/lib/api/client'
 import { useSportParam } from '@/lib/hooks/use-sport'
+import { usePredictionEntitlement, useInvalidatePredictionEntitlement } from '@/lib/hooks/use-prediction-entitlement'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -33,8 +35,11 @@ export default function PredictionLabPage() {
     queryFn: () => sportsApi.listFixtures(sport!.code, { limit: 30 }),
     enabled: !!sport,
   })
+  const entitlement = usePredictionEntitlement()
+  const invalidateEntitlement = useInvalidatePredictionEntitlement()
 
   const generatePrediction = useMutation({
+    onSettled: invalidateEntitlement,
     mutationFn: () =>
       predictionsApi.generate({
         market_key: selectedMarketKey!,
@@ -128,15 +133,33 @@ export default function PredictionLabPage() {
         <div>
           <p className="mb-3 text-sm font-medium text-text-primary">3. Generate</p>
           {!generatePrediction.data && (
-            <Button onClick={() => generatePrediction.mutate()} disabled={generatePrediction.isPending}>
-              {generatePrediction.isPending ? 'Generating…' : 'Generate prediction'}
-            </Button>
-          )}
-          {generatePrediction.isError && (
-            <div className="mt-4">
-              <ErrorState error={generatePrediction.error} onRetry={() => generatePrediction.mutate()} />
+            <div className="flex flex-wrap items-center gap-3">
+              <Button onClick={() => generatePrediction.mutate()} disabled={generatePrediction.isPending}>
+                {generatePrediction.isPending ? 'Generating…' : 'Generate prediction'}
+              </Button>
+              {entitlement.data && (
+                <span className="text-xs text-text-muted">
+                  {entitlement.data.available_predictions} prediction{entitlement.data.available_predictions === 1 ? '' : 's'} remaining
+                </span>
+              )}
             </div>
           )}
+          {generatePrediction.isError &&
+            (generatePrediction.error instanceof ApiError &&
+            generatePrediction.error.status === 402 &&
+            generatePrediction.error.reasonCode === 'PREDICTION_CREDIT_REQUIRED' ? (
+              <Card className="mt-4 p-4">
+                <p className="text-sm text-text-primary">Prediction access exhausted.</p>
+                <p className="mt-1 text-xs text-text-muted">
+                  Rewarded video unlocks (+{REWARDED_AD_CREDIT_GRANT} predictions) are available in the TitanIQ mobile app —
+                  AdMob rewarded ads don&apos;t play inside this web admin console.
+                </p>
+              </Card>
+            ) : (
+              <div className="mt-4">
+                <ErrorState error={generatePrediction.error} onRetry={() => generatePrediction.mutate()} />
+              </div>
+            ))}
           {generatePrediction.data && (
             <Card className="mt-4 p-5">
               <PredictionPanel

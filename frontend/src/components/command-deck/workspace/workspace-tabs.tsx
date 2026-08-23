@@ -4,10 +4,12 @@ import { predictionsApi } from '@/lib/api/predictions'
 import { sportsApi } from '@/lib/api/sports'
 import { graphApi } from '@/lib/api/graph'
 import { ErrorState } from '@/components/ui/error-state'
+import { ApiError } from '@/lib/api/client'
 import { CDPanel, CDLabel } from '../primitives/panel'
 import { CDConfidenceGauge } from '../primitives/gauge'
 import { CDTelemetryValue } from '../primitives/telemetry'
 import { PredictionLaboratory } from '../prediction-laboratory'
+import { PredictionAccessExhaustedCard } from '../prediction-access-gate'
 import { resolveOutcomeLabel, resolveVerdict, humanizeFactorKey, type TeamRef } from '@/components/infinity/evidence-explorer'
 import type { PredictionMarketDto, PredictionSummaryDto, PredictionDto } from '@/lib/api/types'
 import type { WorkspaceEntity } from '@/lib/hooks/use-investigation-workspace'
@@ -283,11 +285,14 @@ export function PredictionIntelligenceTab({
         </CDPanel>
       )}
 
-      {generateError != null && (
-        <CDPanel padding="tight">
-          <ErrorState error={generateError} />
-        </CDPanel>
-      )}
+      {generateError != null &&
+        (generateError instanceof ApiError && generateError.status === 402 && generateError.reasonCode === 'PREDICTION_CREDIT_REQUIRED' ? (
+          <PredictionAccessExhaustedCard />
+        ) : (
+          <CDPanel padding="tight">
+            <ErrorState error={generateError} />
+          </CDPanel>
+        ))}
 
       {markets.length > 0 && generated.length === 0 && entity.kind !== 'fixture' && (
         <CDPanel>

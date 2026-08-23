@@ -22,6 +22,20 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
+            <!-- Google OAuth deep-link return: Supabase's signInWithOAuth (native branch, see
+                 src/lib/native-oauth.ts) opens the consent screen in the system browser via
+                 @capacitor/browser, since Google blocks OAuth inside an embedded WebView. Google
+                 redirects back here after consent; @capacitor/app's appUrlOpen listener catches
+                 it and hands the URL to Supabase to complete the session. This scheme must also
+                 be added to the Supabase project's Auth > URL Configuration > Redirect URLs
+                 allowlist (dashboard access required — not something this build can do). -->
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="titaniq" android:host="auth" />
+            </intent-filter>
+
         </activity>
 
         <provider
@@ -33,6 +47,16 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths"></meta-data>
         </provider>
+
+        <!-- AdMob (Mobile V1 monetization — rewarded prediction unlocks). @admob_app_id currently
+             resolves to Google's own published sample/test App ID (res/values/strings.xml) — real
+             traffic works fine against it since AdMob always serves house/test creatives for a
+             test App ID regardless of ad unit, but a real release build needs this replaced with
+             TitanIQ's actual AdMob App ID before shipping (external: requires a real AdMob
+             account/app, which does not exist in this environment). -->
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="@string/admob_app_id" />
     </application>
 
     <!-- Permissions -->

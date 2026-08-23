@@ -3,6 +3,8 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { useForm } from 'react-hook-form'
 import { useLocation, useNavigate, type Location } from 'react-router-dom'
 import { supabase, setRememberMe } from '@/lib/supabase'
+import { isNativePlatform } from '@/lib/capacitor'
+import { signInWithGoogleNative } from '@/lib/native-oauth'
 import { loginSchema, signupSchema, type LoginValues, type SignupValues } from '@/lib/validation/auth-schemas'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -58,6 +60,22 @@ export function AuthFlow({ initialMode = 'login' }: AuthFlowProps) {
     // flow to honor a "this device only" choice for.
     setRememberMe(true)
     setGoogleLoading(true)
+
+    // Native: Google blocks OAuth inside an embedded WebView, so this opens the system browser
+    // and returns via a titaniq:// deep link instead of a same-origin redirect (see
+    // lib/native-oauth.ts — the deep-link handler routes back into this exact same
+    // AuthCallbackPage, no separate native session-exchange logic).
+    if (isNativePlatform()) {
+      const { error } = await signInWithGoogleNative(returnTo)
+      if (error) {
+        setGoogleLoading(false)
+        toast.danger('Could not sign in with Google', readableAuthErrorMessage({ message: error }, 'Something went wrong starting Google sign-in. Try again.'))
+      }
+      // On success the system browser is now in front — nothing else to do here until the
+      // titaniq:// deep link returns control to the app.
+      return
+    }
+
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: { redirectTo: `${window.location.origin}/auth/callback?returnTo=${encodeURIComponent(returnTo)}` },

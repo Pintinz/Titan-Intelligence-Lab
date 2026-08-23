@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { ChevronDown, CircleCheck } from 'lucide-react'
 import { CDPanel, CDLabel } from './primitives/panel'
+import { PredictionAccessIndicator } from './prediction-access-gate'
 import type { PredictionMarketDto } from '@/lib/api/types'
 
 /** Real backend `PredictionMarketDto.category` values (market_seeding.py) mapped to display
@@ -111,15 +112,18 @@ export function PredictionLaboratory({
       </div>
 
       {selectedMarket && !hasGenerated && (
-        <button
-          type="button"
-          onClick={onGenerate}
-          disabled={generating}
-          className="mt-4 inline-flex items-center gap-2 rounded-[var(--cd-radius-md)] px-4 py-2.5 font-[var(--cd-font-body)] text-[13px] font-semibold transition-[opacity,transform] duration-[var(--cd-motion-base)] disabled:cursor-wait disabled:opacity-70"
-          style={{ backgroundColor: 'var(--cd-accent)', color: 'var(--cd-text-inverse)' }}
-        >
-          {generating ? 'Analyzing…' : `Generate Intelligence — ${selectedMarket.name}`}
-        </button>
+        <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          <button
+            type="button"
+            onClick={onGenerate}
+            disabled={generating}
+            className="inline-flex items-center gap-2 rounded-[var(--cd-radius-md)] px-4 py-2.5 font-[var(--cd-font-body)] text-[13px] font-semibold transition-[opacity,transform] duration-[var(--cd-motion-base)] disabled:cursor-wait disabled:opacity-70"
+            style={{ backgroundColor: 'var(--cd-accent)', color: 'var(--cd-text-inverse)' }}
+          >
+            {generating ? 'Analyzing…' : `Generate Intelligence — ${selectedMarket.name}`}
+          </button>
+          <PredictionAccessIndicator />
+        </div>
       )}
     </CDPanel>
   )

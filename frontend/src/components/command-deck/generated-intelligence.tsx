@@ -3,6 +3,7 @@ import { resolveOutcomeLabel, resolveVerdict, humanizeFactorKey, humanizeModelAl
 import { CDPanel, CDLabel } from './primitives/panel'
 import { CDConfidenceGauge } from './primitives/gauge'
 import { CDDistributionBar } from './primitives/telemetry'
+import { PredictionAccessExhaustedCard } from './prediction-access-gate'
 import { ApiError } from '@/lib/api/client'
 import type { ContextualReviewDto, PredictionDto } from '@/lib/api/types'
 
@@ -202,6 +203,12 @@ export function GeneratedIntelligencePanel({
   }
 
   if (error) {
+    // Mobile V1 monetization — a real 402 from the backend's credit system (prediction_router.py's
+    // consume_for_generation), never a generic error box: the user has a real, actionable next
+    // step (watch a rewarded video), not a "something went wrong."
+    if (error instanceof ApiError && error.status === 402 && error.reasonCode === 'PREDICTION_CREDIT_REQUIRED') {
+      return <PredictionAccessExhaustedCard />
+    }
     const insufficientHistory = error instanceof ApiError && error.status === 409
     return (
       <CDPanel className="flex min-h-[220px] flex-col items-center justify-center text-center">

@@ -6,6 +6,7 @@ import { useAuthStore } from '@/stores/auth-store'
 import { useThemeStore } from '@/stores/theme-store'
 import { useCommandPaletteStore } from '@/stores/command-palette-store'
 import { useUnreadAlertCount } from '@/lib/hooks/use-alerts'
+import { isNativePlatform } from '@/lib/capacitor'
 import { InfinityAppBreadcrumbs } from './infinity-breadcrumbs'
 import { InfinityCommandPalette } from './infinity-command-palette'
 
@@ -44,7 +45,7 @@ export function InfinityTopbar({ onOpenMobileNav }: { onOpenMobileNav: () => voi
       <header className="flex h-14 shrink-0 items-center gap-3 border-b border-infinity-border-hairline bg-infinity-ground-0 px-4 lg:px-6">
         <button
           type="button"
-          className="text-infinity-text-secondary lg:hidden"
+          className={`text-infinity-text-secondary lg:hidden ${isNativePlatform() ? 'hidden' : ''}`}
           onClick={onOpenMobileNav}
           aria-label="Open navigation menu"
         >

@@ -8,6 +8,7 @@ import { predictionsApi } from '@/lib/api/predictions'
 import { useSportParam } from '@/lib/hooks/use-sport'
 import { useWatchlist } from '@/lib/hooks/use-watchlist'
 import { useRealtimeInvalidate } from '@/lib/hooks/use-realtime-invalidate'
+import { useInvalidatePredictionEntitlement } from '@/lib/hooks/use-prediction-entitlement'
 import { fixtureScores, countdownLabel } from '@/lib/sports-status'
 import { ErrorState } from '@/components/ui/error-state'
 import { type DomainKey } from '@/components/infinity/primitives/badge'
@@ -55,7 +56,9 @@ export default function MatchDetailPage() {
     sport ? `sport_code=eq.${sport.code}` : undefined,
   )
 
+  const invalidatePredictionEntitlement = useInvalidatePredictionEntitlement()
   const generateIntelligence = useMutation({
+    onSettled: invalidatePredictionEntitlement,
     mutationFn: (marketKey: string) =>
       predictionsApi.generate({
         market_key: marketKey,

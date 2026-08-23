@@ -66,5 +66,44 @@
 	</array>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<true/>
+	<!-- Google OAuth deep-link return: see the matching comment in
+	     android/app/src/main/AndroidManifest.xml for why this exists. Must also be added to the
+	     Supabase project's Auth > URL Configuration > Redirect URLs allowlist. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>titaniq</string>
+			</array>
+			<key>CFBundleURLName</key>
+			<string>com.titaniq.sports</string>
+		</dict>
+	</array>
+	<!-- AdMob (Mobile V1 monetization — rewarded prediction unlocks). GADApplicationIdentifier is
+	     TitanIQ's real iOS AdMob App ID (read directly from the user's live AdMob account,
+	     admob.google.com, 2026-08-23) — the app is registered but shows "Requires review" (normal
+	     before real traffic) and isn't yet linked to a published App Store listing. Its rewarded
+	     ad unit (ca-app-pub-5093738800594754/5583681892, "Prediction Unlock", reward amount 2) is
+	     wired via VITE_ADMOB_IOS_REWARDED_AD_UNIT_ID — still needs setting in the release build's
+	     environment (see docs/mobile_admob_configuration.md). SKAdNetworkIdentifier is Google's own
+	     required attribution identifier, not TitanIQ-specific. NSUserTrackingUsageDescription is
+	     present per the plugin's documented setup but currently unused — RewardedAdService never
+	     calls requestTrackingAuthorization() (spec §12: "do not request tracking permission
+	     unnecessarily"; TitanIQ only ever requests non-personalized ads today), so no ATT prompt
+	     actually shows without further code changes. -->
+	<key>GADIsAdManagerApp</key>
+	<true/>
+	<key>GADApplicationIdentifier</key>
+	<string>ca-app-pub-5093738800594754~5263128013</string>
+	<key>SKAdNetworkItems</key>
+	<array>
+		<dict>
+			<key>SKAdNetworkIdentifier</key>
+			<string>cstr6suwn9.skadnetwork</string>
+		</dict>
+	</array>
+	<key>NSUserTrackingUsageDescription</key>
+	<string>This identifier may be used to deliver more relevant sports intelligence advertising to you.</string>
 </dict>
 </plist>

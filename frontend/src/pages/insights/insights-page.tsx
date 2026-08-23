@@ -6,6 +6,7 @@ import { sportsApi } from '@/lib/api/sports'
 import { marketsApi } from '@/lib/api/markets'
 import { predictionsApi } from '@/lib/api/predictions'
 import { intelligenceApi } from '@/lib/api/intelligence'
+import { useInvalidatePredictionEntitlement } from '@/lib/hooks/use-prediction-entitlement'
 import { graphApi } from '@/lib/api/graph'
 import { SPORT_SLUGS, type SportMeta } from '@/lib/hooks/use-sport'
 import { useInvestigationWorkspace, kgNodeTypeFor, type EntityKind, type WorkspaceEntity } from '@/lib/hooks/use-investigation-workspace'
@@ -178,9 +179,11 @@ export default function InsightsPage() {
     enabled: !!workspace.focusedPredictionId,
   })
 
+  const invalidatePredictionEntitlement = useInvalidatePredictionEntitlement()
   const generateMutation = useMutation({
     mutationFn: (marketKey: string) =>
       predictionsApi.generate({ market_key: marketKey, entity_type: 'fixture', entity_id: focused!.id, subject_ref: focused!.id }),
+    onSettled: invalidatePredictionEntitlement,
     onSuccess: (prediction) => {
       void queryClient.invalidateQueries({ queryKey: ['predictions', 'history', focused?.id] })
       workspace.setFocusedPredictionId(prediction.id)

@@ -1,9 +1,11 @@
 import { useState } from 'react'
 import { Outlet } from 'react-router-dom'
 import { ErrorBoundary } from '@/components/layout/error-boundary'
+import { isNativePlatform } from '@/lib/capacitor'
 import { InfinitySidebar } from './infinity-sidebar'
 import { InfinityMobileNav } from './infinity-mobile-nav'
 import { InfinityTopbar } from './infinity-topbar'
+import { MobileBottomTabs } from './mobile-bottom-tabs'
 
 /**
  * Infinity AppShell — Phase 11.1. Structurally identical to the legacy `AppShell`
@@ -13,17 +15,24 @@ import { InfinityTopbar } from './infinity-topbar'
  * migration plan. Every child route (Dashboard, Sport Intelligence Centers, Operations
  * Center, etc.) is untouched by this phase; they simply render inside whichever shell
  * wraps `/app`.
+ *
+ * Native bottom-tab bar: gated on `isNativePlatform()`, so the existing web/PWA drawer nav is
+ * completely unchanged — only a real Capacitor build gets the tab bar, replacing the drawer
+ * (which native users would otherwise reach via the topbar hamburger, a web pattern this doesn't
+ * remove for web, just doesn't show natively). `pb-14` on `<main>` reserves the tab bar's own
+ * height so the last bit of page content doesn't render underneath it.
  */
 export function InfinityAppShell() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const isNative = isNativePlatform()
 
   return (
     <div className="flex h-svh bg-infinity-ground-0">
       <InfinitySidebar />
-      <InfinityMobileNav open={mobileNavOpen} onOpenChange={setMobileNavOpen} />
+      {!isNative && <InfinityMobileNav open={mobileNavOpen} onOpenChange={setMobileNavOpen} />}
       <div className="flex min-w-0 flex-1 flex-col">
         <InfinityTopbar onOpenMobileNav={() => setMobileNavOpen(true)} />
-        <main className="flex-1 overflow-y-auto">
+        <main className={`flex-1 overflow-y-auto ${isNative ? 'pb-14' : ''}`}>
           {/* Mobile keeps only a few px of side margin (px-2) so cards/tables reach near the
               screen edge instead of the old p-4 (16px) eating usable width on a 375px viewport —
               lg:p-6 (desktop) is unchanged, it already had room to spare. */}
@@ -34,6 +43,7 @@ export function InfinityAppShell() {
           </div>
         </main>
       </div>
+      {isNative && <MobileBottomTabs />}
     </div>
   )
 }

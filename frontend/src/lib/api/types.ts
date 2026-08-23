@@ -590,6 +590,16 @@ export interface PredictionPickDto extends PredictionSummaryDto {
   ai_explanation: string | null
 }
 
+/** Mobile V1 monetization — matches `GET /api/v1/predictions/entitlement`
+ * (prediction_router.py). `requires_rewarded_ad` is a convenience flag (`available_predictions
+ * <= 0`), not independent state — never diverges from the count. */
+export interface PredictionEntitlementDto {
+  available_predictions: number
+  initial_free_predictions: number
+  rewarded_predictions_granted: number
+  requires_rewarded_ad: boolean
+}
+
 /** Matches `_serialize_market_review` (prediction_analytics_router.py) — one market's real
  * predicted-vs-actual reading. `actual_value`/`is_correct`/`evaluated_at` are `null` when the
  * fixture hasn't completed yet or the market has no registered outcome resolver — never guessed. */

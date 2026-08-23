@@ -5,9 +5,16 @@ import type {
   FixtureReviewMetaDto,
   MarketReviewDto,
   PredictionDto,
+  PredictionEntitlementDto,
   PredictionPickDto,
   PredictionSummaryDto,
 } from '@/lib/api/types'
+
+/** Mobile V1 monetization — mirrors `REWARDED_AD_CREDIT_GRANT` (backend `modules.predictions.
+ * domain.entities`). A fixed product constant, not server config, so it's duplicated here rather
+ * than fetched — the entitlement response itself doesn't carry it (nothing about "how many
+ * credits one ad is worth" varies per user or per request). */
+export const REWARDED_AD_CREDIT_GRANT = 2
 
 export const predictionsApi = {
   generate: (input: {
@@ -47,4 +54,5 @@ export const predictionsApi = {
     const envelope = await api.getWithMeta<MarketReviewDto[]>(`/api/v1/predictions/review/${fixtureId}`)
     return { markets: envelope.data, meta: envelope.meta as unknown as FixtureReviewMetaDto }
   },
+  entitlement: () => api.get<PredictionEntitlementDto>('/api/v1/predictions/entitlement'),
 }
