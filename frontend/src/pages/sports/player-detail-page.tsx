@@ -364,7 +364,7 @@ function PlayerDetailHero({
   sportSlug,
   domain,
 }: {
-  player: { id: string; name: string; position: string | null; date_of_birth: string | null; team_id: string | null; team_name: string | null }
+  player: { id: string; name: string; position: string | null; date_of_birth: string | null; team_id: string | null; team_name: string | null; photo_url: string | null }
   team: { id: string; name: string; logo_url: string | null } | null
   sportSlug: string
   domain: Domain
