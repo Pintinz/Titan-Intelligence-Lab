@@ -6,7 +6,6 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { SportShell } from '@/components/layout/sport-shell'
 import { SPORT_SLUGS } from '@/lib/hooks/use-sport'
 import { useAuthStore } from '@/stores/auth-store'
-import SportHubPage from './sport-hub-page'
 import PredictionLabPage from './prediction-lab-page'
 import type { FixtureSummaryDto, PredictionDto, PredictionMarketDto } from '@/lib/api/types'
 
@@ -128,23 +127,11 @@ describe('SportShell', () => {
     renderAtSport('/app/football', <div />)
     expect(screen.getByText('Football')).toBeInTheDocument()
     // Prediction Laboratory/News/Community were deliberately pulled from the tab bar
-    // (sport-shell.tsx) — only Live/Matches/Teams/Players/Competitions carry primary nav weight.
+    // (sport-shell.tsx) — only Matches/Teams/Players/Competitions carry primary nav weight.
+    // "Live" was pulled too (2026-08-23) — match-list-page.tsx already surfaces live fixtures
+    // via its own LiveRail, so a separate primary Live destination was pure duplication.
     expect(screen.getByRole('link', { name: 'Matches' })).toBeInTheDocument()
-  })
-})
-
-describe('SportHubPage', () => {
-  it('renders fixtures once loaded', async () => {
-    vi.mocked(sportsApi.listFixtures).mockResolvedValue([FIXTURE])
-    renderAtSport('/app/football', <SportHubPage />)
-    await waitFor(() => expect(screen.getByText('Arsenal')).toBeInTheDocument())
-    expect(screen.getByText('Chelsea')).toBeInTheDocument()
-  })
-
-  it('renders an empty state when there are no fixtures', async () => {
-    vi.mocked(sportsApi.listFixtures).mockResolvedValue([])
-    renderAtSport('/app/football', <SportHubPage />)
-    await waitFor(() => expect(screen.getByText('No fixtures under coverage')).toBeInTheDocument())
+    expect(screen.queryByRole('link', { name: 'Live' })).not.toBeInTheDocument()
   })
 })
 
@@ -186,14 +173,6 @@ describe('Sport Intelligence Center genericity (Phase 3)', () => {
   it.each(SPORT_SLUGS)('$label: SportShell resolves the :sport param and shows the right label', ({ slug, label }) => {
     renderAtSport(`/app/${slug}`, <div />)
     expect(screen.getByText(label)).toBeInTheDocument()
-  })
-
-  it.each(SPORT_SLUGS)('$label: SportHubPage fetches fixtures with the correct backend SportCode, not football', async ({ slug, code, label }) => {
-    vi.mocked(sportsApi.listFixtures).mockResolvedValue([])
-    renderAtSport(`/app/${slug}`, <SportHubPage />)
-    await waitFor(() => expect(screen.getByText('No fixtures under coverage')).toBeInTheDocument())
-    expect(sportsApi.listFixtures).toHaveBeenCalledWith(code, { limit: 12 })
-    expect(screen.getAllByText(new RegExp(label, 'i')).length).toBeGreaterThan(0)
   })
 
   it.each(SPORT_SLUGS)('$label: Prediction Laboratory requests production markets scoped to this sport', async ({ slug, code }) => {

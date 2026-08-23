@@ -97,7 +97,6 @@ const logsDebuggingPage = lazyPage(() => import('@/pages/ops/logs-debugging-page
 // main chunk before seeing a single pixel. None of it is needed until a route under it actually
 // renders, matching every other page in this file.
 const homePage = lazyPage(() => import('@/pages/home-page'))
-const sportHubPage = lazyPage(() => import('@/pages/sports/sport-hub-page'))
 const matchListPage = lazyPage(() => import('@/pages/sports/match-list-page'))
 const matchDetailPage = lazyPage(() => import('@/pages/sports/match-detail-page'))
 const teamListPage = lazyPage(() => import('@/pages/sports/team-list-page'))
@@ -275,7 +274,7 @@ export const router = createBrowserRouter([
         path: ':sport',
         element: <SportShell />,
         children: [
-          { index: true, element: sportHubPage },
+          { index: true, element: <Navigate to="matches" replace /> },
           { path: 'matches', element: matchListPage },
           { path: 'matches/today', element: <MatchListViewAllPage scope="today" /> },
           { path: 'matches/tomorrow', element: <MatchListViewAllPage scope="tomorrow" /> },

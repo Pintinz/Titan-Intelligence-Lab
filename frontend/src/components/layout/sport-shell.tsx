@@ -1,5 +1,5 @@
 import { NavLink, Outlet, Link } from 'react-router-dom'
-import { Radio, CalendarDays, Users, User, Trophy, Hammer } from 'lucide-react'
+import { CalendarDays, Users, User, Trophy, Hammer } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { useSportParam } from '@/lib/hooks/use-sport'
 import { useAuthStore } from '@/stores/auth-store'
@@ -8,13 +8,21 @@ import { Button } from '@/components/ui/button'
 
 // Prediction Laboratory / News / Community stay real, routable pages (linked contextually from
 // match/team pages) but aren't ready to carry primary navigation weight yet — pulled from the
-// tab bar rather than left half-finished in front of every user.
+// tab bar rather than left half-finished in front of every user. "Live" was pulled too
+// (2026-08-23) — match-list-page.tsx already surfaces live fixtures via its own LiveRail + live
+// KPI, so a separate primary "Live" destination was pure duplication (and the IA brief that
+// shaped this app's primary nav explicitly said not to give Live its own destination). Matches
+// is the index route now (see router.tsx's redirect) rather than a since-removed Live hub.
+//
+// Each tab carries its own accent (`activeColor`/`iconColor`) so the bar reads as four distinct
+// destinations at a glance, not four identical pills differing only by label — the active pill
+// tints with that tab's own color instead of one shared brand accent, so "which section" and
+// "what's selected" are communicated by the same signal.
 const TABS = [
-  { label: 'Live', to: '', icon: Radio },
-  { label: 'Matches', to: 'matches', icon: CalendarDays },
-  { label: 'Teams', to: 'teams', icon: Users },
-  { label: 'Players', to: 'players', icon: User },
-  { label: 'Competitions', to: 'competitions', icon: Trophy },
+  { label: 'Matches', to: 'matches', icon: CalendarDays, iconColor: 'var(--infinity-domain-football)', activeBg: 'var(--infinity-domain-football)' },
+  { label: 'Teams', to: 'teams', icon: Users, iconColor: 'var(--infinity-domain-community)', activeBg: 'var(--infinity-domain-community)' },
+  { label: 'Players', to: 'players', icon: User, iconColor: 'var(--infinity-signal)', activeBg: 'var(--infinity-signal)' },
+  { label: 'Competitions', to: 'competitions', icon: Trophy, iconColor: 'var(--infinity-warning)', activeBg: 'var(--infinity-warning)' },
 ]
 
 /**
@@ -74,15 +82,21 @@ export function SportShell() {
           {TABS.map((tab) => (
             <NavLink
               key={tab.label}
-              to={`/app/${sport.slug}${tab.to ? `/${tab.to}` : ''}`}
-              end={tab.to === ''}
+              to={`/app/${sport.slug}/${tab.to}`}
               className={({ isActive }) =>
                 cn(
                   'inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-3.5 py-1.5 text-sm font-medium transition-colors duration-200',
-                  isActive
-                    ? 'bg-accent-primary-muted text-accent-primary'
-                    : 'text-text-secondary hover:text-text-primary',
+                  !isActive && 'text-text-secondary hover:text-text-primary',
                 )
+              }
+              style={({ isActive }) =>
+                isActive
+                  ? {
+                      backgroundColor: `color-mix(in srgb, ${tab.activeBg} 16%, transparent)`,
+                      boxShadow: `0 0 0 1px color-mix(in srgb, ${tab.activeBg} 40%, transparent) inset`,
+                      color: tab.activeBg,
+                    }
+                  : undefined
               }
             >
               <tab.icon className="size-3.5" aria-hidden="true" />
