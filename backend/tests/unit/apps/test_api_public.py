@@ -490,6 +490,31 @@ def test_featured_intelligence_does_not_trust_a_stale_scheduled_status(client, d
     assert data[0]["fixture_id"] == subject_ref_upcoming
 
 
+def test_featured_intelligence_excludes_correct_score(client, db_session_factory, seeded_fixture):
+    """Correct Score's own probability reads low next to Match Winner/Over-Under even at real
+    high confidence, which lands as "not sure" to a first-time hero visitor — excluded from this
+    carousel specifically; a Match Winner pick on the same fixture must still appear."""
+    headers = _auth_headers(client)
+    subject_ref = str(seeded_fixture["fixture"].id)
+
+    asyncio.run(
+        _seed_production_market(db_session_factory, "football.correct_score", "football.hero_exclusion_cs_feature", subject_ref)
+    )
+    asyncio.run(
+        _seed_production_market(db_session_factory, "football.match_winner", "football.hero_exclusion_mw_feature", subject_ref)
+    )
+    _generate(client, headers, "football.correct_score", subject_ref)
+    _generate(client, headers, "football.match_winner", subject_ref)
+
+    response = client.get("/api/v1/public/featured-intelligence", params={"limit": 6})
+    assert response.status_code == 200
+    data = response.json()["data"]
+
+    market_keys = [pick["market_key"] for pick in data]
+    assert "football.correct_score" not in market_keys
+    assert "football.match_winner" in market_keys
+
+
 def test_platform_summary_reflects_seeded_competition(client, seeded_fixture):
     response = client.get("/api/v1/public/platform-summary")
     data = response.json()["data"]

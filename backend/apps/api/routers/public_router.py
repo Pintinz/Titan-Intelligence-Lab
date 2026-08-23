@@ -200,7 +200,9 @@ async def featured_intelligence(limit: int = Query(default=3, ge=1, le=6), sessi
     authenticated `/predictions/picks`, but capped to one (the highest-confidence) pick per market
     so the carousel shows the platform's real market breadth rather than one dominant market
     repeated across fixtures — resolved down to real team names and a short evidence highlight
-    (top positive/negative feature labels only, never raw SHAP weights or internal ids)."""
+    (top positive/negative feature labels only, never raw SHAP weights or internal ids). Correct
+    Score is excluded from this carousel specifically (see `_HERO_EXCLUDED_MARKETS`) — it still
+    generates and displays normally everywhere else in the product."""
     cache_key = f"featured-intelligence:{limit}"
     cached = _cached(cache_key)
     if cached is not None:
@@ -216,6 +218,14 @@ async def featured_intelligence(limit: int = Query(default=3, ge=1, le=6), sessi
     recent = await prediction_service.predictions.list_recent(limit=500)
     published = [p for p in recent if p.status is PredictionStatus.PUBLISHED]
 
+    # Correct Score is real evidence-based intelligence, not a weaker prediction — but an exact
+    # scoreline's own probability reads low next to a Match Winner/Over-Under pick even at real
+    # high confidence (e.g. a genuine 57% confidence read at ~10% probability), which lands as "the
+    # platform isn't sure" to a first-time visitor skimming the hero. Excluded from this carousel
+    # only — Correct Score still generates and displays normally everywhere else (Prediction
+    # Laboratory, Match Review, Team/Competition Intelligence).
+    _HERO_EXCLUDED_MARKETS = {"football.correct_score"}
+
     market_cache: dict[str, object] = {}
     picks = []
     for prediction in published:
@@ -223,7 +233,7 @@ async def featured_intelligence(limit: int = Query(default=3, ge=1, le=6), sessi
         if market_key not in market_cache:
             market_cache[market_key] = await market_service.markets.get(prediction.market_id)
         market = market_cache[market_key]
-        if market is not None:
+        if market is not None and market.market_key not in _HERO_EXCLUDED_MARKETS:
             picks.append((prediction, market))
     picks.sort(key=lambda pm: pm[0].confidence.composite, reverse=True)
 
