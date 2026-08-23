@@ -27,8 +27,11 @@ import { MissionAmbientBackground } from '@/components/command-deck/mission-cont
 /**
  * Mission Control — Command Deck. A ranked cascade, not a wall of equal-weight sections:
  * Intelligence Now (rank 0 of the confidence-ranked pick pool) -> Priority Intelligence (ranks
- * 1-3) -> ... -> Top Intelligence (rank 4+) share one pool via `usePriorityIntelligence`/
- * `rankPicks` so the same match never appears twice. The former 8-tile "AI Operations Overview"
+ * 1-3) -> Top Intelligence share one pool via `usePriorityIntelligence`/`rankPicks`, keyed by
+ * subject_ref (not rank number) so the same match never appears twice even though Top
+ * Intelligence alone applies `AI_PICK_CONFIDENCE_FLOOR` on top of that shared ranking — "our best
+ * signal right now" (Intelligence Now/Priority Intelligence) and "our most confident picks" (Top
+ * Intelligence) are deliberately different bars. The former 8-tile "AI Operations Overview"
  * is gone outright (not folded elsewhere) — each of its numbers already lives on its owning page
  * (Watchlist, Competitions, Context); the 4 that earned a new home moved into Intelligence Now's
  * compact snapshot panel instead. Data-fetching for Live/AI Ready lives here once (this page's own
@@ -144,7 +147,7 @@ export default function HomePage() {
 
       <IntelligenceFeed />
 
-      <TopAiIntelligence rankOffset={priority.topIntelligenceRankOffset} />
+      <TopAiIntelligence excludeSubjectRefs={priority.usedSubjectRefs} />
 
       <KnowledgeGraphTeaser />
 

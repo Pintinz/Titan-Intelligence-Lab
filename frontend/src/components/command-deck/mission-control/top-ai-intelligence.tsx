@@ -6,7 +6,7 @@ import { sportsApi } from '@/lib/api/sports'
 import { SPORT_SLUGS } from '@/lib/hooks/use-sport'
 import { rankPicks } from '@/lib/predictions/dedupe-by-fixture'
 import { fixtureCardStatus } from '@/lib/sports-status'
-import { AiPickCard } from '../ai-picks/ai-pick-card'
+import { AiPickCard, AI_PICK_CONFIDENCE_FLOOR } from '../ai-picks/ai-pick-card'
 import { MissionSection, MissionCardGrid, MissionSkeletonGrid, MissionEmptyState } from './mission-section'
 import type { PredictionPickDto, FixtureSummaryDto } from '@/lib/api/types'
 
@@ -17,20 +17,29 @@ function sportSlugFor(code: string): string {
 }
 
 /**
- * Top Intelligence — the next tier of the same ranked pick pool Intelligence Now and Priority
- * Intelligence already consumed. `rankOffset` skips whatever rank those two sections already
- * claimed (0 and 1-3) so the same match is never shown three times on one page — same shared
- * `rankPicks` helper as `/app/picks`, so no surface can drift on what "ranked" means.
+ * Top Intelligence — "matches predicted with high confidence": the only one of the three
+ * cascading sections that applies `AI_PICK_CONFIDENCE_FLOOR` (same bar `/app/picks` uses),
+ * deliberately unlike Intelligence Now/Priority Intelligence, which show the best signal
+ * available regardless of that floor. `excludeSubjectRefs` is whatever `usePriorityIntelligence`
+ * already claimed for those two sections (by subject_ref, not rank — the two pools are filtered
+ * differently now, so a numeric offset into "the same array" no longer holds), keeping "no match
+ * repeated across the three sections" correct.
  */
-export function TopAiIntelligence({ rankOffset = 0 }: { rankOffset?: number } = {}) {
+export function TopAiIntelligence({ excludeSubjectRefs }: { excludeSubjectRefs?: Set<string> } = {}) {
   const query = useQuery({
     queryKey: ['predictions', 'picks', 'mission-control'],
     queryFn: () => predictionsApi.picks({ limit: 100 }),
+    // Must match usePriorityIntelligence's staleTime for this exact queryKey — see that file's
+    // PICKS_STALE_TIME_MS comment.
+    staleTime: 2 * 60 * 1000,
   })
 
   const topPicks = useMemo(
-    () => rankPicks(query.data ?? []).slice(rankOffset, rankOffset + DISPLAY_LIMIT),
-    [query.data, rankOffset],
+    () =>
+      rankPicks(query.data ?? [])
+        .filter((pick) => pick.confidence_composite >= AI_PICK_CONFIDENCE_FLOOR && !excludeSubjectRefs?.has(pick.subject_ref))
+        .slice(0, DISPLAY_LIMIT),
+    [query.data, excludeSubjectRefs],
   )
 
   const fixtureQueries = useQueries({

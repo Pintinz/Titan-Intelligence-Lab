@@ -19,6 +19,12 @@ const PRIORITY_COUNT = 3
  * Intelligence starts from, so the three sections cascade through one ranked pool with no
  * repeated match. */
 const LEAD_COUNT = 1 + PRIORITY_COUNT
+/** Published predictions don't turn over second-to-second — the global 30s default staleTime
+ * (query-client.ts) meant revisiting Mission Control inside a normal browsing session almost
+ * always re-fetched. Must match `TopAiIntelligence`'s own `staleTime` for this exact queryKey
+ * (['predictions', 'picks', 'mission-control']) — TanStack Query can behave inconsistently when
+ * two observers on the same key disagree on staleness. */
+const PICKS_STALE_TIME_MS = 2 * 60 * 1000
 
 /**
  * Powers Intelligence Now + Priority Intelligence: the top 4 ranked picks from the same pool
@@ -29,7 +35,11 @@ const LEAD_COUNT = 1 + PRIORITY_COUNT
  * feature or injury renders fewer bullets; nothing here is ever a filler sentence.
  */
 export function usePriorityIntelligence() {
-  const picksQuery = useQuery({ queryKey: ['predictions', 'picks', 'mission-control'], queryFn: () => predictionsApi.picks({ limit: 100 }) })
+  const picksQuery = useQuery({
+    queryKey: ['predictions', 'picks', 'mission-control'],
+    queryFn: () => predictionsApi.picks({ limit: 100 }),
+    staleTime: PICKS_STALE_TIME_MS,
+  })
   const lead = useMemo(() => rankPicks(picksQuery.data ?? []).slice(0, LEAD_COUNT), [picksQuery.data])
 
   const fixtureQueries = useQueries({
@@ -79,7 +89,12 @@ export function usePriorityIntelligence() {
     heroItem: items[0] as RankedIntelligenceItem | undefined,
     priorityItems: items.slice(1, LEAD_COUNT),
     isLoading,
-    /** Pass straight through to `<TopAiIntelligence rankOffset={...} />`. */
-    topIntelligenceRankOffset: LEAD_COUNT,
+    /** Pass straight through to `<TopAiIntelligence excludeSubjectRefs={...} />` — Top
+     * Intelligence applies its own confidence floor on top of the same ranked pool (unlike
+     * `lead` above, which is deliberately unfiltered), so a numeric rank offset into that
+     * differently-filtered pool would no longer line up; excluding by subject_ref instead keeps
+     * "no repeated match across the three sections" correct regardless of which picks clear
+     * Top Intelligence's higher bar. */
+    usedSubjectRefs: new Set(lead.map((pick) => pick.subject_ref)),
   }
 }
