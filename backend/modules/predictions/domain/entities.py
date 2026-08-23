@@ -254,6 +254,15 @@ class Prediction:
     probability_distribution: dict = field(default_factory=dict)  # real label -> calibrated probability
     confidence_interval: tuple[float, float] | None = None  # (low, high), regression markets only
     expected_error: float | None = None  # historical MAE for this market, regression markets only
+    # Real prod incident audit (2026-08-23): `model_id`/`model_version` above always name the
+    # market's Champion, even on the run where `PredictionEngine._resolve_predictor` fell back to
+    # the generic formula predictor because the Champion's own artifact failed to load — nothing
+    # previously recorded which predictor actually produced `value`/`probability`, so the API
+    # could only ever report the Champion, misattributing formula-computed predictions as
+    # ML-computed. Set explicitly at generation time, one of "trained_model" | "formula_fallback";
+    # `None` only for predictions generated before this field existed — never inferred after the
+    # fact from `model_id` alone, since that's exactly the conflation this field exists to close.
+    predictor_provenance: str | None = None
 
     def is_published(self) -> bool:
         return self.status is PredictionStatus.PUBLISHED

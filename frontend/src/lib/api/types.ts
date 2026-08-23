@@ -555,9 +555,17 @@ export interface PredictionDto {
    * a non-2xx status with a structured `{prediction_status: "BLOCKED", reason_code, failed_gates}`
    * body instead of this shape (see `ApiError`/prediction_router.py `_blocked_detail`). */
   prediction_status: 'READY'
-  /** Always `"ACTIVE"` on a successful response — reaching this point means a real Champion
-   * model was used (a missing Champion blocks generation before a response is ever built). */
-  champion_status: 'ACTIVE'
+  /** Real prod incident audit (2026-08-23): "a Champion is registered for this market" and "the
+   * Champion's own artifact actually served this prediction" are different claims — a corrupt/
+   * missing artifact silently falls back to a generic formula predictor, previously reported here
+   * as "ACTIVE" regardless. Derived from `predictor_provenance`: "ACTIVE" only when a real trained
+   * model served this prediction, "FALLBACK" when the formula predictor did, "UNKNOWN" for
+   * predictions generated before this field existed (never inferred after the fact). */
+  champion_status: 'ACTIVE' | 'FALLBACK' | 'UNKNOWN'
+  /** "trained_model" | "formula_fallback" | `null` (generated before this field existed) — the
+   * raw signal `champion_status` above is derived from; prefer reading this directly when you
+   * need the actual value rather than the human-facing label. */
+  predictor_provenance: 'trained_model' | 'formula_fallback' | null
   /** Whether the always-on `ExplainabilityEngine` narrative (`explanation.ai_explanation`) was
    * produced — distinct from `contextual_review`/`football_explanation`, which carry their own
    * status fields for the two opt-in explanation subsystems. */
@@ -665,6 +673,7 @@ export interface PlayerSummaryDto {
   position: string | null
   team_id: string | null
   team_name: string | null
+  photo_url: string | null
 }
 
 export interface FixtureSummaryDto {

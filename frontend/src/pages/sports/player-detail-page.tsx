@@ -1,8 +1,10 @@
 import { useParams, Link } from 'react-router-dom'
 import { useQueries, useQuery, type UseQueryResult } from '@tanstack/react-query'
-import { ArrowLeft, Radio, Gauge, Waypoints, ClipboardList, ChevronRight } from 'lucide-react'
+import { ArrowLeft, Radio, Gauge, ClipboardList, ChevronRight, Sparkles, Newspaper, CalendarClock } from 'lucide-react'
 import { sportsApi } from '@/lib/api/sports'
+import { predictionsApi } from '@/lib/api/predictions'
 import { graphApi } from '@/lib/api/graph'
+import { marketsApi } from '@/lib/api/markets'
 import { useSportParam } from '@/lib/hooks/use-sport'
 import { fixtureScores } from '@/lib/sports-status'
 import { ApiError } from '@/lib/api/client'
@@ -10,7 +12,13 @@ import { ErrorState } from '@/components/ui/error-state'
 import { CDPanel, CDLabel } from '@/components/command-deck/primitives/panel'
 import { CD_DOMAIN_COLOR_VAR, domainTint, type DomainKey } from '@/components/command-deck/primitives/domain'
 import { MatchSnapshotCard } from '@/components/command-deck/match-snapshot-card'
-import type { FixtureSummaryDto, FixtureTeamStatisticsDto, InjuryDto, KgContextDto, KgNodeDto, TransferDto } from '@/lib/api/types'
+import { CompetitionFixtureTimeline } from '@/components/command-deck/competition-fixture-timeline'
+import { EntityNewsPanel } from '@/components/command-deck/entity-news-panel'
+import { EntityAiInsightUnavailable } from '@/components/command-deck/entity-ai-insight'
+import { EntityKnowledgeGraphPanel } from '@/components/command-deck/entity-knowledge-graph'
+import { latestByMarket } from '@/components/command-deck/workspace/workspace-tabs'
+import { resolveOutcomeLabel } from '@/components/infinity/evidence-explorer'
+import type { FixtureSummaryDto, FixtureTeamStatisticsDto, InjuryDto, PredictionMarketDto, TransferDto } from '@/lib/api/types'
 
 type Domain = Extract<DomainKey, 'football' | 'basketball' | 'baseball' | 'table-tennis'>
 
@@ -33,7 +41,7 @@ interface MatchImpactData {
 
 /**
  * PlayerDetailPage — Command Deck's Player Intelligence surface. `PlayerSummaryDto` is identity-
- * only (name/position/team/date_of_birth — confirmed by direct audit, no stats, no photo, no
+ * only (name/position/team/date_of_birth/photo — confirmed by direct audit, no stats, no
  * injury/transfer/prediction data anywhere in the API), so this page never invents a snapshot,
  * performance chart, or player-level prediction. What's real: the player's identity, their team's
  * recent form (labeled honestly as the team's results, not this player's personal involvement —
@@ -61,6 +69,22 @@ export default function PlayerDetailPage() {
     queryKey: ['sports', 'team', teamId, 'fixtures', 'recent'],
     queryFn: () => sportsApi.teamFixtures(teamId!, 8, 'recent'),
     enabled: !!teamId,
+  })
+  const upcomingQuery = useQuery({
+    queryKey: ['sports', 'team', teamId, 'fixtures', 'upcoming'],
+    queryFn: () => sportsApi.teamFixtures(teamId!, 8, 'upcoming'),
+    enabled: !!teamId,
+  })
+  const marketsQuery = useQuery({
+    queryKey: ['markets', sport?.code, 'production', 'player-detail'],
+    queryFn: () => marketsApi.list({ sport_code: sport!.code, status: 'production' }),
+    enabled: !!sport,
+  })
+  const nextFixture = upcomingQuery.data?.[0]
+  const nextFixtureHistoryQuery = useQuery({
+    queryKey: ['predictions', 'history', nextFixture?.id],
+    queryFn: () => predictionsApi.history(nextFixture!.id),
+    enabled: !!nextFixture,
   })
   const kgNodeQuery = useQuery({
     queryKey: ['graph', 'entity', 'player', playerId],
@@ -190,10 +214,149 @@ export default function PlayerDetailPage() {
 
       <PlayerRecordsPanel injuriesQuery={injuriesQuery} transfersQuery={transfersQuery} />
 
-      <KnowledgeGraphSection nodeQuery={kgNodeQuery} contextQuery={kgContextQuery} playerName={player.name} />
+      {team && (
+        <div id="upcoming-fixtures">
+          <div className="mb-4 flex items-center gap-2">
+            <CalendarClock className="size-4" style={{ color: 'var(--cd-text-muted)' }} aria-hidden="true" />
+            <p className="font-[var(--cd-font-display)] text-[16px] font-semibold" style={{ color: 'var(--cd-text-primary)' }}>
+              Upcoming fixtures
+            </p>
+          </div>
+          <p className="mb-4 font-[var(--cd-font-body)] text-[12.5px] leading-relaxed" style={{ color: 'var(--cd-text-muted)' }}>
+            {team.name}'s upcoming schedule — TitanIQ doesn't yet confirm {player.name}'s individual availability for a specific
+            fixture, so this shows the club's schedule, not a start-XI projection.
+          </p>
+          {upcomingQuery.isPending ? (
+            <div className="h-24 animate-pulse rounded-[var(--cd-radius-md)]" style={{ backgroundColor: 'var(--cd-surface-2)' }} />
+          ) : (upcomingQuery.data ?? []).length === 0 ? (
+            <CDPanel>
+              <p className="font-[var(--cd-font-body)] text-[13px]" style={{ color: 'var(--cd-text-secondary)' }}>
+                No upcoming fixtures scheduled for {team.name} yet.
+              </p>
+            </CDPanel>
+          ) : (
+            <CompetitionFixtureTimeline fixtures={upcomingQuery.data!} fallbackSportSlug={sport.slug} aiReady={(marketsQuery.data?.length ?? 0) > 0} />
+          )}
+        </div>
+      )}
+
+      <PlayerPredictionIntelligence
+        team={team}
+        sportSlug={sport.slug}
+        nextFixture={nextFixture}
+        historyQuery={nextFixtureHistoryQuery}
+        markets={marketsQuery.data ?? []}
+      />
+
+      <div id="news">
+        <div className="mb-4 flex items-center gap-2">
+          <Newspaper className="size-4" style={{ color: 'var(--cd-text-muted)' }} aria-hidden="true" />
+          <p className="font-[var(--cd-font-display)] text-[16px] font-semibold" style={{ color: 'var(--cd-text-primary)' }}>
+            News
+          </p>
+        </div>
+        <EntityNewsPanel entityRef={player.id} entityLabel={player.name} />
+      </div>
+
+      <EntityAiInsightUnavailable entityLabel={player.name} />
+
+      <EntityKnowledgeGraphPanel nodeQuery={kgNodeQuery} contextQuery={kgContextQuery} entityLabel={player.name} />
     </div>
   )
 }
+
+/**
+ * Player Prediction Intelligence — no player-scoped prediction market exists anywhere in the
+ * backend (confirmed: every real market seeds `entity_type=FIXTURE`, never a player), so this
+ * never fabricates a player-level forecast. Instead it points at the one real, already-generated
+ * prediction that's genuinely relevant: the player's own club's next fixture, if TitanIQ has
+ * generated one for it — reusing the exact same `predictionsApi.history` + `latestByMarket`
+ * technique `PredictionIntelligenceSection` (Team Intelligence) already uses, just to decide
+ * whether a real link exists rather than rendering the full panel here.
+ */
+function PlayerPredictionIntelligence({
+  team,
+  sportSlug,
+  nextFixture,
+  historyQuery,
+  markets,
+}: {
+  team: { id: string; name: string } | null
+  sportSlug: string
+  nextFixture: FixtureSummaryDto | undefined
+  historyQuery: UseQueryResult<Awaited<ReturnType<typeof predictionsApi.history>>>
+  markets: PredictionMarketDto[]
+}) {
+  const generatedMarket = (() => {
+    if (!nextFixture || !historyQuery.data) return null
+    const latest = latestByMarket(historyQuery.data)
+    const generated = markets.filter((m) => latest.has(m.id))
+    // Prefer Match Winner as the headline market — same convention Team/Competition Intelligence
+    // already use, so this page never shows a different "primary" market for the same fixture.
+    const match = generated.find((m) => m.market_key.endsWith('.match_winner')) ?? generated[0]
+    return match ? { market: match, prediction: latest.get(match.id)! } : null
+  })()
+
+  return (
+    <CDPanel>
+      <div className="flex items-center gap-2">
+        <Sparkles className="size-4" style={{ color: 'var(--cd-text-muted)' }} aria-hidden="true" />
+        <CDLabel>Prediction intelligence</CDLabel>
+      </div>
+
+      {!team && (
+        <p className="mt-3 font-[var(--cd-font-body)] text-[13px]" style={{ color: 'var(--cd-text-secondary)' }}>
+          Player-level prediction markets are not currently available.
+        </p>
+      )}
+
+      {team && !nextFixture && (
+        <p className="mt-3 font-[var(--cd-font-body)] text-[13px]" style={{ color: 'var(--cd-text-secondary)' }}>
+          Player-specific predictions are not currently supported, and {team.name} has no upcoming fixture under coverage yet.
+        </p>
+      )}
+
+      {team && nextFixture && historyQuery.isPending && (
+        <div className="mt-3 h-12 animate-pulse rounded-[var(--cd-radius-md)]" style={{ backgroundColor: 'var(--cd-surface-2)' }} />
+      )}
+
+      {team && nextFixture && !historyQuery.isPending && (
+        <>
+          <p className="mt-3 font-[var(--cd-font-body)] text-[13px] leading-relaxed" style={{ color: 'var(--cd-text-secondary)' }}>
+            Player-specific predictions are not currently supported.
+            {generatedMarket
+              ? ` View ${team.name}'s next fixture's team prediction intelligence below.`
+              : ` TitanIQ hasn't generated a prediction for ${team.name}'s next fixture yet.`}
+          </p>
+          {generatedMarket && (
+            <Link
+              to={`/app/${nextFixture.sport_code ?? sportSlug}/matches/${nextFixture.id}`}
+              className="mt-3 flex items-center justify-between gap-3 rounded-[var(--cd-radius-md)] border p-3 transition-colors duration-[var(--cd-motion-base)] hover:border-[var(--cd-accent)]"
+              style={{ borderColor: 'var(--cd-border-default)', backgroundColor: 'var(--cd-surface-2)' }}
+            >
+              <span className="min-w-0">
+                <span className="block truncate font-[var(--cd-font-body)] text-[13px] font-medium" style={{ color: 'var(--cd-text-primary)' }}>
+                  {nextFixture.home_team.name} vs {nextFixture.away_team.name}
+                </span>
+                <span className="font-[var(--cd-font-tabular)] text-[11px] tabular-nums" style={{ color: 'var(--cd-text-muted)' }}>
+                  {generatedMarket.market.name} ·{' '}
+                  {resolveOutcomeLabel(
+                    String(generatedMarket.prediction.value),
+                    { name: nextFixture.home_team.name, logoUrl: nextFixture.home_team.logo_url },
+                    { name: nextFixture.away_team.name, logoUrl: nextFixture.away_team.logo_url },
+                  )}{' '}
+                  ({(generatedMarket.prediction.probability * 100).toFixed(1)}%)
+                </span>
+              </span>
+              <ChevronRight className="size-3.5 shrink-0" style={{ color: 'var(--cd-text-muted)' }} aria-hidden="true" />
+            </Link>
+          )}
+        </>
+      )}
+    </CDPanel>
+  )
+}
+
 
 function PlayerDetailHero({
   player,
@@ -227,9 +390,13 @@ function PlayerDetailHero({
             className="flex size-16 shrink-0 items-center justify-center overflow-hidden rounded-[var(--cd-radius-lg)] border"
             style={{ borderColor: 'var(--cd-border-default)', backgroundColor: 'var(--cd-surface-2)' }}
           >
-            <span aria-hidden="true" className="font-[var(--cd-font-display)] text-2xl font-semibold" style={{ color: domainColor }}>
-              {player.name.charAt(0).toUpperCase()}
-            </span>
+            {player.photo_url ? (
+              <img src={player.photo_url} alt="" className="size-full object-cover" loading="lazy" />
+            ) : (
+              <span aria-hidden="true" className="font-[var(--cd-font-display)] text-2xl font-semibold" style={{ color: domainColor }}>
+                {player.name.charAt(0).toUpperCase()}
+              </span>
+            )}
           </span>
           <div className="min-w-0">
             <CDLabel tone="accent">Player Intelligence</CDLabel>
@@ -487,99 +654,8 @@ function PlayerRecordsPanel({
             )}
           </div>
         </div>
-        <div className="flex flex-col gap-1 py-3 sm:flex-row sm:items-baseline sm:gap-4">
-          <p className="w-36 shrink-0 font-[var(--cd-font-telemetry)] text-[10.5px] font-semibold uppercase tracking-[0.06em]" style={{ color: 'var(--cd-text-muted)' }}>
-            Player predictions
-          </p>
-          <p className="font-[var(--cd-font-body)] text-[13px]" style={{ color: 'var(--cd-text-secondary)' }}>
-            Player-level prediction markets are not currently available.
-          </p>
-        </div>
       </div>
     </CDPanel>
   )
 }
 
-function KnowledgeGraphSection({
-  nodeQuery,
-  contextQuery,
-  playerName,
-}: {
-  nodeQuery: { isPending: boolean; isError: boolean; error: unknown; data: KgNodeDto | undefined }
-  contextQuery: { isPending: boolean; data: KgContextDto | undefined }
-  playerName: string
-}) {
-  const notFound = nodeQuery.isError && nodeQuery.error instanceof ApiError && nodeQuery.error.status === 404
-  const otherError = nodeQuery.isError && !notFound
-
-  return (
-    <CDPanel>
-      <div className="flex items-center gap-2">
-        <Waypoints className="size-4" style={{ color: 'var(--cd-text-muted)' }} aria-hidden="true" />
-        <CDLabel>Connected intelligence</CDLabel>
-      </div>
-
-      {nodeQuery.isPending && (
-        <div className="mt-4 h-10 animate-pulse rounded-[var(--cd-radius-md)]" style={{ backgroundColor: 'var(--cd-surface-2)' }} />
-      )}
-
-      {notFound && (
-        <p className="mt-3 font-[var(--cd-font-body)] text-[13px]" style={{ color: 'var(--cd-text-secondary)' }}>
-          No connected entities are currently available for {playerName}.
-        </p>
-      )}
-
-      {otherError && (
-        <p className="mt-3 font-[var(--cd-font-body)] text-[13px]" style={{ color: 'var(--cd-text-secondary)' }}>
-          Connected intelligence could not be loaded.
-        </p>
-      )}
-
-      {nodeQuery.data && (
-        <>
-          {contextQuery.isPending && (
-            <div className="mt-3 h-8 animate-pulse rounded-[var(--cd-radius-md)]" style={{ backgroundColor: 'var(--cd-surface-2)' }} />
-          )}
-          {contextQuery.data &&
-            (() => {
-              const related = Object.entries(contextQuery.data.related_by_type)
-              const total = related.reduce((sum, [, nodes]) => sum + nodes.length, 0)
-              if (total === 0) {
-                return (
-                  <p className="mt-3 font-[var(--cd-font-body)] text-[13px]" style={{ color: 'var(--cd-text-secondary)' }}>
-                    No connected entities are currently available for {playerName}.
-                  </p>
-                )
-              }
-              return (
-                <>
-                  <p className="mt-3 font-[var(--cd-font-body)] text-[13px]" style={{ color: 'var(--cd-text-secondary)' }}>
-                    TitanIQ has connected {playerName} to {total} related {total === 1 ? 'entity' : 'entities'} it uses to build
-                    understanding.
-                  </p>
-                  <ul className="mt-3 flex flex-wrap gap-2">
-                    {related.map(([type, nodes]) => (
-                      <li key={type}>
-                        <span
-                          className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 font-[var(--cd-font-telemetry)] text-[10.5px] font-medium"
-                          style={{ color: 'var(--cd-accent)', backgroundColor: 'var(--cd-accent-muted)' }}
-                        >
-                          {nodes.length} {humanizePlural(type, nodes.length)}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              )
-            })()}
-        </>
-      )}
-    </CDPanel>
-  )
-}
-
-function humanizePlural(nodeType: string, count: number): string {
-  const label = nodeType.replace(/_/g, ' ')
-  if (count === 1 || label.endsWith('s')) return label
-  return `${label}s`
-}

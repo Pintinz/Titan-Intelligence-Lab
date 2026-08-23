@@ -41,7 +41,12 @@ export function useTeamIntelligence(sportCode: SportCode) {
   const fixtureQueries = useQueries({
     queries: (['live', 'scheduled', 'completed'] as const).map((status) => ({
       queryKey: ['sports', sportCode, 'fixtures', 'intelligence', status],
-      queryFn: () => sportsApi.listFixturesPaged(sportCode, { status, limit: 200 }),
+      // `completed` only ever backfills a team's competition context when it has no live/scheduled
+      // match (see `anyMatch` below) — it never needs anywhere near a full page. Football alone has
+      // 2000+ completed fixtures on record, and fetching 200 of them measured a consistent ~20s
+      // server-side (reproduced in isolation, not a contention artifact) — a much smaller page keeps
+      // this fetch fast while still covering every team whose only fixture history is completed.
+      queryFn: () => sportsApi.listFixturesPaged(sportCode, { status, limit: status === 'completed' ? 50 : 200 }),
     })),
   })
 

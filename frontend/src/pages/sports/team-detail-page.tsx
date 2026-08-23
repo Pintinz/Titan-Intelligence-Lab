@@ -57,6 +57,7 @@ import { InfinityPlayerCard } from '@/components/infinity/cards/player-card'
 import { CompetitionFixtureTimeline } from '@/components/command-deck/competition-fixture-timeline'
 import { MatchSnapshotCard } from '@/components/command-deck/match-snapshot-card'
 import { SeasonFilter } from '@/components/command-deck/season-filter'
+import { PredictionIntelligenceSection } from '@/components/command-deck/prediction-intelligence'
 import type { FixtureSummaryDto, NewsEventDto, TeamStatisticsSummaryDto } from '@/lib/api/types'
 
 type Domain = Extract<DomainKey, 'football' | 'basketball' | 'baseball' | 'table-tennis'>
@@ -70,6 +71,7 @@ const OUTCOME_TONE: Record<Outcome, string> = {
 
 const SECTIONS = [
   { id: 'overview', label: 'Overview' },
+  { id: 'predictions', label: 'Predictions' },
   { id: 'analytics', label: 'Analytics' },
   { id: 'statistics', label: 'Statistics' },
   { id: 'squad', label: 'Squad' },
@@ -439,6 +441,21 @@ export default function TeamDetailPage() {
       </nav>
 
       <div className="space-y-10">
+        {/* Prediction Intelligence — the team's next monitored fixture, connected to TitanIQ's
+            already-generated prediction(s) for it. Placed ahead of Season Analytics per the page's
+            own priority order: identity and current performance live in the Hero above, the
+            prediction itself is the next thing a visitor should see, never buried under
+            statistics. */}
+        <div id="predictions" className="scroll-mt-24">
+          <SectionHeading icon={Sparkles} title="Prediction intelligence" tone={tone} />
+          <PredictionIntelligenceSection
+            nextFixture={nextFixture}
+            markets={markets}
+            marketsLoading={marketsQuery.isPending}
+            recentCompletedFixtures={completedFixtures.map((row) => row.fixture)}
+          />
+        </div>
+
         {/* Season Analytics */}
         <div id="analytics" className="scroll-mt-24">
           <SectionHeading icon={Flag} title="Season analytics" tone={tone} />
@@ -475,7 +492,7 @@ export default function TeamDetailPage() {
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {playersQuery.data.map((player) => (
                 <Link key={player.id} to={`/app/${sport.slug}/players/${player.id}`} className="block">
-                  <InfinityPlayerCard name={player.name} domain={domain} team={team.name} position={player.position} />
+                  <InfinityPlayerCard name={player.name} domain={domain} team={team.name} position={player.position} photoUrl={player.photo_url} />
                 </Link>
               ))}
             </div>

@@ -58,6 +58,7 @@ class WorkerHealthReport:
     workers_online: int
     worker_names: tuple[str, ...]
     active_task_counts: dict[str, int]
+    error: str | None = None
 
 
 @dataclass
@@ -107,9 +108,18 @@ class MonitoringService:
         return client.llen(queue_name)
 
     def worker_health(self, celery_app) -> WorkerHealthReport:
-        inspector = celery_app.control.inspect()
-        active = inspector.active() or {}
-        stats = inspector.stats() or {}
+        """`inspect()` opens a real synchronous connection to the broker to ask which workers are
+        online — same "genuinely absent, not fabricated" contract as `redis_health` above.
+        Post-match resolution pipeline audit (2026-08-23): the broker being unreachable (no worker
+        deployed yet, network partition, wrong credentials) is itself a real, expected answer —
+        "0 workers online" — not a 500. Never surfaces the broker URL/credentials from the raised
+        exception (Phase 19: "Do not expose provider secrets in errors")."""
+        try:
+            inspector = celery_app.control.inspect()
+            active = inspector.active() or {}
+            stats = inspector.stats() or {}
+        except Exception as exc:  # noqa: BLE001 — any broker/transport failure means "no worker reachable", not a crash
+            return WorkerHealthReport(workers_online=0, worker_names=(), active_task_counts={}, error=exc.__class__.__name__)
         return WorkerHealthReport(
             workers_online=len(stats),
             worker_names=tuple(stats.keys()),

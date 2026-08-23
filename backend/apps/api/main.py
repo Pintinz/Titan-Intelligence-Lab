@@ -1954,6 +1954,29 @@ async def get_redis_health(session: AsyncSession = Depends(get_session), _admin:
     return envelope(data={"healthy": report.healthy, "latency_ms": report.latency_ms, "error": report.error})
 
 
+@app.get("/api/v1/admin/monitoring/worker")
+async def get_worker_health(session: AsyncSession = Depends(get_session), _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
+    """Post-match resolution pipeline audit (2026-08-23) — `MonitoringService.worker_health()` has
+    existed since Milestone 5 (real `celery_app.control.inspect()`, no fabricated heartbeat) but
+    had no route exposing it; this is the missing wiring, not new monitoring logic. A real,
+    connected Celery worker answers `inspect().stats()`/`.active()` within Celery's own inspect
+    timeout — `workers_online: 0` here is an honest "no worker is currently reachable," never a
+    guess, and is exactly what this endpoint is for: telling an operator whether the automated
+    resolution pipeline has anything actually running it."""
+    from modules.ingestion.infrastructure.celery.celery_app import celery_app
+
+    monitoring = build_monitoring_service(session)
+    report = monitoring.worker_health(celery_app)
+    return envelope(
+        data={
+            "workers_online": report.workers_online,
+            "worker_names": list(report.worker_names),
+            "active_task_counts": report.active_task_counts,
+            "error": report.error,
+        }
+    )
+
+
 # Knowledge-graph single-entity lookup lives at GET /api/v1/graph/entities/{node_type}/{entity_ref}
 # (apps/api/routers/graph_router.py) — that endpoint now also returns edges_out/edges_in, so this
 # admin-only duplicate (which resolved the exact same kg.nodes.get_by_entity_ref() call under a

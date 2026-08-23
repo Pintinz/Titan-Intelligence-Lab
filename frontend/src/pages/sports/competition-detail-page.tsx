@@ -1,11 +1,13 @@
 import { useMemo, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, LayoutGrid, CalendarDays, History, ListOrdered, Users, CalendarRange } from 'lucide-react'
+import { ArrowLeft, LayoutGrid, CalendarDays, History, ListOrdered, Users, CalendarRange, Sparkles, Target, Newspaper, Waypoints } from 'lucide-react'
 import { sportsApi } from '@/lib/api/sports'
 import { marketsApi } from '@/lib/api/markets'
+import { graphApi } from '@/lib/api/graph'
 import { useSportParam } from '@/lib/hooks/use-sport'
 import { useWatchlist } from '@/lib/hooks/use-watchlist'
+import { useDataFreshness } from '@/lib/hooks/use-data-freshness'
 import { fixtureCardStatus, fixtureScores } from '@/lib/sports-status'
 import { ErrorState } from '@/components/ui/error-state'
 import { CDPanel } from '@/components/command-deck/primitives/panel'
@@ -14,11 +16,17 @@ import { CompetitionDetailHero, type CompetitionStatus } from '@/components/comm
 import { CompetitionSnapshot } from '@/components/command-deck/competition-snapshot'
 import { CompetitionFixtureTimeline } from '@/components/command-deck/competition-fixture-timeline'
 import { CompetitionStandingsTable } from '@/components/command-deck/competition-standings-table'
+import { CompetitionPredictionIntelligence } from '@/components/command-deck/competition-prediction-intelligence'
+import { CompetitionStatisticsSection } from '@/components/command-deck/competition-statistics'
+import { EntityNewsPanel } from '@/components/command-deck/entity-news-panel'
+import { EntityAiInsightUnavailable } from '@/components/command-deck/entity-ai-insight'
+import { EntityKnowledgeGraphPanel } from '@/components/command-deck/entity-knowledge-graph'
+import { DataFreshnessBadge } from '@/components/command-deck/data-freshness-badge'
 import { DiscoveryMatchCard } from '@/components/command-deck/discovery/discovery-match-card'
 import { MissionSection, MissionSkeletonGrid, MissionEmptyState } from '@/components/command-deck/mission-control/mission-section'
 import type { FixtureSummaryDto } from '@/lib/api/types'
 
-type TabKey = 'overview' | 'fixtures' | 'results' | 'standings' | 'teams'
+type TabKey = 'overview' | 'fixtures' | 'results' | 'standings' | 'teams' | 'predictions' | 'statistics'
 
 const TABS: Array<{ key: TabKey; label: string; icon: typeof LayoutGrid }> = [
   { key: 'overview', label: 'Overview', icon: LayoutGrid },
@@ -26,6 +34,8 @@ const TABS: Array<{ key: TabKey; label: string; icon: typeof LayoutGrid }> = [
   { key: 'results', label: 'Results', icon: History },
   { key: 'standings', label: 'Standings', icon: ListOrdered },
   { key: 'teams', label: 'Teams', icon: Users },
+  { key: 'predictions', label: 'Predictions', icon: Sparkles },
+  { key: 'statistics', label: 'Statistics', icon: Target },
 ]
 
 const OVERVIEW_LIMIT = 6
@@ -75,6 +85,18 @@ export default function CompetitionDetailPage() {
     queryFn: () => marketsApi.list({ sport_code: sport!.code, status: 'production' }),
     enabled: !!sport,
   })
+  const kgNodeQuery = useQuery({
+    queryKey: ['graph', 'entity', 'competition', competitionId],
+    queryFn: () => graphApi.getEntity('competition', competitionId!),
+    enabled: !!competitionId,
+    retry: false,
+  })
+  const kgContextQuery = useQuery({
+    queryKey: ['graph', 'context', kgNodeQuery.data?.id],
+    queryFn: () => graphApi.context(kgNodeQuery.data!.id, { depth: 1, max_nodes: 12 }),
+    enabled: !!kgNodeQuery.data,
+  })
+  const freshness = useDataFreshness()
 
   const fixtures = fixturesQuery.data ?? []
   const standings = standingsQuery.data ?? []
@@ -161,13 +183,16 @@ export default function CompetitionDetailPage() {
 
   return (
     <div className="command-deck space-y-6 rounded-[var(--cd-radius-xl)] bg-[var(--cd-bg)] p-3 sm:p-4 lg:p-6">
-      <Link
-        to={`/app/${sport.slug}/competitions`}
-        className="inline-flex items-center gap-1 font-[var(--cd-font-body)] text-[13px] transition-colors"
-        style={{ color: 'var(--cd-text-secondary)' }}
-      >
-        <ArrowLeft className="size-3.5" aria-hidden="true" /> Back to competitions
-      </Link>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Link
+          to={`/app/${sport.slug}/competitions`}
+          className="inline-flex items-center gap-1 font-[var(--cd-font-body)] text-[13px] transition-colors"
+          style={{ color: 'var(--cd-text-secondary)' }}
+        >
+          <ArrowLeft className="size-3.5" aria-hidden="true" /> Back to competitions
+        </Link>
+        <DataFreshnessBadge freshness={freshness} />
+      </div>
 
       <CompetitionDetailHero
         competition={competition}
@@ -304,6 +329,18 @@ export default function CompetitionDetailPage() {
               )}
             </MissionSection>
           </div>
+
+          <div className="space-y-6 lg:col-span-12">
+            <MissionSection title="News" subtitle={`${competition.name} coverage`} icon={<Newspaper className="size-4" aria-hidden="true" />}>
+              <EntityNewsPanel entityRef={competition.id} entityLabel={competition.name} />
+            </MissionSection>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <MissionSection title="Knowledge graph" icon={<Waypoints className="size-4" aria-hidden="true" />}>
+                <EntityKnowledgeGraphPanel nodeQuery={kgNodeQuery} contextQuery={kgContextQuery} entityLabel={competition.name} />
+              </MissionSection>
+              <EntityAiInsightUnavailable entityLabel={competition.name} />
+            </div>
+          </div>
         </div>
       )}
 
@@ -372,6 +409,24 @@ export default function CompetitionDetailPage() {
             ))}
           </div>
           )}
+        </MissionSection>
+      )}
+
+      {activeTab === 'predictions' && (
+        <MissionSection title="Prediction Intelligence" icon={<Sparkles className="size-4" aria-hidden="true" />}>
+          <CompetitionPredictionIntelligence
+            upcomingFixtures={scheduleFixtures}
+            completedFixtures={completed}
+            markets={marketsQuery.data ?? []}
+            marketsLoading={marketsQuery.isPending}
+            sportSlug={sport.slug}
+          />
+        </MissionSection>
+      )}
+
+      {activeTab === 'statistics' && (
+        <MissionSection title="Statistics" icon={<Target className="size-4" aria-hidden="true" />}>
+          <CompetitionStatisticsSection completedFixtures={completed} seasonLabel={seasons.find((s) => s.id === selectedSeasonId)?.label} />
         </MissionSection>
       )}
     </div>

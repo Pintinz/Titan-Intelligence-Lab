@@ -124,6 +124,11 @@ class PredictionModel(Base):
     confidence_interval_low: Mapped[float | None] = mapped_column(Float, nullable=True)
     confidence_interval_high: Mapped[float | None] = mapped_column(Float, nullable=True)
     expected_error: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # See modules.predictions.domain.entities.Prediction.predictor_provenance docstring — real
+    # prod incident audit (2026-08-23): "trained_model" | "formula_fallback", nullable only
+    # because rows from before this column existed have no recorded provenance (never inferred
+    # after the fact — that's exactly the conflation this column exists to close).
+    predictor_provenance: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class PredictionOutcomeModel(Base):

@@ -131,6 +131,28 @@ def test_worker_health_with_no_workers_online(service):
     assert report.workers_online == 0
     assert report.worker_names == ()
     assert report.active_task_counts == {}
+    assert report.error is None
+
+
+class _FakeControlUnreachableBroker:
+    def inspect(self):
+        raise ConnectionError("Error 10061 connecting to 127.0.0.1:6379.")
+
+
+class _FakeCeleryAppUnreachableBroker:
+    control = _FakeControlUnreachableBroker()
+
+
+def test_worker_health_reports_honestly_when_broker_is_unreachable(service):
+    """Post-match resolution pipeline audit (2026-08-23) — no worker deployed yet, or a network
+    failure, must report an honest "0 workers online" rather than crash the whole admin
+    monitoring surface with a raw connection exception."""
+    report = service.worker_health(_FakeCeleryAppUnreachableBroker())
+
+    assert report.workers_online == 0
+    assert report.worker_names == ()
+    assert report.active_task_counts == {}
+    assert report.error == "ConnectionError"
 
 
 def test_worker_health_with_workers_online(service):

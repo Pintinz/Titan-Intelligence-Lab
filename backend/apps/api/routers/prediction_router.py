@@ -238,6 +238,15 @@ def _serialize_prediction(
 ) -> dict:
     confidence = prediction.confidence
     explanation = prediction.explanation
+    # Real prod incident audit (2026-08-23): a formula fallback is not the Champion algorithm
+    # named by `model_algorithm`/`model_framework` above (those are looked up from `model_id`,
+    # which always names the Champion regardless of which predictor actually ran) — reporting the
+    # Champion's real algorithm name next to a fallback-computed value would misattribute it as
+    # ML-computed. Overridden here only for the one case that's actually misleading; `None`
+    # provenance (predictions generated before this field existed) leaves the original lookup
+    # untouched rather than guessing.
+    if prediction.predictor_provenance == "formula_fallback":
+        model_algorithm, model_framework = "statistical_formula", "weighted_formula"
     return {
         "id": str(prediction.id),
         "market_id": str(prediction.market_id),
@@ -285,14 +294,16 @@ def _serialize_prediction(
             _serialize_football_explanation(football_explanation, prediction) if football_explanation else None
         ),
         # Phase 3 audit fix (spec §27 "API Diagnostics") — a successful response only ever reaches
-        # this point once `NoChampionModelError` didn't fire, so the model actually used was the
-        # market's real Champion; `prediction_status`/`champion_status` make that state explicit
-        # rather than leaving the caller to infer "no error means ready." `explanation_status`
-        # reflects the always-on `ExplainabilityEngine` narrative (`explanation.ai_explanation`),
-        # not the opt-in `contextual_review`/`football_explanation` — those already carry their
-        # own `status`/`review_status` field.
+        # this point once `NoChampionModelError` didn't fire, meaning a real Champion is
+        # *registered* for this market — but that is not the same claim as "the Champion's own
+        # artifact actually served this prediction" (real prod incident, audited 2026-08-23: a
+        # silent formula fallback on artifact-load failure previously had `champion_status`
+        # hardcoded to "ACTIVE" regardless). `predictor_provenance` now names which one it was.
         "prediction_status": "READY",
-        "champion_status": "ACTIVE",
+        "champion_status": {"trained_model": "ACTIVE", "formula_fallback": "FALLBACK"}.get(
+            prediction.predictor_provenance, "UNKNOWN"
+        ),
+        "predictor_provenance": prediction.predictor_provenance,
         "explanation_status": "GENERATED" if explanation.ai_explanation else "UNAVAILABLE",
     }
 

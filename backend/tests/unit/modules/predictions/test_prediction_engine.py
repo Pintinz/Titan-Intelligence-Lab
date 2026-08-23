@@ -541,6 +541,7 @@ async def test_generate_serves_a_real_trained_model_when_champion_has_an_artifac
     # WeightedLogisticPredictor's "positive"/"negative" bare-formula label.
     assert prediction.value in ("positive", "negative")
     assert 0.0 <= prediction.probability <= 1.0
+    assert prediction.predictor_provenance == "trained_model"
 
 
 @pytest.mark.asyncio
@@ -571,6 +572,7 @@ async def test_generate_falls_back_to_registry_for_placeholder_champion_even_wit
 
     assert prediction.model_id == champion.id
     assert prediction.value in ("positive", "negative")
+    assert prediction.predictor_provenance == "formula_fallback"
 
 
 @pytest.mark.asyncio
@@ -605,6 +607,11 @@ async def test_generate_falls_back_when_artifact_cannot_be_loaded(
     )
 
     assert prediction.value in ("positive", "negative")
+    # Real prod incident audit (2026-08-23): this is the exact case that was silently
+    # misattributed before — a Champion IS registered with a real artifact_ref, but loading it
+    # fails, so a formula predictor actually computed `value`/`probability` above. Provenance must
+    # say so, never "trained_model" just because a Champion with an artifact_ref exists.
+    assert prediction.predictor_provenance == "formula_fallback"
 
 
 @pytest.mark.asyncio

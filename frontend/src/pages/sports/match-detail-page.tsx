@@ -19,6 +19,8 @@ import { AIMatchSnapshot } from '@/components/command-deck/ai-snapshot'
 import { PredictionLaboratory } from '@/components/command-deck/prediction-laboratory'
 import { GeneratedIntelligencePanel } from '@/components/command-deck/generated-intelligence'
 import { MatchSnapshotCard } from '@/components/command-deck/match-snapshot-card'
+import { ActualVsPredictedCard } from '@/components/command-deck/actual-vs-predicted-card'
+import { CDLabel } from '@/components/command-deck/primitives/panel'
 import type { FixtureSummaryDto, InjuryDto } from '@/lib/api/types'
 
 function isLiveStatus(status: string) {
@@ -43,6 +45,14 @@ export default function MatchDetailPage() {
   })
 
   useRealtimeInvalidate('matches', [['sports', 'fixture', matchId]], matchId ? `fixture_id=eq.${matchId}` : undefined)
+
+  // Only meaningful once the fixture has actually finished — real `predictionsApi.review()` data,
+  // the same source `match-review-page.tsx` uses, not a second prediction-evaluation mechanism.
+  const reviewQuery = useQuery({
+    queryKey: ['predictions', 'review', matchId],
+    queryFn: () => predictionsApi.review(matchId!),
+    enabled: !!matchId && fixtureQuery.data?.status.toLowerCase() === 'completed',
+  })
 
   const marketsQuery = useQuery({
     queryKey: ['markets', sport?.code, 'production'],
@@ -174,6 +184,32 @@ export default function MatchDetailPage() {
           matchStatusTone={matchStatusTone}
           aiReady={aiAvailable}
         />
+
+        {/* Post-match resolution pipeline (2026-08-23) — for a completed fixture, what actually
+            happened vs what TitanIQ predicted beforehand is the primary thing a visitor wants,
+            ahead of the (now moot) "Generate Intelligence" flow below. Real data only: renders
+            nothing while the review is still loading or the fixture isn't actually completed. */}
+        {isCompleted && !reviewQuery.isPending && (reviewQuery.data?.markets.length ?? 0) > 0 && (
+          <div>
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <CDLabel tone="accent">Actual vs Predicted</CDLabel>
+              <Link to={`/app/${sport.slug}/matches/${fixture.id}/review`} className="font-[var(--cd-font-body)] text-[12px] font-medium" style={{ color: 'var(--cd-accent)' }}>
+                Full AI Match Review →
+              </Link>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              {reviewQuery.data!.markets.slice(0, 4).map((market) => (
+                <ActualVsPredictedCard
+                  key={market.market_id}
+                  fixture={fixture}
+                  market={market}
+                  homeTeam={{ name: fixture.home_team.name, logoUrl: fixture.home_team.logo_url }}
+                  awayTeam={{ name: fixture.away_team.name, logoUrl: fixture.away_team.logo_url }}
+                />
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="space-y-6">
           <div>

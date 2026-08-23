@@ -135,7 +135,7 @@ class PredictionEngine:
     ) -> Prediction:
         context = await self.context_builder.build(market_key, entity_type, entity_id, now)
 
-        predictor = await self._resolve_predictor(context)
+        predictor, predictor_provenance = await self._resolve_predictor(context)
         predictor_output = await predictor.predict(
             context.market.market_kind, context.resolved_features, context.mapping_weights
         )
@@ -186,6 +186,7 @@ class PredictionEngine:
             probability_distribution=probability_distribution,
             confidence_interval=confidence_interval,
             expected_error=expected_error,
+            predictor_provenance=predictor_provenance,
         )
 
     async def _shape_outcome(
@@ -248,12 +249,18 @@ class PredictionEngine:
         expected_error = sum(errors) / len(errors)
         return expected_error, (predicted_value - expected_error, predicted_value + expected_error)
 
-    async def _resolve_predictor(self, context: PredictionContext) -> PredictorPort:
+    async def _resolve_predictor(self, context: PredictionContext) -> tuple[PredictorPort, str]:
         """Prefers the market's real CHAMPION model when one has actually been trained (a real
         `artifact_ref` exists) — loaded via `ModelLoaderService` and served through
         `TrainedModelPredictor`. Falls back to the generic formula-predictor registry for a
         placeholder Champion (no artifact), an unrecognized/corrupt artifact, or when
-        `model_loader` was never wired — a trained-model problem must never break generation."""
+        `model_loader` was never wired — a trained-model problem must never break generation.
+
+        Returns the predictor alongside which one actually served — "trained_model" or
+        "formula_fallback" — so the caller can persist genuine provenance on `Prediction` instead
+        of the API inferring "trained model" from `model_id` alone, which stays the Champion's id
+        either way and would misattribute a fallback-served prediction as ML-computed (real prod
+        incident, audited 2026-08-23)."""
         if self.model_loader is not None and context.model.artifact_ref:
             try:
                 model = await self.model_loader.load(
@@ -263,7 +270,7 @@ class PredictionEngine:
                     context.market.target_type,
                     context.model.artifact_ref,
                 )
-                return TrainedModelPredictor(market_kind=context.market.market_kind, model=model)
+                return TrainedModelPredictor(market_kind=context.market.market_kind, model=model), "trained_model"
             except Exception:  # noqa: BLE001 — any artifact-loading failure falls back, never breaks generation
                 # Falling back is deliberate (a broken artifact must never break generation when a
                 # safe formula-based path exists), but it must never be *silent* — this is the
@@ -279,7 +286,7 @@ class PredictionEngine:
                     },
                     exc_info=True,
                 )
-        return self.predictors.get(context.market.market_kind, context.market.market_key)
+        return self.predictors.get(context.market.market_kind, context.market.market_key), "formula_fallback"
 
     async def _historical_accuracy(self, market_id: MarketId) -> float:
         outcomes = await self.outcomes.list_by_market(market_id, limit=200)

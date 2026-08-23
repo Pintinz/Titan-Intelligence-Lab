@@ -134,6 +134,21 @@ def test_redis_health_endpoint_reports_healthy(client):
     assert response.json()["data"]["healthy"] is True
 
 
+def test_worker_health_endpoint_reports_honestly_when_no_worker_is_connected(client):
+    """Post-match resolution pipeline audit (2026-08-23) — the missing wiring for
+    `MonitoringService.worker_health()`. In this test environment no real Celery worker process is
+    running, so a genuine `celery_app.control.inspect()` call correctly reports zero — this locks
+    in that the endpoint reflects real inspection, never a fabricated "workers_online: 1"."""
+    response = client.get("/api/v1/admin/monitoring/worker")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["workers_online"] == 0
+    assert data["worker_names"] == []
+    assert data["active_task_counts"] == {}
+    assert data["error"] is not None
+
+
 def test_kg_node_not_found_returns_404(client):
     response = client.get("/api/v1/graph/entities/team/does-not-exist")
 
