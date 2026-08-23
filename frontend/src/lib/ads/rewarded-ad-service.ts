@@ -61,6 +61,14 @@ export type RewardOutcome =
  * not "the backend confirms it" — those are deliberately different claims (spec Phase 5: "do not
  * trust arbitrary frontend requests").
  */
+/** Live bug (2026-08-23): `prepareRewardVideoAd()` had no bound on how long it could take —
+ * reported as "watch video doesn't display anything" on the actual mobile app, which matches a
+ * request that never resolves (a "no fill" response some AdMob SDK builds never surface as a
+ * rejection, particularly for an app still in AdMob's pre-review "Requires review" state) far
+ * better than a fast, visible failure would. Without this, that hangs the UI on "Preparing your
+ * reward…" forever — no video, no error, nothing a user could act on. */
+const PREPARE_AD_TIMEOUT_MS = 20_000
+
 export async function showRewardedPredictionAd(userId: string): Promise<RewardOutcome> {
   if (!isNativePlatform()) return { status: 'unavailable_on_web' }
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return { status: 'offline' }
@@ -68,18 +76,23 @@ export async function showRewardedPredictionAd(userId: string): Promise<RewardOu
   await ensureInitialized()
 
   try {
-    await AdMob.prepareRewardVideoAd({
-      adId: rewardedAdUnitId(),
-      isTesting: usingTestAdUnit(),
-      // Non-personalized ads only, deliberately — a real GDPR/UMP consent-collection flow (spec
-      // Phase 12) isn't built in this pass, and requesting personalized ads without real consent
-      // in place would be a compliance gap, not just a missing feature. Revisit once a real
-      // consent flow exists.
-      npa: true,
-      // Echoed back verbatim inside Google's signed SSV callback payload — this is how the
-      // backend knows which user to credit without trusting anything the client itself asserts.
-      ssv: { userId },
-    })
+    await Promise.race([
+      AdMob.prepareRewardVideoAd({
+        adId: rewardedAdUnitId(),
+        isTesting: usingTestAdUnit(),
+        // Non-personalized ads only, deliberately — a real GDPR/UMP consent-collection flow (spec
+        // Phase 12) isn't built in this pass, and requesting personalized ads without real consent
+        // in place would be a compliance gap, not just a missing feature. Revisit once a real
+        // consent flow exists.
+        npa: true,
+        // Echoed back verbatim inside Google's signed SSV callback payload — this is how the
+        // backend knows which user to credit without trusting anything the client itself asserts.
+        ssv: { userId },
+      }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Timed out waiting for a rewarded video to become available.')), PREPARE_AD_TIMEOUT_MS),
+      ),
+    ])
   } catch (error) {
     return { status: 'failed_to_load', message: error instanceof Error ? error.message : 'The rewarded video could not be loaded.' }
   }

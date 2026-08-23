@@ -131,6 +131,29 @@ describe('showRewardedPredictionAd', () => {
     expect(outcome).toEqual({ status: 'failed_to_show', message: 'Ad expired' })
   })
 
+  it('resolves "failed_to_load" if prepareRewardVideoAd never settles — live bug: hung forever on "Preparing your reward…"', async () => {
+    vi.useFakeTimers()
+    try {
+      mockIsNativePlatform.mockReturnValue(true)
+      mockNativePlatform.mockReturnValue('android')
+      // A "no fill" response some AdMob SDK builds never surface as a rejection — the exact shape
+      // reported live as "watch video doesn't display anything" on the actual mobile app.
+      mockPrepareRewardVideoAd.mockImplementation(() => new Promise(() => {}))
+
+      const outcomePromise = showRewardedPredictionAd('user-1')
+      await vi.advanceTimersByTimeAsync(20_000)
+      const outcome = await outcomePromise
+
+      expect(outcome).toEqual({
+        status: 'failed_to_load',
+        message: 'Timed out waiting for a rewarded video to become available.',
+      })
+      expect(mockShowRewardVideoAd).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('uses Google test ad unit IDs when no production ad unit ID is configured', async () => {
     mockIsNativePlatform.mockReturnValue(true)
     mockNativePlatform.mockReturnValue('android')
