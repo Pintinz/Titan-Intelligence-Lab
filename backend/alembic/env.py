@@ -67,6 +67,10 @@ def _do_run_migrations(connection: Connection) -> None:
 async def run_migrations_online() -> None:
     configuration = config.get_section(config.config_ini_section) or {}
     configuration["sqlalchemy.url"] = get_url()
+    # Same asyncpg/PgBouncer-transaction-pooler compatibility fix as
+    # database.py::build_engine() — the migration's engine is built independently here, so it
+    # needs it too (see that function's comment for the real prod incident this traces back to).
+    configuration["sqlalchemy.connect_args"] = {"statement_cache_size": 0}
     connectable = async_engine_from_config(configuration, prefix="sqlalchemy.", poolclass=pool.NullPool)
 
     # `.connect()` (not `.begin()`) does NOT commit on a clean async context-manager exit — found

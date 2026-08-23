@@ -89,6 +89,21 @@ def build_engine(
             "pool_size": settings.pool_size,
             "max_overflow": settings.max_overflow,
             "pool_pre_ping": True,
+            # Real prod incident (2026-08-23): TITANIQ_DB_URL pointed at Supabase's port-5432
+            # "session mode" pooler, which caps at 15 total connections shared across every
+            # client — 4 uvicorn workers each independently maintaining pool_size+max_overflow=15
+            # blew straight through that ceiling under any real concurrency, surfacing as
+            # `asyncpg.exceptions.InternalServerError: EMAXCONNSESSION ... max clients are limited
+            # to pool_size: 15` (crashed the alembic migration step outright) and
+            # `sqlalchemy.exc.TimeoutError: QueuePool limit ... reached` under live request load.
+            # Port 6543 ("transaction mode") is Supabase's own documented fix for exactly this
+            # multi-connection app-server shape — but PgBouncer transaction pooling doesn't
+            # reliably support server-side prepared statements across different backend
+            # connections (a "session" can land on a different real Postgres connection per
+            # transaction), so asyncpg's statement cache has to be disabled to be compatible with
+            # it. Harmless on a direct (non-pooled) connection too, so this is safe regardless of
+            # which port TITANIQ_DB_URL ends up using.
+            "connect_args": {"statement_cache_size": 0},
         }
     if poolclass is not None:
         # NullPool (the one real caller of this override, the Celery worker) manages no pool at
