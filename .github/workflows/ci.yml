@@ -29,14 +29,16 @@ jobs:
 
   frontend-build:
     runs-on: ubuntu-latest
-    # frontend/src/lib/env.ts requires these at module-eval time (VITE_SUPABASE_URL/ANON_KEY
-    # unconditionally, VITE_API_BASE_URL outside dev mode) — the build step happened to pass
-    # without them, but every vitest file that imports anything touching env.ts failed with
-    # "Missing required env var" once real prediction-intelligence/match-detail specs started
-    # importing modules that reach it transitively. Same public, non-secret values already
-    # committed in frontend/.env.example and used by android-apk.yml — not secrets, safe here.
+    # frontend/src/lib/env.ts's required() only actually runs when the bundled JS executes, not
+    # during `vite build`'s bundling/typecheck — so the build step never needed these — but
+    # `npm run test` (vitest) does execute every imported module, and VITE_SUPABASE_URL/ANON_KEY
+    # are required unconditionally there. Deliberately NOT setting VITE_API_BASE_URL: vitest runs
+    # with import.meta.env.DEV true, where env.ts falls back to 'http://localhost:8000' unless
+    # this is set — client.test.ts asserts exactly that default, so setting it here would break
+    # that test instead of fixing anything (a real regression caught by re-running this fix).
+    # Same public, non-secret Supabase values already committed in frontend/.env.example and used
+    # by android-apk.yml — not secrets, safe here.
     env:
-      VITE_API_BASE_URL: https://titan-intelligence-lab.onrender.com
       VITE_SUPABASE_URL: https://irhnoilyaqgewfidhunx.supabase.co
       VITE_SUPABASE_ANON_KEY: sb_publishable_rThsO5r97_EqobhVt73jbg_ia0UGAnd
     steps:
