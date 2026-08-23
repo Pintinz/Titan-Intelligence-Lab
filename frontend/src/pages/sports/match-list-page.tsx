@@ -19,15 +19,18 @@ import { DiscoveryMatchCard } from '@/components/command-deck/discovery/discover
 import type { FixtureSummaryDto } from '@/lib/api/types'
 import type { MatchesScope } from './match-list-view-all-page'
 
-const SECTIONS: Array<{ scope: MatchesScope; title: string; range: { from: string; to: string } | null }> = [
-  { scope: 'today', title: "Today's matches", range: todayRange() },
-  { scope: 'tomorrow', title: 'Tomorrow', range: tomorrowRange() },
-  { scope: 'week', title: 'This week', range: thisWeekRange() },
-  { scope: 'completed', title: 'Completed', range: null },
-]
-
 export default function MatchListPage() {
   const sport = useSportParam()
+  // Computed fresh on every render, not module scope — `todayRange()`/etc read `new Date()`, so a
+  // module-level constant here would freeze "Today" at whatever moment this JS module first loaded
+  // and never advance again for the life of the tab, including across a midnight rollover. That was
+  // a real bug: a fixture dated yesterday would keep showing under "Today's matches" indefinitely.
+  const SECTIONS: Array<{ scope: MatchesScope; title: string; range: { from: string; to: string } | null }> = [
+    { scope: 'today', title: "Today's matches", range: todayRange() },
+    { scope: 'tomorrow', title: 'Tomorrow', range: tomorrowRange() },
+    { scope: 'week', title: 'This week', range: thisWeekRange() },
+    { scope: 'completed', title: 'Completed', range: null },
+  ]
   const availableSports = useAvailableSports()
   const navigate = useNavigate()
   const watchlist = useWatchlist()

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowLeft, CalendarX, Star } from 'lucide-react'
@@ -67,16 +67,19 @@ export default function MatchListViewAllPage({ scope }: { scope: MatchesScope })
     enabled: scope === 'completed' && !!competitionId,
   })
 
-  const baseOpts: FixtureQueryOpts = useMemo(
-    () => ({
-      ...dateOptsFor(scope),
-      ...(scope === 'completed' ? { status: 'completed' as const } : {}),
-      ...(competitionId ? { competition_id: competitionId } : {}),
-      ...(scope === 'completed' && seasonId ? { season_id: seasonId } : {}),
-      ...(search.trim() ? { search: search.trim() } : {}),
-    }),
-    [scope, competitionId, seasonId, search],
-  )
+  // Deliberately not memoized: `dateOptsFor` reads `new Date()`, so caching this against
+  // [scope, competitionId, seasonId, search] alone would freeze the Today/Tomorrow/This week
+  // window at whatever moment the page first mounted for as long as it stays mounted, the same
+  // staleness bug this object shape had on `match-list-page.tsx`'s "Today's matches" section.
+  // `baseOpts` only ever feeds a `useQuery` queryKey, which is content-hashed — a fresh object with
+  // the same values costs nothing extra.
+  const baseOpts: FixtureQueryOpts = {
+    ...dateOptsFor(scope),
+    ...(scope === 'completed' ? { status: 'completed' as const } : {}),
+    ...(competitionId ? { competition_id: competitionId } : {}),
+    ...(scope === 'completed' && seasonId ? { season_id: seasonId } : {}),
+    ...(search.trim() ? { search: search.trim() } : {}),
+  }
 
   const query = useQuery({
     queryKey: ['sports', sport?.code, 'fixtures', 'view-all', scope, baseOpts, visibleCount],
