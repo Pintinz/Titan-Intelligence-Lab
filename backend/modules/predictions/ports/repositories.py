@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Protocol
+from uuid import UUID
 
 from modules.predictions.domain.entities import (
     Experiment,
@@ -17,7 +18,9 @@ from modules.predictions.domain.entities import (
     ModelEvaluation,
     Prediction,
     PredictionAudit,
+    PredictionCredit,
     PredictionOutcome,
+    PredictionRewardEvent,
 )
 from modules.predictions.domain.calibration import CalibrationReport
 from modules.predictions.domain.model_comparison import ChallengerEvaluation
@@ -110,6 +113,32 @@ class PredictionAuditRepositoryPort(Protocol):
     async def record(self, audit: PredictionAudit) -> PredictionAudit: ...
     async def list_by_prediction(self, prediction_id: PredictionId) -> list[PredictionAudit]: ...
     async def list_recent(self, since: datetime | None = None, limit: int = 200) -> list[PredictionAudit]: ...
+
+
+class PredictionCreditRepositoryPort(Protocol):
+    """Mobile V1 monetization. `consume`/`grant` are atomic at the SQL layer (a single guarded
+    UPDATE, portable across the Postgres production dialect and the SQLite test dialect — no
+    dialect-specific UPSERT), lazily initializing a user's row on first access rather than
+    requiring a separate provisioning step."""
+
+    async def get(self, user_id: UUID) -> PredictionCredit | None: ...
+
+    async def get_or_initialize(self, user_id: UUID, initial_free: int, now: datetime) -> PredictionCredit: ...
+
+    async def consume(self, user_id: UUID, initial_free: int, now: datetime) -> PredictionCredit:
+        """Raises `PredictionCreditExhaustedError` (never returns a negative balance) when the
+        user has 0 available predictions."""
+        ...
+
+    async def grant(self, user_id: UUID, credits: int, initial_free: int, now: datetime) -> PredictionCredit: ...
+
+
+class PredictionRewardEventRepositoryPort(Protocol):
+    async def record(self, event: PredictionRewardEvent) -> tuple[PredictionRewardEvent, bool]:
+        """Returns `(event, created)` — `created=False` (the pre-existing row is returned
+        unchanged) when `provider_event_id` already exists, so a duplicate/replayed reward
+        callback is always safe to call this with."""
+        ...
 
 
 class ModelComparisonRepositoryPort(Protocol):

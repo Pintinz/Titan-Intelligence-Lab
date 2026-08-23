@@ -385,3 +385,40 @@ class ModelArtifactModel(Base):
     content_hash: Mapped[str] = mapped_column(String(64))
     size_bytes: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class PredictionCreditModel(Base):
+    """Mobile V1 monetization — one row per user, `user_id` unique (no FK across schemas to
+    `identity.users`, matching this app's existing convention of not FK-ing across module
+    schemas; the router only ever writes/reads this keyed off an authenticated `User.id`)."""
+
+    __tablename__ = "prediction_credits"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(unique=True, index=True)
+    available_predictions: Mapped[int] = mapped_column(Integer, default=0)
+    lifetime_free_predictions_used: Mapped[int] = mapped_column(Integer, default=0)
+    rewarded_predictions_granted: Mapped[int] = mapped_column(Integer, default=0)
+    rewarded_ads_completed: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class PredictionRewardEventModel(Base):
+    """The reward ledger (Phase 6) — `provider_event_id`'s unique constraint is the actual
+    idempotency guarantee (Phase 5): a duplicate insert fails at the DB layer regardless of any
+    application-level check, so a replayed AdMob SSV callback can never grant credits twice even
+    under concurrent duplicate delivery."""
+
+    __tablename__ = "prediction_reward_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(index=True)
+    provider: Mapped[str] = mapped_column(String(32))
+    reward_type: Mapped[str] = mapped_column(String(64))
+    credits_granted: Mapped[int] = mapped_column(Integer)
+    provider_event_id: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(16), default="granted")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (UniqueConstraint("provider_event_id", name="uq_prediction_reward_event_provider_event"),)

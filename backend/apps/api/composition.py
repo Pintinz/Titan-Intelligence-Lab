@@ -227,13 +227,17 @@ from modules.predictions.infrastructure.persistence.repositories import (
     SqlAlchemyModelEvaluationRepository,
     SqlAlchemyModelRepository,
     SqlAlchemyPredictionAuditRepository,
+    SqlAlchemyPredictionCreditRepository,
     SqlAlchemyPredictionOutcomeRepository,
     SqlAlchemyPredictionRepository,
+    SqlAlchemyPredictionRewardEventRepository,
     SqlAlchemyTrainingRunRepository,
 )
 from modules.predictions.application.calibration_validation_service import CalibrationValidationService
 from modules.predictions.application.model_attribution_service import ModelAttributionService
 from modules.predictions.application.football_explanation_service import FootballExplanationService
+from modules.predictions.application.prediction_credit_service import PredictionCreditService
+from modules.predictions.application.admob_ssv_verifier import AdMobSsvKeyProvider
 from modules.predictions.infrastructure.predictors.weighted_scoring import (
     WeightedLinearPredictor,
     WeightedLogisticPredictor,
@@ -1042,6 +1046,21 @@ def build_prediction_cache_service(session: AsyncSession) -> PredictionCacheServ
         audits=SqlAlchemyPredictionAuditRepository(session=session),
         alerts=build_alert_service(session),
     )
+
+
+def build_prediction_credit_service(session: AsyncSession) -> PredictionCreditService:
+    """Mobile V1 monetization (5 free lifetime predictions, +2 per verified AdMob rewarded ad)."""
+    return PredictionCreditService(
+        credits=SqlAlchemyPredictionCreditRepository(session=session),
+        reward_events=SqlAlchemyPredictionRewardEventRepository(session=session),
+    )
+
+
+@lru_cache
+def get_admob_ssv_key_provider() -> AdMobSsvKeyProvider:
+    """Process-wide singleton, not session-scoped — the whole point is caching Google's public
+    keys across requests rather than refetching gstatic.com on every rewarded-ad callback."""
+    return AdMobSsvKeyProvider()
 
 
 def build_prediction_admin_service(session: AsyncSession) -> PredictionAdminService:

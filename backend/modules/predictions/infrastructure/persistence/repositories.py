@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from modules.predictions.domain.calibration import CalibrationReport
@@ -22,7 +24,9 @@ from modules.predictions.domain.entities import (
     ModelEvaluation,
     Prediction,
     PredictionAudit,
+    PredictionCreditExhaustedError,
     PredictionOutcome,
+    PredictionRewardEvent,
 )
 from modules.predictions.domain.calibration import PlattCalibrationParameters
 from modules.predictions.domain.model_comparison import ChallengerEvaluation
@@ -51,9 +55,11 @@ from modules.predictions.infrastructure.persistence.models import (
     ModelEvaluationModel,
     PredictionAuditModel,
     PredictionContextReviewModel,
+    PredictionCreditModel,
     CalibrationParametersModel,
     PredictionModel,
     PredictionOutcomeModel,
+    PredictionRewardEventModel,
     TrainingRunModel,
 )
 
@@ -580,3 +586,113 @@ class SqlAlchemyDatasetRepository:
         self.session.add(model)
         await self.session.flush()
         return mappers.dataset_to_domain(model)
+
+
+@dataclass
+class SqlAlchemyPredictionCreditRepository:
+    """`consume`/`grant` use a Core-level guarded `UPDATE` (never read-modify-write in Python) so
+    concurrent requests for the same user serialize correctly on Postgres's row lock — the second
+    of two simultaneous `consume` calls re-evaluates `available_predictions > 0` against the
+    first's already-committed result, never against a value read before the first's write landed.
+    `begin_nested()` (a SAVEPOINT) wraps the lazy-init INSERT so a concurrent duplicate-insert race
+    only rolls back that one INSERT, never the rest of the caller's transaction."""
+
+    session: AsyncSession
+
+    async def _get_model(self, user_id: UUID) -> PredictionCreditModel | None:
+        stmt = select(PredictionCreditModel).where(PredictionCreditModel.user_id == user_id)
+        return (await self.session.execute(stmt)).scalar_one_or_none()
+
+    async def _get_or_initialize_model(self, user_id: UUID, initial_free: int, now: datetime) -> PredictionCreditModel:
+        existing = await self._get_model(user_id)
+        if existing is not None:
+            return existing
+        model = PredictionCreditModel(
+            user_id=user_id,
+            available_predictions=initial_free,
+            lifetime_free_predictions_used=0,
+            rewarded_predictions_granted=0,
+            rewarded_ads_completed=0,
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            async with self.session.begin_nested():
+                self.session.add(model)
+                await self.session.flush()
+        except IntegrityError:
+            existing = await self._get_model(user_id)
+            if existing is None:
+                raise  # not a duplicate-user_id race after all — a real, unexpected failure
+            return existing
+        return model
+
+    async def get(self, user_id: UUID) -> PredictionCredit | None:
+        model = await self._get_model(user_id)
+        return mappers.prediction_credit_to_domain(model) if model else None
+
+    async def get_or_initialize(self, user_id: UUID, initial_free: int, now: datetime) -> PredictionCredit:
+        return mappers.prediction_credit_to_domain(await self._get_or_initialize_model(user_id, initial_free, now))
+
+    async def consume(self, user_id: UUID, initial_free: int, now: datetime) -> PredictionCredit:
+        credit_model = await self._get_or_initialize_model(user_id, initial_free, now)
+        stmt = (
+            update(PredictionCreditModel)
+            .where(PredictionCreditModel.user_id == user_id, PredictionCreditModel.available_predictions > 0)
+            .values(
+                available_predictions=PredictionCreditModel.available_predictions - 1,
+                lifetime_free_predictions_used=PredictionCreditModel.lifetime_free_predictions_used + 1,
+                updated_at=now,
+            )
+        )
+        result = await self.session.execute(stmt)
+        if result.rowcount == 0:
+            raise PredictionCreditExhaustedError(f"user {user_id} has no available prediction credits")
+        await self.session.refresh(credit_model)
+        return mappers.prediction_credit_to_domain(credit_model)
+
+    async def grant(self, user_id: UUID, credits: int, initial_free: int, now: datetime) -> PredictionCredit:
+        credit_model = await self._get_or_initialize_model(user_id, initial_free, now)
+        stmt = (
+            update(PredictionCreditModel)
+            .where(PredictionCreditModel.user_id == user_id)
+            .values(
+                available_predictions=PredictionCreditModel.available_predictions + credits,
+                rewarded_predictions_granted=PredictionCreditModel.rewarded_predictions_granted + credits,
+                rewarded_ads_completed=PredictionCreditModel.rewarded_ads_completed + 1,
+                updated_at=now,
+            )
+        )
+        await self.session.execute(stmt)
+        await self.session.refresh(credit_model)
+        return mappers.prediction_credit_to_domain(credit_model)
+
+
+@dataclass
+class SqlAlchemyPredictionRewardEventRepository:
+    session: AsyncSession
+
+    async def record(self, event: PredictionRewardEvent) -> tuple[PredictionRewardEvent, bool]:
+        model = PredictionRewardEventModel(
+            id=event.id.value,
+            user_id=event.user_id,
+            provider=event.provider,
+            reward_type=event.reward_type,
+            credits_granted=event.credits_granted,
+            provider_event_id=event.provider_event_id,
+            status=event.status,
+            created_at=event.created_at,
+        )
+        try:
+            async with self.session.begin_nested():
+                self.session.add(model)
+                await self.session.flush()
+        except IntegrityError:
+            stmt = select(PredictionRewardEventModel).where(
+                PredictionRewardEventModel.provider_event_id == event.provider_event_id
+            )
+            existing = (await self.session.execute(stmt)).scalar_one_or_none()
+            if existing is None:
+                raise  # not a duplicate-event race after all — a real, unexpected failure
+            return mappers.prediction_reward_event_to_domain(existing), False
+        return mappers.prediction_reward_event_to_domain(model), True

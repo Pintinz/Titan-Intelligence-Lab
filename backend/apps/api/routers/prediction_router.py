@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,12 +21,15 @@ from apps.api.composition import (
     build_contextual_reasoning_service,
     build_football_explanation_service,
     build_prediction_cache_service,
+    build_prediction_credit_service,
+    get_admob_ssv_key_provider,
     get_session,
 )
 from apps.api.rate_limit import rate_limit_by_user
 from modules.features.domain.value_objects import EntityType
 from modules.identity.domain.entities import User
 from modules.identity.domain.value_objects import Role
+from modules.predictions.application.admob_ssv_verifier import AdMobSsvVerificationError, verify_admob_ssv_callback
 from modules.predictions.application.prediction_cache_service import (
     InvalidPredictionStatusTransitionError,
     MarketNotFoundError,
@@ -38,7 +41,7 @@ from modules.predictions.application.prediction_context_builder import (
 )
 from modules.predictions.domain.contextual_reasoning import ContextualReview
 from modules.predictions.domain.football_explanation import FootballExplanation
-from modules.predictions.domain.entities import Prediction
+from modules.predictions.domain.entities import INITIAL_FREE_PREDICTIONS, REWARDED_AD_CREDIT_GRANT, Prediction, PredictionCreditExhaustedError
 from modules.predictions.domain.value_objects import MarketId, PredictionId, PredictionStatus
 from modules.predictions.infrastructure.persistence.repositories import SqlAlchemyMarketRepository, SqlAlchemyModelRepository
 
@@ -329,6 +332,77 @@ class ReviewPredictionBody(BaseModel):
     reason: str | None = None
 
 
+@router.get("/entitlement")
+async def get_prediction_entitlement(
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(get_current_user),
+):
+    """Mobile V1 monetization (spec Phase 3). Lazily initializes a first-time caller's balance to
+    `INITIAL_FREE_PREDICTIONS` — this is the real "first eligible access" moment, not `/generate`,
+    since a user should see "5 remaining" the first time they open the app, before ever
+    generating anything."""
+    credit_service = build_prediction_credit_service(session)
+    credit = await credit_service.get_entitlement(user.id.value, _now())
+    return envelope(
+        data={
+            "available_predictions": credit.available_predictions,
+            "initial_free_predictions": INITIAL_FREE_PREDICTIONS,
+            "rewarded_predictions_granted": credit.rewarded_predictions_granted,
+            "requires_rewarded_ad": credit.available_predictions <= 0,
+        }
+    )
+
+
+class AdMobRewardGrantResult(BaseModel):
+    granted: bool
+    available_predictions: int
+
+
+@router.get("/credits/admob-ssv-callback")
+async def admob_ssv_callback(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Google AdMob's rewarded-ad Server-Side Verification callback (spec Phase 5) — called
+    directly by Google's own servers, not by the TitanIQ frontend, so this is deliberately
+    unauthenticated by the normal JWT/PAT path. The SSV signature itself (verified against
+    Google's published public keys — see `modules.predictions.application.admob_ssv_verifier`)
+    is what proves the caller is legitimately Google; there is no other credential to check.
+
+    REQUIRES EXTERNAL CONFIGURATION: this endpoint's full URL must be entered into the AdMob
+    console (Rewarded ad unit -> Server-side verification -> Callback URL) before Google will
+    ever actually call it — that's a dashboard action outside this codebase. Until then this
+    route exists and is correct, but receives zero real traffic.
+
+    `user_id` must be set as the ad request's server-side-verification `userId` custom parameter
+    by the native app (see `RewardedAdService` on the frontend) before the ad is shown — Google
+    echoes it back here unmodified, inside the signed payload, so it can't be tampered with
+    in transit.
+    """
+    try:
+        params = await verify_admob_ssv_callback(request.url.query, get_admob_ssv_key_provider())
+    except AdMobSsvVerificationError as exc:
+        raise HTTPException(status_code=400, detail=f"SSV verification failed: {exc}") from None
+
+    user_id_raw = params.get("user_id")
+    transaction_id = params.get("transaction_id")
+    if not user_id_raw or not transaction_id:
+        raise HTTPException(status_code=400, detail="SSV callback missing user_id or transaction_id") from None
+    try:
+        user_id = uuid.UUID(user_id_raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"malformed user_id in SSV callback: {user_id_raw!r}") from None
+
+    credit_service = build_prediction_credit_service(session)
+    credit, granted = await credit_service.grant_rewarded_ad(
+        user_id=user_id, provider_event_id=transaction_id, now=_now()
+    )
+    # Google expects a 200 with an empty body to consider the callback delivered — no response
+    # schema is defined by AdMob for this endpoint, so this return value is for our own
+    # tests/observability only, not something Google reads.
+    return envelope(data=AdMobRewardGrantResult(granted=granted, available_predictions=credit.available_predictions).model_dump())
+
+
 @router.post(
     "/generate",
     dependencies=[Depends(rate_limit_by_user("predictions_generate", limit=30, window_seconds=60))],
@@ -338,6 +412,28 @@ async def generate_prediction(
     session: AsyncSession = Depends(get_session),
     user: User = Depends(require_scope("predictions:generate")),
 ):
+    # Mobile V1 monetization — consume BEFORE attempting generation, not after. The atomic
+    # guarded UPDATE inside `consume_for_generation` is what makes this race-safe under
+    # concurrent requests; raising here (uncommitted) is what makes "don't consume a credit for a
+    # failed generation" correct for every failure path below — `get_session()` only commits on a
+    # clean return, so any exception past this point rolls the consume back too, automatically.
+    credit_service = build_prediction_credit_service(session)
+    try:
+        await credit_service.consume_for_generation(user.id.value, _now())
+    except PredictionCreditExhaustedError:
+        # `reason_code` (not `code`) matches `_blocked_detail`'s existing field name below, so
+        # the frontend's one shared ApiError parser (client.ts) already surfaces this correctly
+        # without a second, endpoint-specific parsing branch.
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "reason_code": "PREDICTION_CREDIT_REQUIRED",
+                "message": "Watch a rewarded video to unlock 2 additional predictions.",
+                "available_predictions": 0,
+                "reward_amount": REWARDED_AD_CREDIT_GRANT,
+            },
+        ) from None
+
     service = build_prediction_cache_service(session)
     try:
         prediction = await service.get_or_generate(

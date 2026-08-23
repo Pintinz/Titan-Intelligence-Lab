@@ -30,7 +30,9 @@ from modules.predictions.domain.entities import (
     ModelEvaluation,
     Prediction,
     PredictionAudit,
+    PredictionCredit,
     PredictionOutcome,
+    PredictionRewardEvent,
 )
 from modules.predictions.domain.value_objects import (
     AuditAction,
@@ -45,8 +47,10 @@ from modules.predictions.domain.value_objects import (
     ModelStatus,
     OutcomeType,
     PredictionAuditId,
+    PredictionCreditId,
     PredictionId,
     PredictionOutcomeId,
+    PredictionRewardEventId,
     PredictionStatus,
     TargetType,
 )
@@ -58,8 +62,10 @@ from modules.predictions.infrastructure.persistence.models import (
     ModelDefinitionModel,
     ModelEvaluationModel,
     PredictionAuditModel,
+    PredictionCreditModel,
     PredictionModel,
     PredictionOutcomeModel,
+    PredictionRewardEventModel,
 )
 from modules.predictions.ports.ml_model import TrainingSample
 
@@ -629,3 +635,29 @@ def dataset_to_model(entity: Dataset, model: DatasetModel | None = None) -> Data
     model.approved_by = entity.approved_by
     model.approved_at = entity.approved_at
     return model
+
+
+def prediction_credit_to_domain(model: PredictionCreditModel) -> PredictionCredit:
+    return PredictionCredit(
+        id=PredictionCreditId(model.id),
+        user_id=model.user_id,
+        available_predictions=model.available_predictions,
+        lifetime_free_predictions_used=model.lifetime_free_predictions_used,
+        rewarded_predictions_granted=model.rewarded_predictions_granted,
+        rewarded_ads_completed=model.rewarded_ads_completed,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
+
+def prediction_reward_event_to_domain(model: PredictionRewardEventModel) -> PredictionRewardEvent:
+    return PredictionRewardEvent(
+        id=PredictionRewardEventId(model.id),
+        user_id=model.user_id,
+        provider=model.provider,
+        reward_type=model.reward_type,
+        credits_granted=model.credits_granted,
+        provider_event_id=model.provider_event_id,
+        status=model.status,
+        created_at=model.created_at,
+    )

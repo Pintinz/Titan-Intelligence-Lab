@@ -182,3 +182,19 @@ class ChallengerEvaluationId:
 
     def __str__(self) -> str:
         return str(self.value)
+
+
+@dataclass(frozen=True)
+class PredictionCreditId:
+    value: UUID
+
+    def __str__(self) -> str:
+        return str(self.value)
+
+
+@dataclass(frozen=True)
+class PredictionRewardEventId:
+    value: UUID
+
+    def __str__(self) -> str:
+        return str(self.value)

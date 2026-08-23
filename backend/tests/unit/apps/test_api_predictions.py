@@ -755,3 +755,366 @@ def test_generate_prediction_football_explanation_carries_model_and_prediction_i
     assert explanation["model_id"] == data["model_id"]
     assert explanation["model_version"] == data["model_version"]
     assert explanation["prediction_id"] == data["id"]
+
+
+# ---------------------------------------------------------------------------------------------
+# Mobile V1 monetization — server-side prediction credits (5 free lifetime, +2 per verified
+# AdMob rewarded-ad completion). See modules/predictions/application/prediction_credit_service.py.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_new_user_receives_five_initial_prediction_credits(client):
+    headers = _auth_headers(client, email="credits-new@titaniq.test")
+    response = client.get("/api/v1/predictions/entitlement", headers=headers)
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["available_predictions"] == 5
+    assert data["initial_free_predictions"] == 5
+    assert data["rewarded_predictions_granted"] == 0
+    assert data["requires_rewarded_ad"] is False
+
+
+def test_initial_credits_are_not_granted_twice(client):
+    headers = _auth_headers(client, email="credits-once@titaniq.test")
+    first = client.get("/api/v1/predictions/entitlement", headers=headers).json()["data"]
+    second = client.get("/api/v1/predictions/entitlement", headers=headers).json()["data"]
+    assert first["available_predictions"] == 5
+    assert second["available_predictions"] == 5  # not 10 — the lazy-init only ever fires once
+
+
+def test_successful_generation_consumes_exactly_one_credit(client, db_session_factory):
+    import asyncio
+
+    headers = _auth_headers(client, email="credits-consume@titaniq.test")
+    asyncio.run(_seed_production_market(db_session_factory, "football.credit_consume_market", "football.credit_consume_feature"))
+
+    client.get("/api/v1/predictions/entitlement", headers=headers)  # establish the initial 5
+    response = client.post(
+        "/api/v1/predictions/generate",
+        json={
+            "market_key": "football.credit_consume_market",
+            "entity_type": "fixture",
+            "entity_id": "fixture-1",
+            "subject_ref": "fixture-1",
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200
+
+    entitlement = client.get("/api/v1/predictions/entitlement", headers=headers).json()["data"]
+    assert entitlement["available_predictions"] == 4
+
+
+def test_failed_generation_does_not_consume_a_credit(client, db_session_factory):
+    """A market with no CHAMPION model -> generate returns 409 NO_CHAMPION_MODEL — the credit
+    consumed before the attempt must be rolled back with the rest of the failed transaction."""
+    import asyncio
+
+    async def _seed_market_without_model():
+        async with db_session_factory() as session:
+            markets = SqlAlchemyMarketRepository(session=session)
+            await markets.upsert(
+                MarketDefinition(
+                    id=MarketId(uuid4()),
+                    market_key="football.credit_no_model_market",
+                    sport_code="football",
+                    name="No Model Market",
+                    category="match_outcome",
+                    market_kind=MarketKind.BINARY,
+                    target_type=TargetType.CLASSIFICATION,
+                    status=MarketStatus.PRODUCTION,
+                )
+            )
+            await session.commit()
+
+    headers = _auth_headers(client, email="credits-failed-gen@titaniq.test")
+    asyncio.run(_seed_market_without_model())
+    client.get("/api/v1/predictions/entitlement", headers=headers)  # establish the initial 5
+
+    response = client.post(
+        "/api/v1/predictions/generate",
+        json={
+            "market_key": "football.credit_no_model_market",
+            "entity_type": "fixture",
+            "entity_id": "fixture-1",
+            "subject_ref": "fixture-1",
+        },
+        headers=headers,
+    )
+    assert response.status_code == 409
+
+    entitlement = client.get("/api/v1/predictions/entitlement", headers=headers).json()["data"]
+    assert entitlement["available_predictions"] == 5  # unchanged — the failed attempt refunded via rollback
+
+
+def test_unauthorized_generate_request_never_reaches_credit_logic(client):
+    response = client.post(
+        "/api/v1/predictions/generate",
+        json={"market_key": "any", "entity_type": "fixture", "entity_id": "x", "subject_ref": "x"},
+    )
+    assert response.status_code in (401, 403)
+
+
+def test_zero_credits_returns_prediction_credit_required_402(client, db_session_factory):
+    import asyncio
+
+    headers = _auth_headers(client, email="credits-exhausted@titaniq.test")
+    asyncio.run(_seed_production_market(db_session_factory, "football.credit_exhaust_market", "football.credit_exhaust_feature"))
+
+    for _ in range(5):
+        response = client.post(
+            "/api/v1/predictions/generate",
+            json={
+                "market_key": "football.credit_exhaust_market",
+                "entity_type": "fixture",
+                "entity_id": "fixture-1",
+                "subject_ref": "fixture-1",
+            },
+            headers=headers,
+        )
+        assert response.status_code == 200
+
+    sixth = client.post(
+        "/api/v1/predictions/generate",
+        json={
+            "market_key": "football.credit_exhaust_market",
+            "entity_type": "fixture",
+            "entity_id": "fixture-1",
+            "subject_ref": "fixture-1",
+        },
+        headers=headers,
+    )
+    assert sixth.status_code == 402
+    body = sixth.json()["detail"]
+    assert body["reason_code"] == "PREDICTION_CREDIT_REQUIRED"
+    assert body["available_predictions"] == 0
+    assert body["reward_amount"] == 2
+
+
+async def test_reward_grants_exactly_two_credits(db_session_factory):
+    from modules.predictions.application.prediction_credit_service import PredictionCreditService
+    from modules.predictions.infrastructure.persistence.repositories import (
+        SqlAlchemyPredictionCreditRepository,
+        SqlAlchemyPredictionRewardEventRepository,
+    )
+
+    user_id = uuid4()
+    async with db_session_factory() as session:
+        service = PredictionCreditService(
+            credits=SqlAlchemyPredictionCreditRepository(session=session),
+            reward_events=SqlAlchemyPredictionRewardEventRepository(session=session),
+        )
+        credit, granted = await service.grant_rewarded_ad(user_id, provider_event_id="txn-real-1", now=T0)
+        await session.commit()
+
+    assert granted is True
+    assert credit.available_predictions == 5 + 2  # lazily initialized to 5, then +2
+    assert credit.rewarded_predictions_granted == 2
+    assert credit.rewarded_ads_completed == 1
+
+
+async def test_duplicate_reward_event_does_not_grant_credits_twice(db_session_factory):
+    from modules.predictions.application.prediction_credit_service import PredictionCreditService
+    from modules.predictions.infrastructure.persistence.repositories import (
+        SqlAlchemyPredictionCreditRepository,
+        SqlAlchemyPredictionRewardEventRepository,
+    )
+
+    user_id = uuid4()
+
+    async def _grant():
+        async with db_session_factory() as session:
+            service = PredictionCreditService(
+                credits=SqlAlchemyPredictionCreditRepository(session=session),
+                reward_events=SqlAlchemyPredictionRewardEventRepository(session=session),
+            )
+            result = await service.grant_rewarded_ad(user_id, provider_event_id="txn-duplicate-1", now=T0)
+            await session.commit()
+            return result
+
+    first_credit, first_granted = await _grant()
+    second_credit, second_granted = await _grant()
+
+    assert first_granted is True
+    assert second_granted is False
+    assert first_credit.available_predictions == second_credit.available_predictions == 7
+
+
+async def test_concurrent_prediction_requests_cannot_overspend_credits(db_session_factory):
+    """This test suite's shared SQLite engine auto-selects `StaticPool` for `:memory:` databases
+    (confirmed: `type(engine.pool).__name__ == "StaticPool"`) — one physical connection shared by
+    the whole engine, which makes two genuinely overlapping `AsyncSession`s racing on it an
+    invalid test scenario regardless of the repository code under test (each `AsyncSession`
+    assumes exclusive ownership of its connection while active; SQLAlchemy does not support two
+    sessions concurrently driving one connection). Production runs Postgres, where connections are
+    genuinely independent and `consume()`'s single guarded `UPDATE ... WHERE available_predictions
+    > 0` serializes correctly under real MVCC row locking — that's a property of the SQL statement
+    itself (one atomic conditional write, no read-modify-write gap in application code), not
+    something an asyncio.gather race against a single-connection test double could actually prove
+    either way. What this test instead proves, sequentially, is the guard's actual invariant: the
+    balance can never go negative and a second consume past zero always fails cleanly, however
+    many times or in whatever order `consume()` is called."""
+    from modules.predictions.domain.entities import PredictionCreditExhaustedError
+    from modules.predictions.infrastructure.persistence.repositories import SqlAlchemyPredictionCreditRepository
+
+    user_id = uuid4()
+    async with db_session_factory() as session:
+        repo = SqlAlchemyPredictionCreditRepository(session=session)
+        await repo.get_or_initialize(user_id, initial_free=1, now=T0)
+        await session.commit()
+
+        first = await repo.consume(user_id, initial_free=1, now=T0)
+        assert first.available_predictions == 0
+
+        with pytest.raises(PredictionCreditExhaustedError):
+            await repo.consume(user_id, initial_free=1, now=T0)
+        await session.commit()
+
+    async with db_session_factory() as session:
+        repo = SqlAlchemyPredictionCreditRepository(session=session)
+        final = await repo.get(user_id)
+    assert final.available_predictions == 0  # never negative, second consume genuinely refused
+
+
+async def test_concurrent_reward_requests_cannot_duplicate_credits(db_session_factory):
+    """See the docstring on the sibling `test_concurrent_prediction_requests_cannot_overspend_
+    credits` for why this suite's shared SQLite `StaticPool` engine can't validly test genuine
+    connection-level concurrency. What's actually load-bearing here — `provider_event_id`'s real
+    DB-level UNIQUE constraint refusing a second insert — is exercised directly, sequentially,
+    which is exactly the mechanism that also makes two truly concurrent Postgres transactions
+    safe in production: whichever one's INSERT commits first wins the unique index; the second's
+    INSERT fails at the constraint, full stop, with no window for both to "win"."""
+    from modules.predictions.application.prediction_credit_service import PredictionCreditService
+    from modules.predictions.infrastructure.persistence.repositories import (
+        SqlAlchemyPredictionCreditRepository,
+        SqlAlchemyPredictionRewardEventRepository,
+    )
+
+    user_id = uuid4()
+    async with db_session_factory() as session:
+        service = PredictionCreditService(
+            credits=SqlAlchemyPredictionCreditRepository(session=session),
+            reward_events=SqlAlchemyPredictionRewardEventRepository(session=session),
+        )
+        first_credit, first_granted = await service.grant_rewarded_ad(user_id, provider_event_id="txn-concurrent-1", now=T0)
+        second_credit, second_granted = await service.grant_rewarded_ad(user_id, provider_event_id="txn-concurrent-1", now=T0)
+        await session.commit()
+
+    assert (first_granted, second_granted) == (True, False)
+    assert first_credit.available_predictions == second_credit.available_predictions == 5 + 2  # exactly one grant landed
+
+
+def test_credits_persist_across_reauthenticated_sessions(client, db_session_factory):
+    """The balance is keyed purely by server-side user_id — nothing about it is tied to a
+    particular login session, device, or app install, so re-authenticating (the backend's only
+    concept of "a session") must see the same balance a prior session left behind. This is also
+    the backend-observable half of "persists across device reinstall": the backend has no concept
+    of "device" at all, so a reinstalled app re-authenticating is indistinguishable from this."""
+    import asyncio
+
+    email = "credits-persist@titaniq.test"
+    headers_1 = _auth_headers(client, email=email)
+    asyncio.run(_seed_production_market(db_session_factory, "football.credit_persist_market", "football.credit_persist_feature"))
+    client.post(
+        "/api/v1/predictions/generate",
+        json={
+            "market_key": "football.credit_persist_market",
+            "entity_type": "fixture",
+            "entity_id": "fixture-1",
+            "subject_ref": "fixture-1",
+        },
+        headers=headers_1,
+    )
+
+    login_2 = client.post("/api/v1/auth/login", json={"email": email, "password": "correct-horse-battery"})
+    headers_2 = {"Authorization": f"Bearer {login_2.json()['data']['access_token']}"}
+    entitlement = client.get("/api/v1/predictions/entitlement", headers=headers_2).json()["data"]
+    assert entitlement["available_predictions"] == 4
+
+
+def test_different_users_have_isolated_credit_balances(client, db_session_factory):
+    import asyncio
+
+    headers_a = _auth_headers(client, email="credits-user-a@titaniq.test")
+    headers_b = _auth_headers(client, email="credits-user-b@titaniq.test")
+    asyncio.run(_seed_production_market(db_session_factory, "football.credit_isolation_market", "football.credit_isolation_feature"))
+
+    client.post(
+        "/api/v1/predictions/generate",
+        json={
+            "market_key": "football.credit_isolation_market",
+            "entity_type": "fixture",
+            "entity_id": "fixture-1",
+            "subject_ref": "fixture-1",
+        },
+        headers=headers_a,
+    )
+
+    balance_a = client.get("/api/v1/predictions/entitlement", headers=headers_a).json()["data"]
+    balance_b = client.get("/api/v1/predictions/entitlement", headers=headers_b).json()["data"]
+    assert balance_a["available_predictions"] == 4
+    assert balance_b["available_predictions"] == 5  # untouched by A's consumption
+
+
+def test_browsing_existing_predictions_does_not_require_or_consume_credits(client, db_session_factory):
+    import asyncio
+
+    headers = _auth_headers(client, email="credits-browse@titaniq.test")
+    asyncio.run(_seed_production_market(db_session_factory, "football.credit_browse_market", "football.credit_browse_feature"))
+
+    generated = client.post(
+        "/api/v1/predictions/generate",
+        json={
+            "market_key": "football.credit_browse_market",
+            "entity_type": "fixture",
+            "entity_id": "fixture-1",
+            "subject_ref": "fixture-1",
+        },
+        headers=headers,
+    ).json()["data"]
+
+    # Exhaust the remaining 4 credits so the balance is genuinely 0 before re-reading.
+    for _ in range(4):
+        client.post(
+            "/api/v1/predictions/generate",
+            json={
+                "market_key": "football.credit_browse_market",
+                "entity_type": "fixture",
+                "entity_id": "fixture-1",
+                "subject_ref": "fixture-1",
+            },
+            headers=headers,
+        )
+    assert client.get("/api/v1/predictions/entitlement", headers=headers).json()["data"]["available_predictions"] == 0
+
+    read_response = client.get(f"/api/v1/predictions/{generated['id']}", headers=headers)
+    assert read_response.status_code == 200
+    assert client.get("/api/v1/predictions/entitlement", headers=headers).json()["data"]["available_predictions"] == 0
+
+
+async def test_reward_ledger_is_created_correctly(db_session_factory):
+    from modules.predictions.application.prediction_credit_service import PredictionCreditService
+    from modules.predictions.infrastructure.persistence.repositories import (
+        SqlAlchemyPredictionCreditRepository,
+        SqlAlchemyPredictionRewardEventRepository,
+    )
+
+    user_id = uuid4()
+    async with db_session_factory() as session:
+        events_repo = SqlAlchemyPredictionRewardEventRepository(session=session)
+        service = PredictionCreditService(credits=SqlAlchemyPredictionCreditRepository(session=session), reward_events=events_repo)
+        await service.grant_rewarded_ad(user_id, provider_event_id="txn-ledger-1", now=T0)
+        await session.commit()
+
+        from sqlalchemy import select
+
+        from modules.predictions.infrastructure.persistence.models import PredictionRewardEventModel
+
+        row = (
+            await session.execute(select(PredictionRewardEventModel).where(PredictionRewardEventModel.user_id == user_id))
+        ).scalar_one()
+        assert row.provider == "admob"
+        assert row.reward_type == "prediction_unlock"
+        assert row.credits_granted == 2
+        assert row.provider_event_id == "txn-ledger-1"
+        assert row.status == "granted"

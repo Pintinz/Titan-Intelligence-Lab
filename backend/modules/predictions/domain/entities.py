@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from uuid import UUID
 
 from modules.predictions.domain.explainability import ShapExplanation
 from modules.predictions.domain.value_objects import (
@@ -25,11 +26,25 @@ from modules.predictions.domain.value_objects import (
     ModelStatus,
     OutcomeType,
     PredictionAuditId,
+    PredictionCreditId,
     PredictionId,
     PredictionOutcomeId,
+    PredictionRewardEventId,
     PredictionStatus,
     TargetType,
 )
+
+# Mobile V1 monetization (AdMob rewarded-prediction unlock, no billing) — see
+# PredictionCreditService for the enforcement logic. Free-tier constants live here, not scattered
+# across the router/service, since both need the exact same numbers.
+INITIAL_FREE_PREDICTIONS = 5
+REWARDED_AD_CREDIT_GRANT = 2
+
+
+class PredictionCreditExhaustedError(Exception):
+    """Raised by `PredictionCreditRepositoryPort.consume()` when a user has 0 available
+    predictions — the router turns this into HTTP 402 with a machine-readable
+    `PREDICTION_CREDIT_REQUIRED` body, never a bare 500."""
 
 
 @dataclass
@@ -304,3 +319,41 @@ class PredictionAudit:
     market_id: MarketId | None = None
     model_id: ModelId | None = None
     details: dict = field(default_factory=dict)
+
+
+@dataclass
+class PredictionCredit:
+    """One row per user — a persistent, server-authoritative balance, not a rolling window like
+    `modules.billing.UsageCounter` (that resets per `window_key`; this never resets on its own,
+    only grows via a verified rewarded-ad grant or shrinks via a successful generation).
+    `lifetime_free_predictions_used`/`rewarded_predictions_granted`/`rewarded_ads_completed` are
+    pure lifetime counters for display/analytics — `available_predictions` is the only field that
+    actually gates access."""
+
+    id: PredictionCreditId
+    user_id: UUID
+    available_predictions: int
+    lifetime_free_predictions_used: int
+    rewarded_predictions_granted: int
+    rewarded_ads_completed: int
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass
+class PredictionRewardEvent:
+    """One immutable ledger row per rewarded-ad completion (or attempted duplicate) — the
+    idempotency + audit record Phase 6/Phase 5 require. `provider_event_id` (the AdMob SSV
+    callback's `transaction_id`) carries a real unique constraint at the DB layer
+    (`uq_prediction_reward_event_provider_event`); a duplicate submission fails that constraint
+    and is reported back as `created=False` rather than raising past the caller, so a retried or
+    replayed callback is always safe."""
+
+    id: PredictionRewardEventId
+    user_id: UUID
+    provider: str
+    reward_type: str
+    credits_granted: int
+    provider_event_id: str
+    status: str
+    created_at: datetime | None = None
