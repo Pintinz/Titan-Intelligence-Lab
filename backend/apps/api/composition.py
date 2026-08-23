@@ -5,6 +5,7 @@ FastAPI's ``Depends``, never on infrastructure classes directly.
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -211,6 +212,7 @@ from modules.predictions.infrastructure.calibration.temperature_scaling_calibrat
 from modules.predictions.infrastructure.ml.local_artifact_store import LocalFilesystemArtifactStore
 from modules.predictions.infrastructure.ml.model_loader import ModelLoaderService
 from modules.predictions.infrastructure.ml.shap_explainer_service import SHAPExplainerService
+from modules.predictions.infrastructure.ml.supabase_artifact_store import SupabaseStorageArtifactStore
 from modules.predictions.infrastructure.monitoring.in_memory_latency_repository import (
     InMemoryLatencySampleRepository,
 )
@@ -1119,6 +1121,17 @@ def get_latency_repo() -> LatencySampleRepositoryPort:
 
 @lru_cache
 def get_model_artifact_store() -> ModelArtifactStorePort:
+    # `LocalFilesystemArtifactStore` writes to the container's local disk, which Render (and most
+    # PaaS hosts) wipes on every deploy/restart — real prod incident 2026-08-23: every trained
+    # model's artifact was silently lost on the next deploy, permanently degrading that market
+    # back to its formula-predictor fallback. `TITANIQ_SUPABASE_SERVICE_ROLE_KEY` gates the
+    # durable adapter rather than an environment-name check, so any environment that has real
+    # Supabase credentials wired (including a local run pointed at a real project) gets durable
+    # storage, and any environment without them (unit tests, an offline dev box) keeps the local
+    # dev/offline-test adapter local_artifact_store.py's own docstring describes — never a hard
+    # failure at startup for not having this optional credential set.
+    if os.environ.get("TITANIQ_SUPABASE_SERVICE_ROLE_KEY"):
+        return SupabaseStorageArtifactStore()
     return LocalFilesystemArtifactStore()
 
 
