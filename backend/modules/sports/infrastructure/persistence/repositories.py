@@ -146,6 +146,14 @@ class SqlAlchemyVenueRepository:
         model = await self.session.get(VenueModel, venue_id.value)
         return mappers.venue_to_domain(model) if model else None
 
+    async def list_by_ids(self, venue_ids: list[VenueId]) -> list[Venue]:
+        if not venue_ids:
+            return []
+        result = await self.session.execute(
+            select(VenueModel).where(VenueModel.id.in_({v.value for v in venue_ids}))
+        )
+        return [mappers.venue_to_domain(row) for row in result.scalars().all()]
+
     async def upsert(self, venue: Venue) -> Venue:
         existing = await self.session.get(VenueModel, venue.id.value)
         model = mappers.venue_to_model(venue, existing)

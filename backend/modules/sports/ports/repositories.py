@@ -71,6 +71,11 @@ class PlayerRepositoryPort(Protocol):
 class VenueRepositoryPort(Protocol):
     async def get(self, venue_id: VenueId) -> Venue | None: ...
     async def upsert(self, venue: Venue) -> Venue: ...
+    async def list_by_ids(self, venue_ids: list[VenueId]) -> list[Venue]:
+        """Batch lookup for a caller serializing many fixtures at once (``list_sport_fixtures``,
+        sports_router.py) — one query for every venue a page of fixtures references, instead of
+        one ``get`` per fixture. Additive: no existing method changed."""
+        ...
 
 
 class CompetitionRepositoryPort(Protocol):

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -26,7 +27,19 @@ from apps.api.composition import build_identity_service, build_monitoring_servic
 from modules.identity.domain.entities import User
 from modules.identity.domain.value_objects import Role
 from modules.ingestion.domain.value_objects import SyncStatus
-from modules.sports.domain.entities import CoachingStaffMember, Competition, Fixture, Injury, Lineup, Player, Season, Team, Transfer
+from modules.sports.domain.entities import (
+    CoachingStaffMember,
+    Competition,
+    Fixture,
+    Injury,
+    Lineup,
+    Player,
+    Season,
+    Sport,
+    Team,
+    Transfer,
+    Venue,
+)
 from modules.sports.domain.value_objects import (
     CompetitionId,
     FixtureId,
@@ -324,14 +337,38 @@ async def _fixture_stats(session: AsyncSession, fixture: Fixture) -> dict | None
     }
 
 
-async def _serialize_fixture(session: AsyncSession, fixture: Fixture, competition: Competition | None) -> dict:
-    teams = SqlAlchemyTeamRepository(session=session)
-    venues = SqlAlchemyVenueRepository(session=session)
-    home = await teams.get(fixture.home_team_id)
-    away = await teams.get(fixture.away_team_id)
-    venue = await venues.get(fixture.venue_id) if fixture.venue_id else None
+@dataclass
+class _FixtureSerializationBatch:
+    """Pre-fetched lookups for serializing many fixtures from the same sport at once
+    (``list_sport_fixtures``) — real prod incident (2026-08-23): without this,
+    `_serialize_fixture` ran up to 4 of its own queries (2 teams + 1 venue + 1 sport, the last
+    identical on every row since a page is always one sport) *per fixture*, fired concurrently via
+    `asyncio.gather` for up to 200 rows at once — up to ~800 near-simultaneous DB round-trips for
+    one HTTP request, confirmed live to hang 25+ seconds and exhaust the connection pool by
+    itself. `None` (the default on every other call site, all single-fixture or small-list) keeps
+    those completely unchanged — this is additive, not a behavior change for them."""
+
+    teams_by_id: dict[uuid.UUID, Team]
+    venues_by_id: dict[uuid.UUID, Venue]
+    sport: Sport | None
+
+
+async def _serialize_fixture(
+    session: AsyncSession, fixture: Fixture, competition: Competition | None, batch: _FixtureSerializationBatch | None = None
+) -> dict:
+    if batch is not None:
+        home = batch.teams_by_id.get(fixture.home_team_id.value)
+        away = batch.teams_by_id.get(fixture.away_team_id.value)
+        venue = batch.venues_by_id.get(fixture.venue_id.value) if fixture.venue_id else None
+        sport = batch.sport
+    else:
+        teams = SqlAlchemyTeamRepository(session=session)
+        venues = SqlAlchemyVenueRepository(session=session)
+        home = await teams.get(fixture.home_team_id)
+        away = await teams.get(fixture.away_team_id)
+        venue = await venues.get(fixture.venue_id) if fixture.venue_id else None
+        sport = await SqlAlchemySportRepository(session=session).get(competition.sport_id) if competition else None
     home_score, away_score = fixture.home_score, fixture.away_score
-    sport = await SqlAlchemySportRepository(session=session).get(competition.sport_id) if competition else None
     stats = await _fixture_stats(session, fixture)
     return {
         "id": str(fixture.id),
@@ -857,7 +894,20 @@ async def list_sport_fixtures(
 
     total = len(all_fixtures)
     page = all_fixtures[offset : offset + limit]
-    data = await asyncio.gather(*(_serialize_fixture(session, f, c) for f, c in page))
+
+    # Real prod incident (2026-08-23): `_serialize_fixture` used to run its own team/venue/sport
+    # queries per fixture — fired concurrently via `asyncio.gather` below, up to ~800
+    # near-simultaneous DB round-trips for a full `limit=200` page, confirmed live to hang 25+
+    # seconds and exhaust the connection pool by itself. Every fixture on this page shares the
+    # same `sport` (already resolved above); teams/venues are batch-fetched here — one query each
+    # — instead of two-per-fixture and one-per-fixture respectively.
+    all_teams = await SqlAlchemyTeamRepository(session=session).list_by_sport(sport.id)
+    teams_by_id = {t.id.value: t for t in all_teams}
+    venue_ids = list({f.venue_id for f, _ in page if f.venue_id is not None})
+    venues_by_id = {v.id.value: v for v in await SqlAlchemyVenueRepository(session=session).list_by_ids(venue_ids)}
+    batch = _FixtureSerializationBatch(teams_by_id=teams_by_id, venues_by_id=venues_by_id, sport=sport)
+
+    data = await asyncio.gather(*(_serialize_fixture(session, f, c, batch) for f, c in page))
     return envelope(
         list(data),
         meta={"count": len(data), "total": total, "offset": offset, "limit": limit, "has_more": offset + limit < total},
