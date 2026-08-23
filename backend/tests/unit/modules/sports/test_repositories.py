@@ -236,6 +236,84 @@ async def test_competition_season_fixture_chain(sqlite_session):
 
 
 @pytest.mark.asyncio
+async def test_fixture_repository_list_by_sport_filters_across_competitions_and_seasons(sqlite_session):
+    """Real prod incident (2026-08-23): `list_sport_fixtures` (sports_router.py) used to fetch
+    this same data via a triple-nested loop — every competition -> every season -> every fixture,
+    filtered by status *afterward* in Python — confirmed live to hang 15+ seconds under real data
+    volume. `list_by_sport` replaces that fan-out with one JOIN query filtered at the DB level;
+    this proves the join/filter logic itself is correct: two competitions, two seasons, fixtures
+    with different statuses, and a fixture belonging to a different sport entirely that must never
+    leak in."""
+    sport_repo = SqlAlchemySportRepository(session=sqlite_session)
+    team_repo = SqlAlchemyTeamRepository(session=sqlite_session)
+    competition_repo = SqlAlchemyCompetitionRepository(session=sqlite_session)
+    season_repo = SqlAlchemySeasonRepository(session=sqlite_session)
+    fixture_repo = SqlAlchemyFixtureRepository(session=sqlite_session)
+
+    football = Sport(id=SportId(uuid4()), code=SportCode.FOOTBALL, name="Football")
+    basketball = Sport(id=SportId(uuid4()), code=SportCode.BASKETBALL, name="Basketball")
+    await sport_repo.upsert(football)
+    await sport_repo.upsert(basketball)
+
+    home = Team(id=TeamId(uuid4()), sport_id=football.id, name="Home FC", short_name="HFC", country=None)
+    away = Team(id=TeamId(uuid4()), sport_id=football.id, name="Away FC", short_name="AFC", country=None)
+    await team_repo.upsert(home)
+    await team_repo.upsert(away)
+
+    premier_league = Competition(
+        id=CompetitionId(uuid4()), sport_id=football.id, name="Premier League", type=CompetitionType.LEAGUE, country="England"
+    )
+    championship = Competition(
+        id=CompetitionId(uuid4()), sport_id=football.id, name="Championship", type=CompetitionType.LEAGUE, country="England"
+    )
+    other_sport_competition = Competition(
+        id=CompetitionId(uuid4()), sport_id=basketball.id, name="NBA", type=CompetitionType.LEAGUE, country="USA"
+    )
+    for c in (premier_league, championship, other_sport_competition):
+        await competition_repo.upsert(c)
+
+    pl_season = Season(
+        id=SeasonId(uuid4()), competition_id=premier_league.id, label="2026/27",
+        date_range=DateRange(start=datetime(2026, 8, 1, tzinfo=timezone.utc)),
+    )
+    champ_season = Season(
+        id=SeasonId(uuid4()), competition_id=championship.id, label="2026/27",
+        date_range=DateRange(start=datetime(2026, 8, 1, tzinfo=timezone.utc)),
+    )
+    other_sport_season = Season(
+        id=SeasonId(uuid4()), competition_id=other_sport_competition.id, label="2026/27",
+        date_range=DateRange(start=datetime(2026, 8, 1, tzinfo=timezone.utc)),
+    )
+    for s in (pl_season, champ_season, other_sport_season):
+        await season_repo.upsert(s)
+
+    scheduled_fixture = Fixture(
+        id=FixtureId(uuid4()), season_id=pl_season.id, home_team_id=home.id, away_team_id=away.id,
+        venue_id=None, scheduled_at=datetime(2026, 8, 15, tzinfo=timezone.utc), status=FixtureStatus.SCHEDULED,
+    )
+    completed_fixture = Fixture(
+        id=FixtureId(uuid4()), season_id=champ_season.id, home_team_id=home.id, away_team_id=away.id,
+        venue_id=None, scheduled_at=datetime(2026, 8, 10, tzinfo=timezone.utc), status=FixtureStatus.COMPLETED,
+    )
+    other_sport_fixture = Fixture(
+        id=FixtureId(uuid4()), season_id=other_sport_season.id, home_team_id=home.id, away_team_id=away.id,
+        venue_id=None, scheduled_at=datetime(2026, 8, 12, tzinfo=timezone.utc), status=FixtureStatus.SCHEDULED,
+    )
+    for f in (scheduled_fixture, completed_fixture, other_sport_fixture):
+        await fixture_repo.upsert(f)
+    await sqlite_session.commit()
+
+    all_football = await fixture_repo.list_by_sport(football.id)
+    assert {f.id.value for f in all_football} == {scheduled_fixture.id.value, completed_fixture.id.value}
+
+    scheduled_only = await fixture_repo.list_by_sport(football.id, status=FixtureStatus.SCHEDULED.value)
+    assert [f.id.value for f in scheduled_only] == [scheduled_fixture.id.value]
+
+    championship_only = await fixture_repo.list_by_sport(football.id, competition_id=championship.id)
+    assert [f.id.value for f in championship_only] == [completed_fixture.id.value]
+
+
+@pytest.mark.asyncio
 async def test_standing_repository_round_trip(sqlite_session):
     sport_repo = SqlAlchemySportRepository(session=sqlite_session)
     team_repo = SqlAlchemyTeamRepository(session=sqlite_session)

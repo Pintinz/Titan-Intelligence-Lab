@@ -114,6 +114,21 @@ class FixtureRepositoryPort(Protocol):
         Python just to count. Additive: no existing method changed."""
         ...
 
+    async def list_by_sport(
+        self,
+        sport_id: SportId,
+        *,
+        competition_id: CompetitionId | None = None,
+        season_id: SeasonId | None = None,
+        status: str | None = None,
+    ) -> list[Fixture]:
+        """Every fixture across every competition/season under this sport, optionally narrowed by
+        competition/season/status at the DB level — the list-shaped sibling of ``count_by_sport``,
+        for callers (``list_sport_fixtures``) that need the actual rows, not just counts, without
+        walking every season's full fixture list into Python first. Additive: no existing method
+        changed."""
+        ...
+
 
 class StandingRepositoryPort(Protocol):
     async def list_by_season(self, season_id: SeasonId) -> list[Standing]: ...

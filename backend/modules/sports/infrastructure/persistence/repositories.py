@@ -212,6 +212,39 @@ class SqlAlchemyFixtureRepository:
         )
         return [mappers.fixture_to_domain(row) for row in result.scalars().all()]
 
+    async def list_by_sport(
+        self,
+        sport_id: SportId,
+        *,
+        competition_id: CompetitionId | None = None,
+        season_id: SeasonId | None = None,
+        status: str | None = None,
+    ) -> list[Fixture]:
+        """Real prod incident (2026-08-23): `list_sport_fixtures` (sports_router.py) used to fetch
+        this same data via a triple-nested loop — every competition -> every one of its seasons ->
+        `list_by_season` per season — then filtered by status/date *in Python* afterward, meaning
+        a caller asking for just today's scheduled fixtures still paid for every fixture across
+        every season of every competition the sport has ever had. Confirmed live: 15+ second hangs
+        on Team/Player/Competition Intelligence, which each call this with `limit=200`. One JOIN
+        with the filters actually pushed into the WHERE clause (all three columns already indexed:
+        fixtures.status, fixtures.season_id, competitions.sport_id) replaces that fan-out; the
+        caller's own sort/date-range/search logic is untouched, just now operating on a query
+        result that's already correctly scoped instead of literally everything."""
+        stmt = (
+            select(FixtureModel)
+            .join(SeasonModel, FixtureModel.season_id == SeasonModel.id)
+            .join(CompetitionModel, SeasonModel.competition_id == CompetitionModel.id)
+            .where(CompetitionModel.sport_id == sport_id.value)
+        )
+        if competition_id is not None:
+            stmt = stmt.where(CompetitionModel.id == competition_id.value)
+        if season_id is not None:
+            stmt = stmt.where(FixtureModel.season_id == season_id.value)
+        if status is not None:
+            stmt = stmt.where(FixtureModel.status == status)
+        result = await self.session.execute(stmt)
+        return [mappers.fixture_to_domain(row) for row in result.scalars().all()]
+
     async def upsert(self, fixture: Fixture) -> Fixture:
         existing = await self.session.get(FixtureModel, fixture.id.value)
         model = mappers.fixture_to_model(fixture, existing)

@@ -32,6 +32,7 @@ from modules.sports.domain.value_objects import (
     FixtureId,
     FixtureStatus,
     PlayerId,
+    SeasonId,
     SeasonStatus,
     SportCode,
     TeamId,
@@ -805,20 +806,30 @@ async def list_sport_fixtures(
     # scoping to one picked season would silently hide real completed fixtures that live in an
     # older season. The fixture's own `status`/`scheduled_at` are the real source of truth for
     # filtering below, not which season it happens to belong to.
-    all_fixtures: list[tuple[Fixture, Competition]] = []
+    #
+    # Real prod incident (2026-08-23): this used to also fetch fixtures here, one
+    # `fixtures_repo.list_by_season` call per season — every competition's every season's every
+    # fixture, walked into Python, *before* filtering by status/date. Confirmed live: 15+ second
+    # hangs on Team/Player/Competition Intelligence (each call this with limit=200). Seasons stay
+    # a per-competition loop (cheap — a handful of rows each) purely to build the
+    # season -> competition lookup `_serialize_fixture` needs; the actual fixture fetch is now the
+    # one filtered `fixtures_repo.list_by_sport` call below instead of N per-season round trips.
+    competition_by_season: dict[uuid.UUID, Competition] = {}
     for competition in competitions:
-        seasons = await seasons_repo.list_by_competition(competition.id)
-        for season in seasons:
-            fixtures = await fixtures_repo.list_by_season(season.id)
-            all_fixtures.extend((f, competition) for f in fixtures)
-
-    if season_id is not None:
-        parsed_season_id = _parse_uuid(season_id, "season_id")
-        all_fixtures = [(f, c) for f, c in all_fixtures if f.season_id.value == parsed_season_id]
+        for season in await seasons_repo.list_by_competition(competition.id):
+            competition_by_season[season.id.value] = competition
 
     parsed_status = _parse_fixture_status(status) if status is not None else None
-    if parsed_status is not None:
-        all_fixtures = [(f, c) for f, c in all_fixtures if f.status is parsed_status]
+    parsed_season_id = SeasonId(_parse_uuid(season_id, "season_id")) if season_id is not None else None
+    fetched_fixtures = await fixtures_repo.list_by_sport(
+        sport.id,
+        competition_id=competitions[0].id if competition_id is not None and competitions else None,
+        season_id=parsed_season_id,
+        status=parsed_status.value if parsed_status is not None else None,
+    )
+    all_fixtures: list[tuple[Fixture, Competition]] = [
+        (f, competition_by_season[f.season_id.value]) for f in fetched_fixtures if f.season_id.value in competition_by_season
+    ]
 
     parsed_date_from = _parse_date_query(date_from, "date_from") if date_from is not None else None
     parsed_date_to = _parse_date_query(date_to, "date_to") if date_to is not None else None
