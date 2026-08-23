@@ -237,16 +237,28 @@ async def featured_intelligence(limit: int = Query(default=3, ge=1, le=6), sessi
             best_per_market[market.market_key] = (prediction, market)
     picks = sorted(best_per_market.values(), key=lambda pm: pm[0].confidence.composite, reverse=True)
 
-    data: list[dict] = []
+    # A landing-page hero showcasing a prediction for a match that already finished last week reads
+    # as stale, not "sports intelligence in action" — resolve every diversified candidate's fixture
+    # up front and prefer LIVE, then SCHEDULED (upcoming), over anything else (completed/postponed/
+    # cancelled), confidence only breaking ties within the same tier. Never fabricates a live/
+    # upcoming match that doesn't exist: if no published prediction covers one, the ranking falls
+    # back to the real highest-confidence pick regardless of timing, same as before this change.
+    _STATUS_PRIORITY = {"live": 0, "scheduled": 1}
+    with_fixtures: list[tuple] = []
     for prediction, market in picks:
-        if len(data) >= limit:
-            break
         try:
             fixture = await fixtures_repo.get(FixtureId(uuid.UUID(prediction.subject_ref)))
         except ValueError:
             fixture = None
         if fixture is None:
             continue
+        with_fixtures.append((prediction, market, fixture))
+    with_fixtures.sort(key=lambda pmf: (_STATUS_PRIORITY.get(pmf[2].status.value, 2), -pmf[0].confidence.composite))
+
+    data: list[dict] = []
+    for prediction, market, fixture in with_fixtures:
+        if len(data) >= limit:
+            break
         home = await teams_repo.get(fixture.home_team_id)
         away = await teams_repo.get(fixture.away_team_id)
         season = await seasons_repo.get(fixture.season_id)

@@ -400,6 +400,47 @@ def test_featured_intelligence_caps_one_pick_per_market(client, db_session_facto
     assert set(market_keys) == {"football.diversity_market_a", "football.diversity_market_b"}
 
 
+def test_featured_intelligence_prefers_live_and_upcoming_over_completed(client, db_session_factory, seeded_fixture):
+    """A landing-page hero showing a prediction for a match that already finished reads as stale.
+    `seeded_fixture` is SCHEDULED by default; a second, COMPLETED fixture gets a prediction on its
+    own market (same seeding pattern, so confidence is at least as good, never engineered lower) —
+    the scheduled one must still rank first, proving status beats raw confidence in the ordering."""
+    headers = _auth_headers(client)
+    subject_ref_scheduled = str(seeded_fixture["fixture"].id)
+
+    async def _completed_fixture():
+        async with db_session_factory() as session:
+            season = seeded_fixture["season"]
+            home, away = seeded_fixture["home"], seeded_fixture["away"]
+            fixture = await SqlAlchemyFixtureRepository(session=session).upsert(
+                Fixture(
+                    id=FixtureId(uuid.uuid4()), season_id=season.id, home_team_id=home.id, away_team_id=away.id,
+                    venue_id=None, scheduled_at=T0 - timedelta(days=4), status=FixtureStatus.COMPLETED,
+                )
+            )
+            await session.commit()
+            return str(fixture.id)
+
+    subject_ref_completed = asyncio.run(_completed_fixture())
+
+    asyncio.run(
+        _seed_production_market(db_session_factory, "football.timing_market_scheduled", "football.timing_feature_scheduled", subject_ref_scheduled)
+    )
+    asyncio.run(
+        _seed_production_market(db_session_factory, "football.timing_market_completed", "football.timing_feature_completed", subject_ref_completed)
+    )
+    _generate(client, headers, "football.timing_market_scheduled", subject_ref_scheduled)
+    _generate(client, headers, "football.timing_market_completed", subject_ref_completed)
+
+    response = client.get("/api/v1/public/featured-intelligence", params={"limit": 6})
+    assert response.status_code == 200
+    data = response.json()["data"]
+
+    fixture_ids = [pick["fixture_id"] for pick in data]
+    assert fixture_ids.index(subject_ref_scheduled) < fixture_ids.index(subject_ref_completed)
+    assert data[0]["status"] == "scheduled"
+
+
 def test_platform_summary_reflects_seeded_competition(client, seeded_fixture):
     response = client.get("/api/v1/public/platform-summary")
     data = response.json()["data"]

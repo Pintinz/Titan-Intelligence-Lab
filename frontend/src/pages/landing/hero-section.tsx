@@ -27,18 +27,32 @@ export function HeroSection({ loading, pick }: { loading: boolean; pick: PublicF
             Sports Intelligence Platform — not a betting or tips site
           </p>
           <h1 className="mt-6 max-w-xl font-display text-4xl font-semibold leading-[1.05] tracking-tight text-text-primary lg:text-6xl">
-            Understand the prediction, not just the prediction.
+            Every prediction, fully explained.
           </h1>
           <p className="mt-6 max-w-lg text-lg text-text-secondary">
-            TitanIQ combines historical data, statistical models, machine learning, and verified
-            context into one auditable prediction workflow — every output carries its confidence,
-            its evidence, and the reasoning behind it.
+            TitanIQ turns real historical data and verified context into calibrated predictions —
+            each one backed by its confidence, its evidence, and the reasoning behind it.
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3">
-            <Button asChild size="lg">
-              <Link to="/signup">Start free</Link>
+            <Button
+              asChild
+              size="lg"
+              className="group relative overflow-hidden shadow-[0_1px_0_0_rgba(255,255,255,0.16)_inset,0_12px_24px_-8px_var(--color-accent-primary)] transition-[transform,box-shadow] duration-200 hover:-translate-y-0.5 hover:shadow-[0_1px_0_0_rgba(255,255,255,0.2)_inset,0_18px_32px_-8px_var(--color-accent-primary)] active:translate-y-0"
+            >
+              <Link to="/signup">
+                <span
+                  className="pointer-events-none absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/25 to-transparent transition-transform duration-700 ease-out group-hover:translate-x-full motion-reduce:hidden"
+                  aria-hidden="true"
+                />
+                Start free
+              </Link>
             </Button>
-            <Button asChild variant="secondary" size="lg">
+            <Button
+              asChild
+              variant="secondary"
+              size="lg"
+              className="transition-[border-color,color] duration-200 hover:border-accent-primary hover:text-accent-primary"
+            >
               <a href="#proof-of-mechanism">Explore Intelligence</a>
             </Button>
           </div>
