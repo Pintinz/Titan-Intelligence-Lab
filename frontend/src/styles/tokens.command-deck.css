@@ -158,6 +158,27 @@
   --cd-domain-infrastructure: hsl(220 16% 56%);
   --cd-domain-alerts: hsl(354 78% 58%);
   --cd-domain-security: hsl(246 52% 62%);
+
+  /* ============================================================================
+     GLASS SYSTEM — Premium Glassmorphism pass. Three restrained levels, never applied
+     identically everywhere: Level 1 (nav, filters, metadata chips) is the most transparent and
+     least separated from the ground; Level 2 (the default — intelligence/prediction cards,
+     evidence panels) is CDPanel's normal state; Level 3 (hero forecast, the one "live"/accent
+     panel per view) gets the deepest separation and the only glow. Built from this file's own
+     existing graphite surface colors converted to translucent rgba, not a new palette — glass is
+     a material applied to the established Command Deck world, never a second visual identity.
+     ============================================================================ */
+  --cd-glass-1-bg: rgba(10, 10, 13, 0.55);
+  --cd-glass-1-border: rgba(255, 255, 255, 0.07);
+  --cd-glass-1-blur: 14px;
+
+  --cd-glass-2-bg: rgba(16, 16, 19, 0.7);
+  --cd-glass-2-border: rgba(255, 255, 255, 0.09);
+  --cd-glass-2-blur: 18px;
+
+  --cd-glass-3-bg: rgba(17, 17, 21, 0.8);
+  --cd-glass-3-border: rgba(255, 255, 255, 0.12);
+  --cd-glass-3-blur: 22px;
 }
 
 .command-deck[data-theme="light"],
@@ -224,6 +245,19 @@
   --cd-domain-infrastructure: hsl(220 14% 42%);
   --cd-domain-alerts: hsl(354 68% 44%);
   --cd-domain-security: hsl(246 46% 48%);
+
+  /* GLASS SYSTEM — light theme. Same three levels, white-based translucency instead of graphite. */
+  --cd-glass-1-bg: rgba(255, 255, 255, 0.55);
+  --cd-glass-1-border: rgba(16, 16, 20, 0.08);
+  --cd-glass-1-blur: 14px;
+
+  --cd-glass-2-bg: rgba(255, 255, 255, 0.72);
+  --cd-glass-2-border: rgba(16, 16, 20, 0.09);
+  --cd-glass-2-blur: 18px;
+
+  --cd-glass-3-bg: rgba(255, 255, 255, 0.85);
+  --cd-glass-3-border: rgba(16, 16, 20, 0.12);
+  --cd-glass-3-blur: 22px;
 }
 
 @media (prefers-reduced-motion: reduce) {

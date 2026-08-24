@@ -42,7 +42,7 @@ export function InfinityTopbar({ onOpenMobileNav }: { onOpenMobileNav: () => voi
 
   return (
     <>
-      <header className="flex h-14 shrink-0 items-center gap-3 border-b border-infinity-border-hairline bg-infinity-ground-0 px-4 lg:px-6">
+      <header className="flex h-14 shrink-0 items-center gap-3 border-b border-[var(--infinity-glass-1-border)] bg-[var(--infinity-glass-1-bg)] px-4 backdrop-blur-[var(--infinity-glass-1-blur)] lg:px-6">
         <button
           type="button"
           className={`text-infinity-text-secondary lg:hidden ${isNativePlatform() ? 'hidden' : ''}`}

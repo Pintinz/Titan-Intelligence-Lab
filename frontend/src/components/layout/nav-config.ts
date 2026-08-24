@@ -53,7 +53,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'Explore',
     items: [
       { label: 'Intelligence Center', href: '/app', icon: LayoutGrid },
-      { label: 'Matches', href: '/app/matches', icon: CalendarDays },
+      { label: 'Matches', href: '/app/football/matches', icon: CalendarDays },
       { label: 'Teams', href: '/app/teams', icon: Users },
       { label: 'Players', href: '/app/players', icon: UserRound },
       { label: 'Competitions', href: '/app/competitions', icon: Trophy },

@@ -3,6 +3,8 @@ import { Link, NavLink } from 'react-router-dom'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { Pin, PinOff, Settings, CreditCard, HelpCircle, UserCircle, LogOut } from 'lucide-react'
 import { cn } from '@/lib/cn'
+import logoUrl from '@/assets/logo.png'
+import logoMarkUrl from '@/assets/logo-mark.png'
 import { useAuthStore } from '@/stores/auth-store'
 import { isAtLeast } from '@/lib/api/types'
 import { useUnreadAlertCount } from '@/lib/hooks/use-alerts'
@@ -90,25 +92,40 @@ export function InfinitySidebar() {
         onBlur={handleBlur}
         style={{ width: collapsed ? COLLAPSED_WIDTH : EXPANDED_WIDTH, transition: 'width 200ms ease-out' }}
         className={cn(
-          'fixed inset-y-0 left-0 z-40 hidden flex-col overflow-hidden border-r border-infinity-border-hairline bg-infinity-ground-1 lg:flex',
-          !collapsed && 'shadow-[var(--infinity-elevation-2)]',
+          'fixed inset-y-0 left-0 z-40 hidden flex-col overflow-hidden border-r lg:flex',
+          // Collapsed rail: Level 1 glass (persistent chrome). Expanded floating panel: Level 2
+          // (more separation from the page it's now overlaying) plus the existing elevation glow.
+          collapsed
+            ? 'border-[var(--infinity-glass-1-border)] bg-[var(--infinity-glass-1-bg)] backdrop-blur-[var(--infinity-glass-1-blur)]'
+            : 'border-[var(--infinity-glass-2-border)] bg-[var(--infinity-glass-2-bg)] shadow-[var(--infinity-elevation-2)] backdrop-blur-[var(--infinity-glass-2-blur)]',
         )}
       >
         <div className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-infinity-border-hairline px-4">
           <Link
             to="/"
             aria-label={`${BRAND.name} — back to the public site`}
-            className="flex min-w-0 items-center gap-2 transition-opacity hover:opacity-80"
+            className="relative h-7 shrink-0 overflow-hidden opacity-100 transition-opacity duration-150 hover:opacity-80 motion-reduce:transition-none"
+            style={{ width: collapsed ? 28 : 78 }}
           >
-            <span className="size-2 shrink-0 rounded-full bg-infinity-signal" aria-hidden="true" />
-            <span
+            {/* Collapsed: just the mark. Expanded: the full lockup. Cross-faded via opacity only
+                (no width transition — that's a layout property, left to snap instantly since the
+                sidebar's own 200ms width animation already carries the motion the eye tracks). */}
+            <img
+              src={logoMarkUrl}
+              alt=""
               className={cn(
-                'truncate font-infinity-display text-sm font-semibold tracking-tight text-infinity-text-primary transition-opacity duration-150 motion-reduce:transition-none',
-                collapsed ? 'w-0 opacity-0' : 'opacity-100',
+                'absolute inset-y-0 left-0 h-7 w-auto transition-opacity duration-150 motion-reduce:transition-none',
+                collapsed ? 'opacity-100' : 'opacity-0',
               )}
-            >
-              {BRAND.name}
-            </span>
+            />
+            <img
+              src={logoUrl}
+              alt={BRAND.name}
+              className={cn(
+                'absolute inset-y-0 left-0 h-7 w-auto transition-opacity duration-150 motion-reduce:transition-none',
+                collapsed ? 'opacity-0' : 'opacity-100',
+              )}
+            />
           </Link>
           {!collapsed && (
             <button

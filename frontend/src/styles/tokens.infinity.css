@@ -145,6 +145,23 @@
   --infinity-blur-md: 16px;
   --infinity-blur-lg: 28px;
 
+  /* Premium Glassmorphism pass — a three-level semantic layer over the glass/blur tokens
+     above (never a second set of values): Level 1 for persistent chrome (topbar, sidebar
+     rail), Level 2 the ordinary-panel default, Level 3 reserved for the one primary
+     surface per view. Matches Command Deck's and the landing page's same three-level
+     discipline (tokens.command-deck.css, tokens.landing-intel.css). */
+  --infinity-glass-1-bg: rgba(16, 21, 29, 0.45);
+  --infinity-glass-1-border: var(--infinity-glass-border);
+  --infinity-glass-1-blur: var(--infinity-blur-sm);
+
+  --infinity-glass-2-bg: var(--infinity-glass-bg);
+  --infinity-glass-2-border: var(--infinity-glass-border);
+  --infinity-glass-2-blur: var(--infinity-blur-md);
+
+  --infinity-glass-3-bg: var(--infinity-glass-bg-strong);
+  --infinity-glass-3-border: rgba(255, 255, 255, 0.12);
+  --infinity-glass-3-blur: var(--infinity-blur-lg);
+
   /* ============================================================================
      TYPOGRAPHY SCALE — reuses the three already-installed, already-fitting typefaces
      (Space Grotesk/Barlow Condensed/Inter — see fonts.css) rather than adding new font
@@ -294,6 +311,13 @@
   --infinity-glass-bg: rgba(255, 255, 255, 0.66);
   --infinity-glass-bg-strong: rgba(255, 255, 255, 0.88);
   --infinity-glass-border: rgba(11, 16, 22, 0.06);
+
+  --infinity-glass-1-bg: rgba(255, 255, 255, 0.48);
+  --infinity-glass-1-border: var(--infinity-glass-border);
+  --infinity-glass-2-bg: var(--infinity-glass-bg);
+  --infinity-glass-2-border: var(--infinity-glass-border);
+  --infinity-glass-3-bg: var(--infinity-glass-bg-strong);
+  --infinity-glass-3-border: rgba(11, 16, 22, 0.1);
 }
 
 [data-theme="high-contrast"] {
@@ -335,6 +359,18 @@
   --infinity-glass-bg: rgba(10, 10, 10, 0.95);
   --infinity-glass-bg-strong: rgba(10, 10, 10, 0.98);
   --infinity-glass-border: var(--infinity-border-strong);
+
+  /* High contrast keeps glass nearly opaque and unblurred — a translucent, blurred surface
+     is exactly the ambiguity this mode exists to remove. */
+  --infinity-glass-1-bg: var(--infinity-glass-bg);
+  --infinity-glass-1-border: var(--infinity-glass-border);
+  --infinity-glass-1-blur: 0px;
+  --infinity-glass-2-bg: var(--infinity-glass-bg);
+  --infinity-glass-2-border: var(--infinity-glass-border);
+  --infinity-glass-2-blur: 0px;
+  --infinity-glass-3-bg: var(--infinity-glass-bg-strong);
+  --infinity-glass-3-border: var(--infinity-glass-border);
+  --infinity-glass-3-blur: 0px;
 }
 
 @media (prefers-reduced-motion: reduce) {

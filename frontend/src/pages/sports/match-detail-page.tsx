@@ -15,6 +15,7 @@ import { type DomainKey } from '@/components/infinity/primitives/badge'
 import { InfinitySkeleton } from '@/components/infinity/primitives/skeleton'
 import { InfinityEmptyState } from '@/components/infinity/primitives/empty-state'
 import { CommandDeckHero } from '@/components/command-deck/hero'
+import { CDPanel } from '@/components/command-deck/primitives/panel'
 import { AIMatchSnapshot } from '@/components/command-deck/ai-snapshot'
 import { PredictionLaboratory } from '@/components/command-deck/prediction-laboratory'
 import { GeneratedIntelligencePanel } from '@/components/command-deck/generated-intelligence'
@@ -320,7 +321,7 @@ export default function MatchDetailPage() {
 function TeamNewsColumn({ teamName, query }: { teamName: string; query: { isPending: boolean; data: InjuryDto[] | undefined } }) {
   const injuries = query.data ?? []
   return (
-    <div className="rounded-[var(--cd-radius-lg)] border p-4" style={{ borderColor: 'var(--cd-border-hairline)', backgroundColor: 'var(--cd-surface-1)' }}>
+    <CDPanel padding="tight">
       <p className="mb-3 font-[var(--cd-font-telemetry)] text-[10.5px] font-semibold uppercase tracking-[0.06em]" style={{ color: 'var(--cd-text-muted)' }}>
         {teamName}
       </p>
@@ -340,7 +341,7 @@ function TeamNewsColumn({ teamName, query }: { teamName: string; query: { isPend
           ))}
         </ul>
       )}
-    </div>
+    </CDPanel>
   )
 }
 

@@ -46,8 +46,8 @@ export function CommandDeckHero({
 
   return (
     <div
-      className="relative overflow-hidden rounded-[var(--cd-radius-xl)] border p-6 sm:p-8"
-      style={{ borderColor: 'var(--cd-border-default)', backgroundColor: 'var(--cd-surface-1)', boxShadow: 'var(--cd-elevation-2)' }}
+      className="relative overflow-hidden rounded-[var(--cd-radius-xl)] border border-[var(--cd-glass-3-border)] bg-[var(--cd-glass-3-bg)] p-6 backdrop-blur-[var(--cd-glass-3-blur)] sm:p-8"
+      style={{ boxShadow: 'var(--cd-card-shadow-hover)' }}
     >
       {/* Ambient field — a faint radial wash, not photography; the instrument-panel ground itself
           is the atmosphere, matching "no fabricated imagery" and the direction's restraint. */}
