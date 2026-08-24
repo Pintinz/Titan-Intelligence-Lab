@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
-from uuid import uuid4
+from datetime import datetime, timedelta, timezone
+from uuid import UUID, uuid4
 
 import fakeredis
 import pytest
@@ -53,7 +53,10 @@ from modules.predictions.infrastructure.persistence.repositories import (
     SqlAlchemyMarketRepository,
     SqlAlchemyModelRepository,
 )
+from modules.sports.domain.entities import Fixture
+from modules.sports.domain.value_objects import FixtureId, FixtureStatus, SeasonId, TeamId
 from modules.sports.infrastructure.persistence.models import Base as SportsBase
+from modules.sports.infrastructure.persistence.repositories import SqlAlchemyFixtureRepository
 
 T0 = datetime(2026, 7, 26, tzinfo=timezone.utc)
 
@@ -204,6 +207,22 @@ async def _seed_production_market(
         await models.upsert(model)
         await session.commit()
         return market.id
+
+
+async def _seed_fixture(db_session_factory, fixture_id: str, *, scheduled_at: datetime, status: FixtureStatus = FixtureStatus.SCHEDULED):
+    """A real Fixture row for ai_picks' upcoming/live filter (audit fix 2026-08-24) to check
+    against. season_id/home_team_id/away_team_id are random UUIDs with no backing row — this
+    suite's SQLite engine never enables foreign-key enforcement, and ai_picks only ever reads
+    `status`/`scheduled_at`, so a real Season/Team isn't needed to exercise that check honestly."""
+    async with db_session_factory() as session:
+        await SqlAlchemyFixtureRepository(session=session).upsert(
+            Fixture(
+                id=FixtureId(UUID(fixture_id)),
+                season_id=SeasonId(uuid4()), home_team_id=TeamId(uuid4()), away_team_id=TeamId(uuid4()),
+                venue_id=None, scheduled_at=scheduled_at, status=status,
+            )
+        )
+        await session.commit()
 
 
 def _generate(client, headers, market_key, subject_ref="fixture-1"):
@@ -455,7 +474,9 @@ def test_ai_picks_includes_published_prediction_with_market_context(client, db_s
     market_id = asyncio.run(
         _seed_production_market(db_session_factory, "football.picks_market", "football.picks_feature_a")
     )
-    prediction = _generate(client, headers, "football.picks_market")
+    fixture_id = str(uuid4())
+    asyncio.run(_seed_fixture(db_session_factory, fixture_id, scheduled_at=datetime.now(timezone.utc) + timedelta(days=3)))
+    prediction = _generate(client, headers, "football.picks_market", subject_ref=fixture_id)
 
     response = client.get("/api/v1/predictions/picks", headers=headers)
 
@@ -501,7 +522,9 @@ def test_ai_picks_filters_by_sport_code(client, db_session_factory):
             db_session_factory, "basketball.picks_market", "basketball.picks_feature_a", sport_code="basketball"
         )
     )
-    _generate(client, headers, "basketball.picks_market")
+    fixture_id = str(uuid4())
+    asyncio.run(_seed_fixture(db_session_factory, fixture_id, scheduled_at=datetime.now(timezone.utc) + timedelta(days=3)))
+    _generate(client, headers, "basketball.picks_market", subject_ref=fixture_id)
 
     football_picks = client.get("/api/v1/predictions/picks", params={"sport_code": "football"}, headers=headers)
     basketball_picks = client.get("/api/v1/predictions/picks", params={"sport_code": "basketball"}, headers=headers)
@@ -518,7 +541,9 @@ def test_ai_picks_hides_non_football_sports_from_regular_users(client, db_sessio
             db_session_factory, "basketball.regular_user_picks_market", "basketball.regular_user_picks_feature", sport_code="basketball"
         )
     )
-    _generate(client, admin_headers, "basketball.regular_user_picks_market")
+    fixture_id = str(uuid4())
+    asyncio.run(_seed_fixture(db_session_factory, fixture_id, scheduled_at=datetime.now(timezone.utc) + timedelta(days=3)))
+    _generate(client, admin_headers, "basketball.regular_user_picks_market", subject_ref=fixture_id)
 
     regular_headers = _auth_headers(client, email="picks-regular-user@titaniq.test")
     basketball_picks = client.get("/api/v1/predictions/picks", params={"sport_code": "basketball"}, headers=regular_headers)
@@ -526,12 +551,82 @@ def test_ai_picks_hides_non_football_sports_from_regular_users(client, db_sessio
     assert basketball_picks.json()["data"] == []
 
 
+def test_ai_picks_excludes_completed_fixtures(client, db_session_factory):
+    """The real bug this fix closes (2026-08-24): a real production example — Hull City AFC vs
+    Manchester United — kept showing up in "Priority intelligence" well after football-data.org
+    reported it FINISHED and TitanIQ marked it COMPLETED, because this feed never re-checked
+    fixture status at all. A PUBLISHED prediction on a completed fixture is no longer a "priority
+    pick" — its outcome is already known."""
+    headers = _auth_headers(client)
+    asyncio.run(
+        _seed_production_market(db_session_factory, "football.picks_completed_market", "football.picks_feature_e")
+    )
+    fixture_id = str(uuid4())
+    asyncio.run(
+        _seed_fixture(
+            db_session_factory, fixture_id,
+            scheduled_at=datetime.now(timezone.utc) - timedelta(days=1), status=FixtureStatus.COMPLETED,
+        )
+    )
+    _generate(client, headers, "football.picks_completed_market", subject_ref=fixture_id)
+
+    response = client.get("/api/v1/predictions/picks", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["data"] == []
+
+
+def test_ai_picks_excludes_a_scheduled_fixture_whose_kickoff_has_already_passed(client, db_session_factory):
+    """Same class of bug the landing page's featured_intelligence already guards against: a
+    fixture stuck at 'scheduled' status past its real kickoff (a sync-job lag, not a genuinely
+    upcoming match) must not be trusted as a live "priority pick" either."""
+    headers = _auth_headers(client)
+    asyncio.run(
+        _seed_production_market(db_session_factory, "football.picks_stale_market", "football.picks_feature_f")
+    )
+    fixture_id = str(uuid4())
+    asyncio.run(
+        _seed_fixture(
+            db_session_factory, fixture_id,
+            scheduled_at=datetime.now(timezone.utc) - timedelta(hours=2), status=FixtureStatus.SCHEDULED,
+        )
+    )
+    _generate(client, headers, "football.picks_stale_market", subject_ref=fixture_id)
+
+    response = client.get("/api/v1/predictions/picks", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["data"] == []
+
+
+def test_ai_picks_includes_a_live_fixture(client, db_session_factory):
+    headers = _auth_headers(client)
+    asyncio.run(_seed_production_market(db_session_factory, "football.picks_live_market", "football.picks_feature_g"))
+    fixture_id = str(uuid4())
+    asyncio.run(
+        _seed_fixture(
+            db_session_factory, fixture_id,
+            scheduled_at=datetime.now(timezone.utc) - timedelta(minutes=30), status=FixtureStatus.LIVE,
+        )
+    )
+    _generate(client, headers, "football.picks_live_market", subject_ref=fixture_id)
+
+    response = client.get("/api/v1/predictions/picks", headers=headers)
+
+    assert response.status_code == 200
+    assert len(response.json()["data"]) == 1
+
+
 def test_ai_picks_respects_limit(client, db_session_factory):
     headers = _auth_headers(client)
     asyncio.run(_seed_production_market(db_session_factory, "football.picks_limit_a", "football.picks_feature_c"))
     asyncio.run(_seed_production_market(db_session_factory, "football.picks_limit_b", "football.picks_feature_d"))
-    _generate(client, headers, "football.picks_limit_a", subject_ref="fixture-limit-a")
-    _generate(client, headers, "football.picks_limit_b", subject_ref="fixture-limit-b")
+    fixture_a, fixture_b = str(uuid4()), str(uuid4())
+    now = datetime.now(timezone.utc)
+    asyncio.run(_seed_fixture(db_session_factory, fixture_a, scheduled_at=now + timedelta(days=3)))
+    asyncio.run(_seed_fixture(db_session_factory, fixture_b, scheduled_at=now + timedelta(days=4)))
+    _generate(client, headers, "football.picks_limit_a", subject_ref=fixture_a)
+    _generate(client, headers, "football.picks_limit_b", subject_ref=fixture_b)
 
     response = client.get("/api/v1/predictions/picks", params={"limit": 1}, headers=headers)
 

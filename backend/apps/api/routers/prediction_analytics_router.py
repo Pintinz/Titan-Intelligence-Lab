@@ -7,6 +7,7 @@ already-generated predictions, not the generate/approve/reject resource lifecycl
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -24,7 +25,8 @@ from modules.identity.domain.value_objects import Role
 from modules.predictions.application.prediction_admin_service import serialize_prediction_summary
 from modules.predictions.domain.entities import Prediction
 from modules.predictions.domain.value_objects import MarketId, PredictionId, PredictionStatus
-from modules.sports.domain.value_objects import SportCode
+from modules.sports.domain.value_objects import FixtureId, SportCode
+from modules.sports.infrastructure.persistence.repositories import SqlAlchemyFixtureRepository
 
 router = APIRouter(prefix="/api/v1/predictions", tags=["predictions"])
 
@@ -122,10 +124,28 @@ async def ai_picks(
     """
     service = build_prediction_cache_service(session)
     market_service = build_market_registry_service(session)
+    fixtures_repo = SqlAlchemyFixtureRepository(session=session)
 
     recent = await service.predictions.list_recent(limit=max(limit * 10, 500))
     published = [p for p in recent if p.status is PredictionStatus.PUBLISHED]
 
+    # Audit fix (2026-08-24): this feed ranked purely by confidence.composite with no check that
+    # the fixture is still undecided — a PUBLISHED prediction on a fixture that has since finished
+    # (real prod example: a live sync completed "Hull City AFC vs Manchester United" after the
+    # prediction was published) kept surfacing here indefinitely, since nothing here ever re-reads
+    # fixture status. Same class of bug already fixed in public_router.featured_intelligence's
+    # `_is_reliably_upcoming`, applied here as a genuine exclusion (not just a sort tiebreak) per
+    # this feed's own promise — "Priority intelligence" only makes sense for a fixture whose
+    # outcome isn't decided yet.
+    now = datetime.now(timezone.utc)
+
+    def _is_reliably_upcoming(fixture) -> bool:
+        scheduled_at = fixture.scheduled_at
+        if scheduled_at.tzinfo is None:
+            scheduled_at = scheduled_at.replace(tzinfo=timezone.utc)
+        return scheduled_at > now
+
+    fixture_cache: dict[str, object] = {}
     market_cache: dict[str, object] = {}
     picks: list[tuple[Prediction, object]] = []
     for prediction in published:
@@ -139,6 +159,20 @@ async def ai_picks(
             continue
         if not _visible_to(user, market.sport_code):
             continue
+
+        if prediction.subject_ref not in fixture_cache:
+            try:
+                fixture_cache[prediction.subject_ref] = await fixtures_repo.get(FixtureId(uuid.UUID(prediction.subject_ref)))
+            except ValueError:
+                fixture_cache[prediction.subject_ref] = None
+        fixture = fixture_cache[prediction.subject_ref]
+        if fixture is None:
+            continue
+        is_live = fixture.status.value == "live"
+        is_upcoming = fixture.status.value == "scheduled" and _is_reliably_upcoming(fixture)
+        if not (is_live or is_upcoming):
+            continue
+
         picks.append((prediction, market))
 
     picks.sort(key=lambda pm: pm[0].confidence.composite, reverse=True)
