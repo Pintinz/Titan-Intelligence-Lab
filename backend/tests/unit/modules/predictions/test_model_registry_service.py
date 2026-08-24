@@ -13,6 +13,7 @@ from modules.predictions.application.model_registry_service import (
     ModelRegistryService,
 )
 from modules.predictions.domain.value_objects import MarketId, ModelId, ModelStatus
+from modules.predictions.infrastructure.ml.model_loader import ModelLoaderService
 
 T0 = datetime(2026, 7, 26, tzinfo=timezone.utc)
 
@@ -20,6 +21,18 @@ T0 = datetime(2026, 7, 26, tzinfo=timezone.utc)
 @pytest.fixture
 def service(model_repo):
     return ModelRegistryService(models=model_repo)
+
+
+@pytest.fixture
+def model_loader():
+    # `artifact_store=None` is safe here — these tests only ever seed/inspect `_cache` directly,
+    # never call `.load()`, so the artifact store is never actually touched.
+    return ModelLoaderService(artifact_store=None)
+
+
+@pytest.fixture
+def service_with_loader(model_repo, model_loader):
+    return ModelRegistryService(models=model_repo, model_loader=model_loader)
 
 
 @pytest.fixture
@@ -124,6 +137,62 @@ async def test_rollback_reinstates_previous_champion(service, market_id, model_r
 
     demoted_second = await model_repo.get(second.id)
     assert demoted_second.status is ModelStatus.RETIRED
+
+
+# --- Section 30 audit fix: promotion/rollback must invalidate the model loader's cache ---------
+
+
+@pytest.mark.asyncio
+async def test_promote_to_champion_invalidates_both_the_new_and_retired_models(
+    service_with_loader, market_id, model_repo, model_loader,
+):
+    """`ModelLoaderService.invalidate()` has documented this exact call site since Milestone 9.1
+    but was never actually wired to it (audit finding, 2026-08-23) — a stale cached artifact could
+    keep serving under either the newly-promoted or the just-retired model id."""
+    first = await _register(service_with_loader, market_id, key="model.v1", version=1)
+    await service_with_loader.promote_to_challenger(first.id)
+    await service_with_loader.promote_to_champion(first.id, approved_by="cto", now=T0)
+    model_loader._cache[first.id] = object()  # simulates a real prediction having cached it
+
+    second = await _register(service_with_loader, market_id, key="model.v2", version=1)
+    await service_with_loader.promote_to_challenger(second.id)
+    model_loader._cache[second.id] = object()  # a pre-promotion warm/test load, also stale after
+    await service_with_loader.promote_to_champion(second.id, approved_by="cto", now=T0 + timedelta(days=1))
+
+    assert first.id not in model_loader._cache
+    assert second.id not in model_loader._cache
+
+
+@pytest.mark.asyncio
+async def test_promote_to_champion_without_a_loader_wired_does_not_error(service, market_id):
+    """`model_loader=None` (the default) must behave exactly as before this fix — every existing
+    caller/test that doesn't wire a loader is unaffected."""
+    model = await _register(service, market_id)
+    await service.promote_to_challenger(model.id)
+
+    champion = await service.promote_to_champion(model.id, approved_by="cto", now=T0)
+
+    assert champion.status is ModelStatus.CHAMPION
+
+
+@pytest.mark.asyncio
+async def test_rollback_invalidates_both_the_retired_and_reinstated_models(
+    service_with_loader, market_id, model_repo, model_loader,
+):
+    first = await _register(service_with_loader, market_id, key="model.v1", version=1)
+    await service_with_loader.promote_to_challenger(first.id)
+    await service_with_loader.promote_to_champion(first.id, approved_by="cto", now=T0)
+
+    second = await _register(service_with_loader, market_id, key="model.v2", version=1)
+    await service_with_loader.promote_to_challenger(second.id)
+    await service_with_loader.promote_to_champion(second.id, approved_by="cto", now=T0 + timedelta(days=1))
+    model_loader._cache[first.id] = object()
+    model_loader._cache[second.id] = object()
+
+    await service_with_loader.rollback(market_id, now=T0 + timedelta(days=2))
+
+    assert first.id not in model_loader._cache
+    assert second.id not in model_loader._cache
 
 
 @pytest.mark.asyncio

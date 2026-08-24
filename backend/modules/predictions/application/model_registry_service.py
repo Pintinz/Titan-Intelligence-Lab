@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from modules.predictions.domain.entities import ModelDefinition
 from modules.predictions.domain.value_objects import MarketId, ModelId, ModelStatus
+from modules.predictions.infrastructure.ml.model_loader import ModelLoaderService
 from modules.predictions.ports.repositories import ModelRepositoryPort
 
 
@@ -41,6 +42,14 @@ _VALID_DEPLOYMENT_MODES = {"shadow", "canary", "live", None}
 @dataclass
 class ModelRegistryService:
     models: ModelRepositoryPort
+    # Section 30 audit fix (2026-08-23): `ModelLoaderService.invalidate()` has existed since
+    # Milestone 9.1 with a docstring claiming it's "called on rollback/re-promotion" — but nothing
+    # ever actually called it from here, leaving that claim documented and unimplemented. Optional
+    # and defaults to None so every existing caller/test that doesn't wire a loader is unaffected;
+    # when wired, promote_to_champion/rollback evict the loader's cache for every model whose
+    # CHAMPION/RETIRED status just changed, so a stale cached artifact can never keep serving
+    # under a market's new champion.
+    model_loader: ModelLoaderService | None = None
 
     async def register(
         self,
@@ -118,12 +127,17 @@ class ModelRegistryService:
             current_champion.status = ModelStatus.RETIRED
             current_champion.retired_at = now
             await self.models.upsert(current_champion)
+            if self.model_loader is not None:
+                self.model_loader.invalidate(current_champion.id)
 
         model.status = ModelStatus.CHAMPION
         model.approved_by = approved_by
         model.approved_at = now
         model.promoted_at = now
-        return await self.models.upsert(model)
+        saved = await self.models.upsert(model)
+        if self.model_loader is not None:
+            self.model_loader.invalidate(saved.id)
+        return saved
 
     async def rollback(self, market_id: MarketId, now: datetime) -> ModelDefinition:
         """Retires the current champion and reinstates the most recently retired model as
@@ -140,11 +154,16 @@ class ModelRegistryService:
         current_champion.status = ModelStatus.RETIRED
         current_champion.retired_at = now
         await self.models.upsert(current_champion)
+        if self.model_loader is not None:
+            self.model_loader.invalidate(current_champion.id)
 
         previous.status = ModelStatus.CHAMPION
         previous.promoted_at = now
         previous.retired_at = None
-        return await self.models.upsert(previous)
+        saved = await self.models.upsert(previous)
+        if self.model_loader is not None:
+            self.model_loader.invalidate(saved.id)
+        return saved
 
     async def retire(self, model_id: ModelId, now: datetime) -> ModelDefinition:
         model = await self._require(model_id)

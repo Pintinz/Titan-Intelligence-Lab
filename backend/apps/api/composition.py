@@ -965,7 +965,10 @@ def build_market_registry_service(session: AsyncSession) -> MarketRegistryServic
 
 
 def build_model_registry_service(session: AsyncSession) -> ModelRegistryService:
-    return ModelRegistryService(models=SqlAlchemyModelRepository(session=session))
+    # Section 30 audit fix (2026-08-23): must be the same process-wide `get_model_loader_service()`
+    # singleton every `PredictionEngine` is built with (below) — invalidating a *different*
+    # `ModelLoaderService` instance's cache would silently do nothing for live inference.
+    return ModelRegistryService(models=SqlAlchemyModelRepository(session=session), model_loader=get_model_loader_service())
 
 
 def build_feature_market_mapping_service(session: AsyncSession) -> FeatureMarketMappingService:
