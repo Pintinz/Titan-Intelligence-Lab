@@ -1,39 +1,61 @@
-import { ArrowRight } from 'lucide-react'
+import { Database, BrainCircuit, LineChart, FileText, ArrowRight } from 'lucide-react'
 import { Section, SectionHeading } from './section-primitives'
 
-const PIPELINE = [
-  { title: 'Data', detail: 'Fixtures, results, stats, and odds are synced from real providers per sport.' },
-  { title: 'Context', detail: 'The Knowledge Graph and Feature Store attach form, relationships, and news impact.' },
-  { title: 'Intelligence', detail: 'A trained model per market produces a calibrated probability and confidence score.' },
-  { title: 'Explanation', detail: 'Every output ships with its top supporting and contradicting evidence, never a bare number.' },
-  { title: 'Learning', detail: 'Settled results feed back into retraining — see Continuous Learning below.' },
+const STEPS = [
+  {
+    icon: Database,
+    title: 'Collect & Process Data',
+    detail: 'Fixtures, results, and statistics are synced from real providers and joined with the Knowledge Graph for context.',
+  },
+  {
+    icon: BrainCircuit,
+    title: 'Run Advanced Models',
+    detail: 'A trained statistical/ML model per market analyzes the patterns and produces a calibrated probability.',
+  },
+  {
+    icon: LineChart,
+    title: 'Generate Predictions',
+    detail: 'Every output ships as a probability with a composite confidence score — never a bare guess.',
+  },
+  {
+    icon: FileText,
+    title: 'Explain & Deliver',
+    detail: 'SHAP-based feature attribution ranks the evidence, and settled results feed back into retraining.',
+  },
 ]
 
 /**
  * "How TitanIQ Works" — the shape brief's Data → Context → Intelligence → Explanation → Learning
- * thesis, spelled out as the real pipeline stages (docs/architecture.md, docs/prediction_engine.md).
- * A process description, not a data feed — nothing here is a metric that could go stale or be
+ * thesis, consolidated to four real stages (docs/architecture.md, docs/prediction_engine.md). A
+ * process description, not a data feed — nothing here is a metric that could go stale or be
  * fabricated, so it needs no loading/empty state.
  */
 export function HowItWorksSection() {
   return (
-    <Section className="border-b border-border-subtle">
+    <Section id="how-it-works" className="border-b border-[var(--li-border)] scroll-mt-20">
       <SectionHeading
-        eyebrow="How TitanIQ Works"
         title="From raw data to an explainable output"
-        description="The same five stages run for every sport, every market, every prediction — nothing skips a step."
+        description="The same pipeline runs for every sport, every market, every prediction — nothing skips a step."
       />
 
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-stretch lg:gap-2">
-        {PIPELINE.map((step, i) => (
-          <div key={step.title} className="flex flex-col items-stretch gap-2 lg:flex-1 lg:flex-row lg:items-center lg:gap-0">
-            <div className="flex-1 self-stretch rounded-lg border border-border-default bg-bg-elevated p-4">
-              <p className="font-telemetry text-xs text-text-muted">Stage {i + 1}</p>
-              <p className="mt-1 font-display text-sm font-semibold text-text-primary">{step.title}</p>
-              <p className="mt-1.5 text-xs text-text-secondary">{step.detail}</p>
+      <div className="grid gap-4 lg:grid-cols-4">
+        {STEPS.map((step, i) => (
+          <div key={step.title} className="relative">
+            <div className="h-full rounded-[var(--li-radius-md)] border border-[var(--li-glass-2-border)] bg-[var(--li-glass-2-bg)] p-5 backdrop-blur-[var(--li-glass-2-blur)]">
+              <div className="flex items-center gap-3">
+                <span className="flex size-10 shrink-0 items-center justify-center rounded-[var(--li-radius-sm)] border border-[var(--li-border)] bg-[var(--li-surface-elevated)] text-[var(--li-cyan)]">
+                  <step.icon className="size-5" aria-hidden="true" />
+                </span>
+                <span className="font-mono text-xs font-semibold text-[var(--li-text-muted)]">{String(i + 1).padStart(2, '0')}</span>
+              </div>
+              <p className="mt-4 text-sm font-semibold text-[var(--li-text-primary)]">{step.title}</p>
+              <p className="mt-1.5 text-xs leading-relaxed text-[var(--li-text-secondary)]">{step.detail}</p>
             </div>
-            {i < PIPELINE.length - 1 && (
-              <ArrowRight className="mx-auto size-4 shrink-0 rotate-90 text-text-muted lg:mx-2 lg:my-0 lg:rotate-0" aria-hidden="true" />
+            {i < STEPS.length - 1 && (
+              <ArrowRight
+                className="absolute top-1/2 -right-2 z-10 hidden size-4 -translate-y-1/2 text-[var(--li-text-muted)] lg:block"
+                aria-hidden="true"
+              />
             )}
           </div>
         ))}

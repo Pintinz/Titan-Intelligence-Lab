@@ -7,6 +7,7 @@ import { ChevronDown, Menu, X, LogOut, LayoutGrid, Settings } from 'lucide-react
 import { cn } from '@/lib/cn'
 import { Button } from '@/components/ui/button'
 import { useAuthStore } from '@/stores/auth-store'
+import logoUrl from '@/assets/logo.png'
 import { BRAND } from './nav-config'
 import { HEADER_MENUS } from './marketing-nav-config'
 
@@ -23,9 +24,8 @@ export function SiteHeader() {
   return (
     <header className="sticky top-0 z-40 border-b border-border-subtle/60 bg-bg-primary/80 backdrop-blur-md">
       <div className="mx-auto flex h-16 max-w-6xl items-center gap-1 px-6 lg:px-10">
-        <Link to="/" className="flex items-center gap-2 pr-4">
-          <span className="size-2 rounded-full bg-accent-primary" aria-hidden="true" />
-          <span className="font-display text-sm font-semibold tracking-tight text-text-primary">{BRAND.name}</span>
+        <Link to="/" className="flex items-center pr-4">
+          <img src={logoUrl} alt={BRAND.name} className="h-8 w-auto" width={116} height={32} />
         </Link>
 
         <NavigationMenu.Root className="relative hidden flex-1 md:block" delayDuration={100}>
@@ -199,7 +199,7 @@ function MobileMarketingNav({ open, onOpenChange }: { open: boolean; onOpenChang
         >
           <DialogPrimitive.Title className="sr-only">Navigation</DialogPrimitive.Title>
           <div className="flex h-16 items-center justify-between border-b border-border-subtle px-5">
-            <span className="font-display text-sm font-semibold text-text-primary">{BRAND.name}</span>
+            <img src={logoUrl} alt={BRAND.name} className="h-7 w-auto" width={101} height={28} />
             <DialogPrimitive.Close aria-label="Close navigation menu" className="text-text-secondary">
               <X className="size-4" />
             </DialogPrimitive.Close>

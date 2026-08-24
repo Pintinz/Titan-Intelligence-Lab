@@ -46,7 +46,6 @@ export function SubscriptionPlansSection() {
   return (
     <Section className="border-b border-border-subtle">
       <SectionHeading
-        eyebrow="Subscription Plans"
         title="Start free. Upgrade for depth and speed."
         description="Every plan traces to the same real intelligence engine — higher tiers unlock more of it, never a different product."
       />

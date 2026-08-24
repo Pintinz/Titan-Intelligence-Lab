@@ -32,7 +32,7 @@ const FAQS = [
 export function FaqTeaserSection() {
   return (
     <Section className="border-b border-border-subtle bg-bg-secondary/40">
-      <SectionHeading eyebrow="FAQ" title="Common questions" />
+      <SectionHeading title="Common questions" />
       <div className="max-w-2xl">
         <FaqAccordion items={FAQS} />
       </div>

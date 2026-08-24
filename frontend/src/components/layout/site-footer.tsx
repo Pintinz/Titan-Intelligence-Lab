@@ -1,4 +1,5 @@
 import { Link } from 'react-router-dom'
+import logoUrl from '@/assets/logo.png'
 import { BRAND } from './nav-config'
 import { FOOTER_COLUMNS, SOCIAL_LINKS, PLATFORM_VERSION } from './marketing-nav-config'
 import { BrandIcon } from './brand-icons'
@@ -21,9 +22,8 @@ export function SiteFooter() {
       <div className="mx-auto max-w-6xl px-6 py-14 lg:px-10 lg:py-16">
         <div className="grid grid-cols-2 gap-x-8 gap-y-10 sm:grid-cols-4 lg:grid-cols-12">
           <div className="col-span-2 sm:col-span-4 lg:col-span-4 lg:pr-8">
-            <Link to="/" className="flex items-center gap-2">
-              <span className="size-2 rounded-full bg-accent-primary" aria-hidden="true" />
-              <span className="font-display text-sm font-semibold text-text-primary">{BRAND.name}</span>
+            <Link to="/" className="flex items-center">
+              <img src={logoUrl} alt={BRAND.name} className="h-8 w-auto" width={116} height={32} />
             </Link>
             <p className="mt-3 text-sm font-medium text-text-secondary">{BRAND.tagline}</p>
             <p className="mt-2 max-w-xs text-sm leading-relaxed text-text-muted">{BRAND.description}</p>

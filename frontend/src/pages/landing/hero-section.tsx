@@ -1,118 +1,117 @@
-import { Link } from 'react-router-dom'
+import { Database, Cpu, ShieldCheck, LineChart, PlayCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { ConfidenceTelemetry } from '@/components/domain/confidence-telemetry'
-import { LiveDot } from '@/components/ui/live-dot'
-import { humanizeFactorKey } from '@/components/infinity/evidence-explorer'
-import { predictionValueLabel } from '@/lib/predictions/value-label'
+import { IntelligenceCardSkeleton, EngineIdleState, HeroIntelligenceReport } from './intelligence-card'
 import type { PublicFeaturedIntelligenceDto } from '@/lib/api/types'
 
+const CAPABILITIES = [
+  { icon: Database, title: 'Historical Data', detail: 'Results & statistics analyzed per fixture', color: 'var(--li-cyan)' },
+  { icon: Cpu, title: 'Advanced Models', detail: 'Statistical & ML models combined', color: 'var(--li-purple)' },
+  { icon: ShieldCheck, title: 'Verified Context', detail: 'Injuries, lineups, news & more', color: 'var(--li-positive)' },
+  { icon: LineChart, title: 'Explainable AI', detail: 'Every prediction has a reason', color: 'var(--li-blue)' },
+]
+
 /**
- * The hero's "Intelligence Core" — a real currently-published pick when one exists, or an honest
- * neutral platform-state visualization when it doesn't (shape brief §8: never fabricate a match to
- * fill the space). `pick` is the highest-confidence entry from `featured-intelligence`, or `null`
- * while loading / if none is currently published.
+ * The hero's right-hand visual is a real currently-published pick when one exists, or an honest
+ * neutral platform-state card when it doesn't (shape brief §8: never fabricate a match to fill
+ * the space) — rendered through `HeroIntelligenceReport`.
  */
 export function HeroSection({ loading, pick }: { loading: boolean; pick: PublicFeaturedIntelligenceDto | null }) {
   return (
-    <div className="relative overflow-hidden border-b border-border-subtle">
+    <div className="relative overflow-hidden border-b border-[var(--li-border)]">
       <div
-        className="pointer-events-none absolute inset-0 opacity-70"
-        style={{ backgroundImage: 'var(--gradient-mesh-hero)' }}
+        className="pointer-events-none absolute inset-0 opacity-[0.35]"
+        style={{
+          backgroundImage:
+            'radial-gradient(at 15% 10%, rgba(34,211,238,0.10) 0px, transparent 45%), radial-gradient(at 85% 0%, rgba(139,92,246,0.08) 0px, transparent 45%)',
+        }}
         aria-hidden="true"
       />
-      <div className="relative mx-auto grid max-w-6xl gap-14 px-6 py-20 lg:grid-cols-[1.1fr_0.9fr] lg:px-10 lg:py-28">
+      <div
+        className="pointer-events-none absolute inset-0 opacity-[0.05]"
+        style={{
+          backgroundImage:
+            'linear-gradient(to right, var(--li-border) 1px, transparent 1px), linear-gradient(to bottom, var(--li-border) 1px, transparent 1px)',
+          backgroundSize: '48px 48px',
+        }}
+        aria-hidden="true"
+      />
+
+      <div className="relative mx-auto grid max-w-7xl gap-14 px-6 py-16 lg:grid-cols-[0.95fr_1.2fr] lg:px-10 lg:py-20">
         <div>
-          <p className="inline-flex items-center gap-2 rounded-full border border-border-default bg-bg-elevated/60 px-3 py-1 text-xs font-medium text-text-secondary">
-            <LiveDot />
-            Sports Intelligence Platform — not a betting or tips site
+          <p className="inline-flex items-center gap-2 rounded-full border border-[var(--li-border)] bg-[var(--li-surface)] px-3 py-1 font-mono text-[11px] uppercase tracking-[0.1em] text-[var(--li-text-secondary)]">
+            <span className="size-1.5 rounded-full bg-[var(--li-cyan)]" aria-hidden="true" />
+            AI Prediction Intelligence
           </p>
-          <h1 className="mt-6 max-w-xl font-display text-4xl font-semibold leading-[1.05] tracking-tight text-text-primary lg:text-6xl">
-            Every prediction, fully explained.
+
+          <h1 className="mt-6 max-w-xl text-4xl font-bold leading-[1.1] tracking-tight text-[var(--li-text-primary)] lg:text-5xl">
+            Understand the prediction, <span className="text-[var(--li-cyan)]">not just</span> the prediction.
           </h1>
-          <p className="mt-6 max-w-lg text-lg text-text-secondary">
-            TitanIQ turns real historical data and verified context into calibrated predictions —
-            each one backed by its confidence, its evidence, and the reasoning behind it.
+
+          <p className="mt-6 max-w-lg text-base leading-relaxed text-[var(--li-text-secondary)] lg:text-lg">
+            TitanIQ combines historical data, statistical models, machine learning, and verified
+            context into one auditable prediction workflow.
           </p>
-          <div className="mt-8 flex flex-wrap items-center gap-3">
+
+          <div className="mt-8 grid grid-cols-2 gap-4 sm:grid-cols-4">
+            {CAPABILITIES.map((c) => (
+              <div key={c.title} className="flex flex-col items-start gap-2">
+                <span
+                  className="flex size-9 items-center justify-center rounded-[var(--li-radius-sm)] border border-[var(--li-border)] bg-[var(--li-surface)]"
+                  style={{ color: c.color }}
+                >
+                  <c.icon className="size-4.5" aria-hidden="true" />
+                </span>
+                <p className="text-sm font-semibold text-[var(--li-text-primary)]">{c.title}</p>
+                <p className="text-xs leading-snug text-[var(--li-text-muted)]">{c.detail}</p>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-9 flex flex-wrap items-center gap-3">
             <Button
               asChild
               size="lg"
-              className="group relative overflow-hidden shadow-[0_1px_0_0_rgba(255,255,255,0.16)_inset,0_12px_24px_-8px_var(--color-accent-primary)] transition-[transform,box-shadow] duration-200 hover:-translate-y-0.5 hover:shadow-[0_1px_0_0_rgba(255,255,255,0.2)_inset,0_18px_32px_-8px_var(--color-accent-primary)] active:translate-y-0"
+              className="group relative overflow-hidden rounded-[10px] bg-[var(--li-cyan)] text-[var(--li-text-inverse)] shadow-[var(--li-glow-cyan-sm)] transition-[transform,box-shadow] duration-200 hover:-translate-y-0.5 hover:bg-[var(--li-cyan-hover)] hover:shadow-[var(--li-glow-cyan)] active:translate-y-0"
             >
-              <Link to="/signup">
+              <a href="#proof-of-mechanism">
                 <span
                   className="pointer-events-none absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/25 to-transparent transition-transform duration-700 ease-out group-hover:translate-x-full motion-reduce:hidden"
                   aria-hidden="true"
                 />
-                Start free
-              </Link>
+                Explore Predictions
+              </a>
             </Button>
             <Button
               asChild
               variant="secondary"
               size="lg"
-              className="transition-[border-color,color] duration-200 hover:border-accent-primary hover:text-accent-primary"
+              className="rounded-[10px] border-[var(--li-border)] bg-[var(--li-surface)] text-[var(--li-text-primary)] transition-colors duration-200 hover:border-[var(--li-border-strong)] hover:bg-[var(--li-surface-elevated)]"
             >
-              <a href="#proof-of-mechanism">Explore Intelligence</a>
+              <a href="#how-it-works">
+                <PlayCircle className="size-4" aria-hidden="true" />
+                How TitanIQ Works
+              </a>
             </Button>
           </div>
         </div>
 
         <div className="relative">
-          <div className="rounded-lg border border-border-default bg-bg-elevated/80 p-5 shadow-[var(--shadow-elevation-3)] backdrop-blur-sm">
-            {loading ? (
-              <div className="animate-pulse space-y-4">
-                <div className="h-3 w-32 rounded bg-bg-secondary" />
-                <div className="h-5 w-48 rounded bg-bg-secondary" />
-                <div className="h-14 rounded-md bg-bg-secondary" />
-              </div>
-            ) : pick ? (
-              <>
-                <div className="flex items-center justify-between">
-                  <span className="font-telemetry text-xs uppercase tracking-wider text-text-muted">
-                    {pick.sport_code} · {pick.competition_name ?? 'Intelligence'}
-                  </span>
-                  {pick.status === 'live' && (
-                    <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-live">
-                      <LiveDot /> Live
-                    </span>
-                  )}
-                </div>
-                <p className="mt-3 font-display text-lg font-semibold text-text-primary">
-                  {pick.home_team?.short_name ?? pick.home_team?.name} vs{' '}
-                  {pick.away_team?.short_name ?? pick.away_team?.name}
-                </p>
-                <div className="mt-4 flex items-center justify-between rounded-md bg-bg-primary/60 px-3 py-2.5">
-                  <div>
-                    <p className="text-xs text-text-muted">{pick.market_name}</p>
-                    <p className="font-telemetry text-base font-medium text-text-primary">
-                      {predictionValueLabel(pick.value, pick.home_team ?? undefined, pick.away_team ?? undefined)}
-                    </p>
-                  </div>
-                  <ConfidenceTelemetry confidence={pick.confidence_composite} />
-                </div>
-                {pick.evidence_highlights.supporting.length > 0 && (
-                  <p className="mt-4 text-sm text-text-secondary">
-                    Backed by {pick.evidence_highlights.supporting.map(humanizeFactorKey).join(', ')}.
-                  </p>
-                )}
-              </>
-            ) : (
-              <>
-                <div className="flex items-center justify-between">
-                  <span className="font-telemetry text-xs uppercase tracking-wider text-text-muted">
-                    Intelligence Engine
-                  </span>
-                </div>
-                <p className="mt-3 font-display text-lg font-semibold text-text-primary">
-                  Awaiting published intelligence
-                </p>
-                <p className="mt-3 text-sm text-text-secondary">
-                  The engine publishes a prediction only once it clears its confidence threshold —
-                  nothing ships without evidence behind it.
-                </p>
-              </>
-            )}
+          <div
+            className="pointer-events-none absolute -inset-4 rounded-[var(--li-radius-lg)] opacity-60"
+            style={{ background: 'radial-gradient(circle at 30% 20%, rgba(34,211,238,0.08), transparent 60%)' }}
+            aria-hidden="true"
+          />
+          <div
+            className="group relative flex min-h-[280px] flex-col rounded-[var(--li-radius-lg)] border border-[var(--li-glass-3-border)] bg-[var(--li-glass-3-bg)] p-5 shadow-[var(--li-shadow-card)] backdrop-blur-[var(--li-glass-3-blur)] transition-[transform,box-shadow,border-color] duration-200 hover:-translate-y-1 hover:border-[var(--li-cyan-strong)] hover:shadow-[var(--li-shadow-card-hover),var(--li-glow-cyan-sm)] lg:p-6"
+          >
+            {/* A soft inner top highlight — the one place this card reaches for a literal "glass
+                edge" cue, restrained to a 1px gradient line rather than a full glossy overlay. */}
+            <div
+              className="pointer-events-none absolute inset-x-0 top-0 h-px rounded-t-[var(--li-radius-lg)] opacity-60"
+              style={{ background: 'linear-gradient(90deg, transparent, rgba(248,250,252,0.35), transparent)' }}
+              aria-hidden="true"
+            />
+            {loading ? <IntelligenceCardSkeleton /> : pick ? <HeroIntelligenceReport pick={pick} /> : <EngineIdleState />}
           </div>
         </div>
       </div>

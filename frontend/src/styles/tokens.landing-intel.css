@@ -1,0 +1,184 @@
+/*
+  TitanIQ Landing Intelligence — the public front page's PARALLEL, PAGE-SCOPED visual world.
+  Same additive-coexistence discipline as tokens.infinity.css / tokens.command-deck.css: nothing
+  here changes any other page, and SiteHeader/SiteFooter (shared across every marketing page) sit
+  outside this scope deliberately.
+
+  UNLIKE Infinity/Command Deck (which mint their own `--cd-*`/`--infinity-*` custom properties and
+  opt in via arbitrary-value classes), this world instead RE-DEFINES the existing global token
+  names — `--color-bg-primary`, `--color-accent-primary`, `--font-display`, etc. — inside the
+  `.landing-intel` selector. Every existing landing section (trust-differentiation,
+  mechanism-pipeline, explainability, how-it-works, signal-strip, multi-sport, news-intelligence,
+  knowledge-graph, learning-intelligence, subscription-plans, faq-teaser, cta) already consumes
+  those exact Tailwind utilities (`bg-bg-primary`, `text-accent-primary`, `font-display`, ...);
+  CSS custom properties resolve through the cascade at used-value time, so overriding the
+  variable — not the utility — re-themes the entire subtree for free, the same mechanism
+  tokens.css itself already uses for dark/light/high-contrast. Only glow/shadow/radius values with
+  no existing global equivalent get new `--li-*` names.
+
+  ---
+
+  DIRECTION CONTRACT
+
+  THESIS: "Understand the prediction, not just the prediction." TitanIQ is an AI prediction
+  intelligence platform — Palantir-style intelligence-terminal density crossed with a modern AI
+  SaaS's restraint. The category default this refuses is generic sports-betting chrome (odds
+  tickers, neon green/red, pill-shaped bet-slip cards); the opposite rut it also refuses is cold,
+  over-glassed "AI dashboard" cosplay with a rainbow of accent colors.
+
+  OWN-WORLD: One accent — signal cyan — used with intent (primary CTA, high-confidence glow, the
+  one number that matters). Violet appears only as the "model reasoning" marker. Semantic
+  green/amber/red exist but are reserved, never the default palette (~80% neutral / 10% cyan /
+  5% purple / 5% semantic, per brief). Two typefaces carry one clear distinction: Inter for
+  everything a human reads, JetBrains Mono for every number the model computed — a probability, a
+  timestamp, a market key visually announce "this came out of a model," not "this is prose."
+*/
+
+.landing-intel {
+  /* color.background.* */
+  --color-bg-primary: #070a0f;
+  --color-bg-secondary: #0d121a;
+  --color-bg-elevated: #111923;
+  --color-bg-overlay: rgba(4, 6, 9, 0.75);
+  --color-border-subtle: #1c2936;
+  --color-border-default: #1c2936;
+  --color-border-strong: #29394a;
+
+  /* color.text.* */
+  --color-text-primary: #f8fafc;
+  --color-text-secondary: #94a3b8;
+  --color-text-muted: #64748b;
+  --color-text-inverse: #070a0f;
+
+  /* color.accent.* — cyan is the one interactive/brand hue; blue is a quieter secondary. */
+  --color-accent-primary: #22d3ee;
+  --color-accent-primary-hover: #67e3f5;
+  --color-accent-primary-muted: rgba(34, 211, 238, 0.14);
+  --color-accent-secondary: #3b82f6;
+  --color-accent-secondary-muted: rgba(59, 130, 246, 0.14);
+
+  /* color.premium.* — violet, reserved exclusively for "model reasoning/explanation" markers. */
+  --color-premium: #8b5cf6;
+  --color-premium-muted: rgba(139, 92, 246, 0.14);
+
+  /* color.live.* — the brief's "risk" red, reserved for live/alert status only. */
+  --color-live: #f87171;
+  --color-live-muted: rgba(248, 113, 113, 0.14);
+
+  /* color.semantic.* */
+  --color-semantic-success: #22c55e;
+  --color-semantic-success-muted: rgba(34, 197, 94, 0.14);
+  --color-semantic-warning: #f59e0b;
+  --color-semantic-warning-muted: rgba(245, 158, 11, 0.14);
+  --color-semantic-danger: #f87171;
+  --color-semantic-danger-muted: rgba(248, 113, 113, 0.14);
+  --color-semantic-info: #3b82f6;
+  --color-semantic-info-muted: rgba(59, 130, 246, 0.14);
+
+  --color-confidence-high: var(--color-semantic-success);
+  --color-confidence-medium: #3b82f6;
+  --color-confidence-low: #64748b;
+
+  --shadow-elevation-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-elevation-2: 0 4px 16px rgba(0, 0, 0, 0.5);
+  --shadow-elevation-3: 0 16px 40px -12px rgba(0, 0, 0, 0.55);
+
+  --color-bg-glass: rgba(13, 18, 26, 0.6);
+  --color-bg-glass-strong: rgba(13, 18, 26, 0.82);
+  --color-border-glass: rgba(248, 250, 252, 0.08);
+
+  --gradient-brand: linear-gradient(135deg, #22d3ee 0%, #8b5cf6 100%);
+  --gradient-brand-subtle: linear-gradient(135deg, rgba(34, 211, 238, 0.14) 0%, rgba(139, 92, 246, 0.12) 100%);
+  --gradient-mesh-hero: radial-gradient(at 15% 10%, rgba(34, 211, 238, 0.12) 0px, transparent 45%),
+    radial-gradient(at 85% 0%, rgba(139, 92, 246, 0.1) 0px, transparent 45%);
+  --gradient-confidence-high: linear-gradient(90deg, var(--color-confidence-high), transparent);
+
+  /* radius — the brief's 12–16px card radius, cascading to every existing rounded-md/rounded-lg. */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+
+  /* typography — Inter carries every human-read surface; JetBrains Mono is reserved for
+     machine-computed values (probabilities, confidence, market/model identifiers, timestamps). */
+  --font-display: "Inter", system-ui, sans-serif;
+  --font-telemetry: "JetBrains Mono", "SFMono-Regular", ui-monospace, monospace;
+  --font-body: "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, monospace;
+
+  /* ---- li-* — values with no existing global equivalent ---- */
+  --li-bg: var(--color-bg-primary);
+  --li-surface: var(--color-bg-secondary);
+  --li-surface-elevated: var(--color-bg-elevated);
+  --li-border: var(--color-border-default);
+  --li-border-strong: var(--color-border-strong);
+  --li-text-primary: var(--color-text-primary);
+  --li-text-secondary: var(--color-text-secondary);
+  --li-text-muted: var(--color-text-muted);
+  --li-text-inverse: var(--color-text-inverse);
+  --li-cyan: var(--color-accent-primary);
+  --li-cyan-hover: var(--color-accent-primary-hover);
+  --li-cyan-muted: var(--color-accent-primary-muted);
+  --li-cyan-strong: rgba(34, 211, 238, 0.32);
+  --li-blue: var(--color-accent-secondary);
+  --li-blue-muted: var(--color-accent-secondary-muted);
+  --li-purple: var(--color-premium);
+  --li-purple-muted: var(--color-premium-muted);
+  --li-positive: var(--color-semantic-success);
+  --li-warning: var(--color-semantic-warning);
+  --li-risk: var(--color-live);
+
+  --li-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.5), 0 16px 40px -12px rgba(0, 0, 0, 0.55);
+  --li-shadow-card-hover: 0 1px 2px rgba(0, 0, 0, 0.5), 0 24px 48px -12px rgba(0, 0, 0, 0.6);
+  --li-glow-cyan: 0 0 0 1px var(--li-cyan-strong), 0 0 32px rgba(34, 211, 238, 0.16);
+  --li-glow-cyan-sm: 0 0 0 1px var(--li-cyan-strong), 0 0 16px rgba(34, 211, 238, 0.14);
+
+  --li-radius-sm: var(--radius-sm);
+  --li-radius-md: var(--radius-md);
+  --li-radius-lg: var(--radius-lg);
+
+  /* ============================================================================
+     GLASS SYSTEM — the same three restrained levels as Command Deck's (tokens.command-deck.css),
+     built from this world's own navy surface color rather than a new palette: Level 1 (nav,
+     secondary controls, small metadata) is the most transparent; Level 2 (the default —
+     prediction cards, evidence panels, stat cards) is the workhorse; Level 3 (the hero
+     intelligence card only) gets the deepest separation. Small icon badges, pills, and buttons
+     stay flat/opaque — glass is reserved for real content surfaces, not decoration.
+     ============================================================================ */
+  --li-glass-1-bg: rgba(13, 18, 26, 0.55);
+  --li-glass-1-border: rgba(248, 250, 252, 0.07);
+  --li-glass-1-blur: 14px;
+
+  --li-glass-2-bg: rgba(13, 18, 26, 0.7);
+  --li-glass-2-border: rgba(248, 250, 252, 0.09);
+  --li-glass-2-blur: 18px;
+
+  --li-glass-3-bg: rgba(17, 25, 35, 0.82);
+  --li-glass-3-border: rgba(248, 250, 252, 0.12);
+  --li-glass-3-blur: 22px;
+
+  background-color: var(--color-bg-primary);
+  color: var(--color-text-primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-intel {
+    --motion-duration-fast: 0ms;
+    --motion-duration-base: 0ms;
+    --motion-duration-slow: 0ms;
+  }
+}
+
+/* The one authored entrance moment on the front page — the forecast hero's rows arrive with a
+   short staggered fade+rise (see intelligence-card.tsx's animationDelay values), never a looping
+   or continuous effect. Gated by Tailwind's `motion-safe:` variant, so it's already absent under
+   prefers-reduced-motion without needing a separate override here. */
+@keyframes li-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

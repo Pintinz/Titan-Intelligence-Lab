@@ -34,41 +34,38 @@ export function KnowledgeGraphSection({
   const entity = preview?.preview_entity
 
   return (
-    <Section className="border-b border-border-subtle bg-bg-secondary/40">
+    <Section className="border-b border-[var(--li-border)]">
       <div className="grid gap-10 lg:grid-cols-2 lg:items-center">
         <div>
-          <p className="font-telemetry text-xs font-semibold uppercase tracking-[0.16em] text-accent-primary">
-            Knowledge Graph
-          </p>
-          <h2 className="mt-2 font-display text-2xl font-semibold tracking-tight text-text-primary lg:text-3xl">
+          <h2 className="text-2xl font-bold tracking-tight text-[var(--li-text-primary)] lg:text-3xl">
             Every prediction reasons over relationships, not just stats
           </h2>
-          <p className="mt-3 max-w-md text-base text-text-secondary">
+          <p className="mt-3 max-w-md text-base text-[var(--li-text-secondary)]">
             Teams, players, venues, and competitions are connected in a living graph — rivalries,
             venue effects, and squad relationships all feed into a prediction's evidence.
           </p>
           {preview && (
-            <p className="mt-4 text-sm text-text-secondary">
+            <p className="mt-4 font-mono text-sm text-[var(--li-text-secondary)]">
               {preview.node_count.toLocaleString()} entities · {preview.edge_count.toLocaleString()} relationships
               tracked right now.
             </p>
           )}
           <Link
             to="/signup"
-            className="mt-6 inline-flex items-center gap-1.5 text-sm font-medium text-accent-primary hover:text-accent-primary-hover"
+            className="mt-6 inline-flex items-center gap-1.5 text-sm font-medium text-[var(--li-cyan)] hover:text-[var(--li-cyan-hover)]"
           >
             Explore the Knowledge Graph <ArrowRight className="size-4" />
           </Link>
         </div>
 
-        <div className="rounded-lg border border-border-default bg-bg-elevated p-4">
+        <div className="rounded-[var(--li-radius-md)] border border-[var(--li-glass-2-border)] bg-[var(--li-glass-2-bg)] p-4 shadow-[var(--li-shadow-card)] backdrop-blur-[var(--li-glass-2-blur)]">
           {loading ? (
-            <div className="h-[250px] animate-pulse rounded-md bg-bg-secondary" />
+            <div className="h-[250px] animate-pulse rounded-[var(--li-radius-sm)] bg-[var(--li-surface-elevated)]" />
           ) : entity ? (
             <KgPreviewGraph entity={entity} />
           ) : (
             <div className="flex h-[250px] flex-col items-center justify-center text-center">
-              <p className="text-sm text-text-secondary">
+              <p className="text-sm text-[var(--li-text-secondary)]">
                 No connected entity to preview yet — the graph is still building coverage.
               </p>
             </div>

@@ -1,18 +1,23 @@
+import type { LucideIcon } from 'lucide-react'
+import { Layers, Trophy, Radio, CalendarDays, TrendingUp, Share2, Network, Gauge, FileCheck2, RefreshCw } from 'lucide-react'
 import { Section } from './section-primitives'
 import type { PublicPlatformSummaryDto } from '@/lib/api/types'
 
 // Fixed capability facts (docs/architecture.md) — not usage/business metrics, never fabricated.
 const CAPABILITIES = [
-  { value: '9', label: 'Confidence factors scored on every prediction' },
-  { value: '100%', label: 'Predictions shipped with a full explanation bundle' },
-  { value: '6', label: 'Stages in the continuous learning loop' },
+  { icon: Gauge, value: '9', label: 'Confidence factors scored on every prediction' },
+  { icon: FileCheck2, value: '100%', label: 'Predictions shipped with a full explanation bundle' },
+  { icon: RefreshCw, value: '6', label: 'Stages in the continuous learning loop' },
 ]
 
-function Stat({ value, label }: { value: string; label: string }) {
+function Stat({ icon: Icon, value, label }: { icon: LucideIcon; value: string; label: string }) {
   return (
-    <div className="border-t-2 border-accent-primary pt-4">
-      <span className="font-telemetry text-3xl font-medium tabular-nums text-text-primary lg:text-4xl">{value}</span>
-      <p className="mt-2 text-sm text-text-secondary">{label}</p>
+    <div className="rounded-[var(--li-radius-md)] border border-[var(--li-glass-2-border)] bg-[var(--li-glass-2-bg)] p-4 backdrop-blur-[var(--li-glass-2-blur)]">
+      <span className="flex size-8 items-center justify-center rounded-[var(--li-radius-sm)] border border-[var(--li-border)] bg-[var(--li-surface-elevated)] text-[var(--li-cyan)]">
+        <Icon className="size-4" aria-hidden="true" />
+      </span>
+      <p className="mt-3 font-mono text-2xl font-bold tabular-nums text-[var(--li-text-primary)] lg:text-3xl">{value}</p>
+      <p className="mt-1 text-xs text-[var(--li-text-secondary)]">{label}</p>
     </div>
   )
 }
@@ -30,47 +35,45 @@ export function SignalStripSection({
   summary: PublicPlatformSummaryDto | null
 }) {
   return (
-    <Section className="border-b border-border-subtle py-10 lg:py-12">
-      <p className="font-telemetry text-xs font-semibold uppercase tracking-[0.16em] text-accent-primary">
-        Platform Signal
-      </p>
-      <h2 className="mt-1 font-display text-xl font-semibold text-text-primary">What TitanIQ is tracking right now</h2>
+    <Section className="border-b border-[var(--li-border)] py-10 lg:py-12">
+      <h2 className="text-xl font-semibold text-[var(--li-text-primary)]">What TitanIQ is tracking right now</h2>
 
       {loading || !summary ? (
-        <dl className="mt-6 grid grid-cols-2 gap-6 sm:grid-cols-4">
+        <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
           {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="h-16 animate-pulse rounded bg-bg-secondary" />
+            <div key={i} className="h-24 animate-pulse rounded-[var(--li-radius-md)] bg-[var(--li-surface)]" />
           ))}
-        </dl>
+        </div>
       ) : (
         <>
-          <dl className="mt-6 grid grid-cols-2 gap-6 sm:grid-cols-4">
-            <Stat value={String(summary.sports_covered)} label="Sports covered" />
-            <Stat value={String(summary.competitions_tracked)} label="Competitions tracked" />
-            <Stat value={String(summary.live_fixtures)} label="Live right now" />
-            <Stat value={String(summary.today_fixtures)} label="Fixtures today" />
-          </dl>
-          <dl className="mt-6 grid grid-cols-2 gap-8 border-t border-border-subtle pt-6 lg:grid-cols-3">
+          <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <Stat icon={Layers} value={String(summary.sports_covered)} label="Sports covered" />
+            <Stat icon={Trophy} value={String(summary.competitions_tracked)} label="Competitions tracked" />
+            <Stat icon={Radio} value={String(summary.live_fixtures)} label="Live right now" />
+            <Stat icon={CalendarDays} value={String(summary.today_fixtures)} label="Fixtures today" />
+          </div>
+          <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
             <Stat
+              icon={TrendingUp}
               value={summary.published_predictions_sample.toLocaleString()}
               label={`Published in the last ${summary.published_predictions_sample_size.toLocaleString()} predictions`}
             />
-            <Stat value={summary.knowledge_graph.node_count.toLocaleString()} label="Knowledge Graph entities" />
-            <Stat value={summary.knowledge_graph.edge_count.toLocaleString()} label="Knowledge Graph relationships" />
-          </dl>
+            <Stat icon={Share2} value={summary.knowledge_graph.node_count.toLocaleString()} label="Knowledge Graph entities" />
+            <Stat icon={Network} value={summary.knowledge_graph.edge_count.toLocaleString()} label="Knowledge Graph relationships" />
+          </div>
           {summary.last_synced_at && (
-            <p className="mt-4 text-xs text-text-muted">
+            <p className="mt-4 font-mono text-xs text-[var(--li-text-muted)]">
               Data last synced {new Date(summary.last_synced_at).toLocaleString()}
             </p>
           )}
         </>
       )}
 
-      <dl className="mt-10 grid grid-cols-1 gap-8 border-t border-border-subtle pt-8 sm:grid-cols-3">
+      <div className="mt-8 grid grid-cols-1 gap-4 border-t border-[var(--li-border)] pt-8 sm:grid-cols-3">
         {CAPABILITIES.map((c) => (
-          <Stat key={c.label} value={c.value} label={c.label} />
+          <Stat key={c.label} icon={c.icon} value={c.value} label={c.label} />
         ))}
-      </dl>
+      </div>
     </Section>
   )
 }

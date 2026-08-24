@@ -9,6 +9,7 @@ import { ExplainabilitySection } from './landing/explainability-section'
 import { TrustDifferentiationSection } from './landing/trust-differentiation-section'
 import { HowItWorksSection } from './landing/how-it-works-section'
 import { SignalStripSection } from './landing/signal-strip-section'
+import { TrustBadgesSection } from './landing/trust-badges-section'
 import { MultiSportSection } from './landing/multi-sport-section'
 import { NewsIntelligenceSection } from './landing/news-intelligence-section'
 import { KnowledgeGraphSection } from './landing/knowledge-graph-section'
@@ -31,39 +32,45 @@ export default function LandingPage() {
       />
       <SiteHeader />
 
-      {/* 1. Hero */}
-      <HeroSection loading={loading} pick={topPick} />
+      <div className="landing-intel">
+        {/* 1. Hero */}
+        <HeroSection loading={loading} pick={topPick} />
 
-      {/* 2. Proof of Mechanism */}
-      <FeaturedMatchSection loading={loading} picks={featuredIntelligence} />
-      <MechanismPipelineSection />
-      <ExplainabilitySection pick={topPick} />
+        {/* 2. Live Platform Activity */}
+        <SignalStripSection loading={loading} summary={platformSummary} />
 
-      {/* 3. Trust & Differentiation */}
-      <TrustDifferentiationSection />
+        {/* 3. Proof of Mechanism */}
+        <FeaturedMatchSection loading={loading} picks={featuredIntelligence} />
 
-      {/* 4. How TitanIQ Works */}
-      <HowItWorksSection />
+        {/* 4. How TitanIQ Works */}
+        <HowItWorksSection />
 
-      {/* 5. Live Platform Activity */}
-      <SignalStripSection loading={loading} summary={platformSummary} />
+        {/* 5. Trust badges */}
+        <TrustBadgesSection />
 
-      {/* 6. Multi-Sport Intelligence */}
-      <MultiSportSection loading={loading} sports={platformSummary?.sports ?? []} />
+        <MechanismPipelineSection />
+        <ExplainabilitySection pick={topPick} />
 
-      {/* 7. News / Knowledge Graph / Learning */}
-      <NewsIntelligenceSection loading={loading} items={newsIntelligence} />
-      <KnowledgeGraphSection loading={loading} preview={knowledgeGraphPreview} />
-      <LearningIntelligenceSection />
+        {/* 6. Trust & Differentiation */}
+        <TrustDifferentiationSection />
 
-      {/* 8. Subscription Plans */}
-      <SubscriptionPlansSection />
+        {/* 7. Multi-Sport Intelligence */}
+        <MultiSportSection loading={loading} sports={platformSummary?.sports ?? []} />
 
-      {/* 9. FAQ */}
-      <FaqTeaserSection />
+        {/* 8. News / Knowledge Graph / Learning */}
+        <NewsIntelligenceSection loading={loading} items={newsIntelligence} />
+        <KnowledgeGraphSection loading={loading} preview={knowledgeGraphPreview} />
+        <LearningIntelligenceSection />
 
-      {/* 10. Final CTA */}
-      <CtaSection />
+        {/* 9. Subscription Plans */}
+        <SubscriptionPlansSection />
+
+        {/* 10. FAQ */}
+        <FaqTeaserSection />
+
+        {/* 11. Final CTA */}
+        <CtaSection />
+      </div>
 
       {/* 11. Footer */}
       <SiteFooter />
