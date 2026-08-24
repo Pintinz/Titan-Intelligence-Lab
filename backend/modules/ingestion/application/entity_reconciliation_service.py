@@ -475,7 +475,7 @@ class EntityReconciliationService:
     async def reconcile_fixture(
         self, record: ProviderFixtureRecord, season_id: SeasonId, now: datetime, venue_id: VenueId | None = None,
         sport_code: str | None = None, match_by_teams_and_date: bool = False, allow_skip_live: bool = False,
-        preserve_existing_score: bool = False,
+        preserve_existing_score: bool = False, feature_as_of: datetime | None = None,
     ) -> tuple[Fixture, bool]:
         home_id = await self._resolve(record.home_team_ref.provider, record.home_team_ref.external_id, EntityKind.TEAM)
         away_id = await self._resolve(record.away_team_ref.provider, record.away_team_ref.external_id, EntityKind.TEAM)
@@ -521,11 +521,28 @@ class EntityReconciliationService:
         )
         if not created and existing is not None and status != existing.status:
             await self._notify_fixture_status_change(saved, home_id, away_id, now)
+        # Look-ahead leakage fix (2026-08-23 audit): `_compute_form_differential`/
+        # `_compute_transfer_activity` are pre-match features — their real point-in-time cutoff is
+        # always this fixture's own kickoff, never the wall-clock moment reconciliation happens to
+        # run. For live sync `now` and kickoff are close enough that this was mostly latent, but
+        # `HistoricalImportService` reconciles an entire season through one shared `now`, which
+        # let every historical fixture "see" every later result in the same file as if it were
+        # already-known team form. `feature_as_of` (defaulting to `now`, so every existing live
+        # caller is byte-for-byte unchanged) lets a backfill pass each fixture's own
+        # `record.scheduled_at` instead. `_recompute_team_form` is the one exception: unlike the
+        # other two, it deliberately must include THIS just-completed fixture's own result (it's
+        # the team's own rolling average going into future fixtures, not a pre-match signal for
+        # this one) — `list_recent_by_team`'s `before=` is a strict `<`, so a bare `feature_as_of`
+        # would wrongly exclude the fixture whose result triggered the recompute. A small
+        # post-kickoff buffer (far shorter than the days-to-weeks gap between a team's fixtures)
+        # includes this match without reaching into the next one.
+        cutoff = feature_as_of if feature_as_of is not None else now
+        team_form_cutoff = now if feature_as_of is None else feature_as_of + timedelta(hours=6)
         if saved.status is FixtureStatus.COMPLETED and saved.home_score is not None and saved.away_score is not None:
             await self._resolve_prediction_outcomes(saved, now)
-            await self._recompute_team_form(saved, sport_code, now)
-        await self._compute_form_differential(saved, sport_code, now)
-        await self._compute_transfer_activity(saved, sport_code, now)
+            await self._recompute_team_form(saved, sport_code, team_form_cutoff)
+        await self._compute_form_differential(saved, sport_code, cutoff)
+        await self._compute_transfer_activity(saved, sport_code, cutoff)
         await self._compute_news_market_impact(saved, sport_code, now)
         return saved, created
 
@@ -547,11 +564,13 @@ class EntityReconciliationService:
         await engine.compute_and_write(fixture_id, fixture.home_team_id, "home", now, kickoff=fixture.scheduled_at)
         await engine.compute_and_write(fixture_id, fixture.away_team_id, "away", now, kickoff=fixture.scheduled_at)
 
-    async def _compute_transfer_activity(self, fixture: Fixture, sport_code: str | None, now: datetime) -> None:
+    async def _compute_transfer_activity(self, fixture: Fixture, sport_code: str | None, as_of: datetime) -> None:
         """Milestone 7 — fixture-keyed home/away squad-churn signal, computed on every
         reconciliation exactly like `_compute_form_differential` above (same reasoning: pre-match
         squad state is what a prediction needs before kickoff, not just after). Silently skipped
-        for a sport with no calculator registered or when the caller didn't pass sport_code."""
+        for a sport with no calculator registered or when the caller didn't pass sport_code.
+        `as_of` is `reconcile_fixture`'s `feature_as_of` (or `now` when not backfilling) — the
+        real point-in-time cutoff, never assumed to be "the current moment"."""
         if sport_code is None:
             return
         calculators = self.transfer_activity_calculators.get(sport_code, ())
@@ -559,23 +578,25 @@ class EntityReconciliationService:
             return
         home_calculator, away_calculator = calculators
         fixture_id = str(fixture.id.value)
-        await home_calculator.compute_and_write(fixture_id, fixture.home_team_id, now)
-        await away_calculator.compute_and_write(fixture_id, fixture.away_team_id, now)
+        await home_calculator.compute_and_write(fixture_id, fixture.home_team_id, as_of)
+        await away_calculator.compute_and_write(fixture_id, fixture.away_team_id, as_of)
 
-    async def _compute_form_differential(self, fixture: Fixture, sport_code: str | None, now: datetime) -> None:
+    async def _compute_form_differential(self, fixture: Fixture, sport_code: str | None, as_of: datetime) -> None:
         """Fixture-keyed home-vs-away rolling form differential(s) — the real features
         `PredictionContextBuilder` can actually resolve for a match-level prediction request
         (audit fix 2026-08-02, see market_seeding.py's module docstring). Computed on every
         reconciliation, not gated behind COMPLETED, since pre-match team form is exactly what a
         prediction needs before kickoff. Silently skipped for a sport with no calculator
-        registered (only football has any today) or when the caller didn't pass sport_code."""
+        registered (only football has any today) or when the caller didn't pass sport_code.
+        `as_of` is `reconcile_fixture`'s `feature_as_of` (or `now` when not backfilling) — see
+        that method's leakage-fix comment for why this is never assumed to be `now` itself."""
         if sport_code is None:
             return
         calculators = self.form_differential_calculators.get(sport_code, ())
         for calculator in calculators:
-            await calculator.compute_and_write(str(fixture.id.value), fixture.home_team_id, fixture.away_team_id, now)
+            await calculator.compute_and_write(str(fixture.id.value), fixture.home_team_id, fixture.away_team_id, as_of)
 
-    async def _recompute_team_form(self, fixture: Fixture, sport_code: str | None, now: datetime) -> None:
+    async def _recompute_team_form(self, fixture: Fixture, sport_code: str | None, as_of: datetime) -> None:
         """Premier League data-enrichment audit (2026-08-22) — a team's own rolling last-N form
         average (`RollingTeamStatAverageCalculator`, `EntityType.TEAM`-keyed) previously had no
         recurring trigger anywhere in the system; it was only ever computed as a one-off during
@@ -584,13 +605,19 @@ class EntityReconciliationService:
         team's last-5/last-10 match list only actually changes once one of their matches
         finishes, so recomputing on every pre-match sync would just rewrite the same average.
         Silently skipped for a sport with no calculator registered or when the caller didn't
-        pass sport_code — same posture as every other calculator dispatch in this class."""
+        pass sport_code — same posture as every other calculator dispatch in this class.
+
+        Look-ahead leakage fix (2026-08-23): `as_of` here is `reconcile_fixture`'s
+        `team_form_cutoff`, not a raw `now`/`feature_as_of` — unlike the other two calculators
+        above, this one must include THIS just-completed fixture's own result (it's the team's
+        rolling average going forward, not a pre-match signal for this fixture), so the caller
+        adds a small post-kickoff buffer rather than passing the bare kickoff timestamp."""
         if sport_code is None:
             return
         calculators = self.team_form_calculators.get(sport_code, ())
         for calculator in calculators:
-            await calculator.compute_and_write(fixture.home_team_id, now)
-            await calculator.compute_and_write(fixture.away_team_id, now)
+            await calculator.compute_and_write(fixture.home_team_id, as_of)
+            await calculator.compute_and_write(fixture.away_team_id, as_of)
 
     async def _resolve_prediction_outcomes(self, fixture: Fixture, now: datetime) -> None:
         if self.outcome_resolver is None:

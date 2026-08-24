@@ -1283,6 +1283,43 @@ async def test_reconcile_fixture_computes_form_differential_when_sport_code_matc
 
 
 @pytest.mark.asyncio
+async def test_reconcile_fixture_form_differential_uses_feature_as_of_not_now(
+    service_with_form_differential, session,
+):
+    """Look-ahead leakage fix (2026-08-23): a historical backfill reconciles every fixture in a
+    season through one shared, far-future `now` — without `feature_as_of`, every fixture's
+    pre-match differential would be computed "as of" the backfill's run time instead of its own
+    real kickoff, letting it see every later fixture in the same file as if it were already-known
+    form. `feature_as_of` must reach the calculator instead of `now` when the caller supplies it."""
+    service, calculator = service_with_form_differential
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    competition, _ = await service.reconcile_competition("39", "mock_football", sport.id, T0)
+    season, _ = await service.reconcile_season("39", "2026", "mock_football", competition.id, T0)
+    await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+    await service.reconcile_team(_team_record("t2", "Chelsea"), sport.id, T0)
+    await session.commit()
+
+    kickoff = T0 - timedelta(days=200)  # this fixture's real, long-past kickoff
+    far_future_import_run = T0  # the backfill script's own shared wall-clock `now`
+    fixture_record = ProviderFixtureRecord(
+        external_ref=ProviderRef(provider="mock_football", external_id="fx-leakage"),
+        home_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        away_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
+        scheduled_at=kickoff, competition_ref="39", season_label="2026",
+    )
+    await service.reconcile_fixture(
+        fixture_record, season.id, far_future_import_run, sport_code="football", feature_as_of=kickoff,
+    )
+    await session.commit()
+
+    assert len(calculator.calls) == 1
+    _, _, _, cutoff = calculator.calls[0]
+    assert cutoff == kickoff
+    assert cutoff != far_future_import_run
+
+
+@pytest.mark.asyncio
 async def test_reconcile_fixture_computes_every_registered_calculator_for_a_sport(session):
     """2026-08-03: `form_differential_calculators` moved from one calculator per sport to a tuple,
     so football's newly-added possession/shots_total/corners/fouls/cards differentials all
@@ -1417,6 +1454,44 @@ async def test_reconcile_fixture_recomputes_team_form_for_both_teams_on_completi
     await session.commit()
 
     assert calculator.calls == [(home.id, T0), (away.id, T0)]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_fixture_team_form_includes_own_result_during_backfill(
+    service_with_team_form, session,
+):
+    """Look-ahead leakage fix (2026-08-23): unlike the pre-match differential/transfer-activity
+    calculators, a team's own rolling form must still include THIS just-completed fixture's
+    result once backfilled with `feature_as_of=kickoff` — passing the bare kickoff would wrongly
+    exclude it (`list_recent_by_team`'s `before=` is a strict `<`), so `reconcile_fixture` adds a
+    short post-kickoff buffer instead of the raw `feature_as_of`."""
+    service, calculator = service_with_team_form
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    competition, _ = await service.reconcile_competition("39", "mock_football", sport.id, T0)
+    season, _ = await service.reconcile_season("39", "2026", "mock_football", competition.id, T0)
+    home, _ = await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+    away, _ = await service.reconcile_team(_team_record("t2", "Chelsea"), sport.id, T0)
+    await session.commit()
+
+    kickoff = T0 - timedelta(days=200)
+    fixture_record = ProviderFixtureRecord(
+        external_ref=ProviderRef(provider="mock_football", external_id="fx-backfill-completed"),
+        home_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        away_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
+        scheduled_at=kickoff, competition_ref="39", season_label="2026",
+        status="FT", home_score=2, away_score=1,
+    )
+    await service.reconcile_fixture(
+        fixture_record, season.id, T0, sport_code="football", feature_as_of=kickoff,
+    )
+    await session.commit()
+
+    assert len(calculator.calls) == 2
+    for _, cutoff in calculator.calls:
+        assert cutoff > kickoff  # includes this fixture's own result...
+        assert cutoff < kickoff + timedelta(days=1)  # ...without reaching into the team's next one
+        assert cutoff != T0  # ...and never the backfill's unrelated far-future run time
 
 
 @pytest.mark.asyncio

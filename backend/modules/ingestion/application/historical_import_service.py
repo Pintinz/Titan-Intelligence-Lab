@@ -168,9 +168,16 @@ class HistoricalImportService:
                 season_label=record.season_label, status="FT" if has_score else "NS",
                 home_score=record.home_score, away_score=record.away_score,
             )
+            # Look-ahead leakage fix (2026-08-23 audit): `now` here is one shared import-run
+            # timestamp for the *entire* file, correct for bookkeeping (created_at, ref-index,
+            # timeline events) but never a valid feature cutoff for a specific historical fixture —
+            # without `feature_as_of`, every fixture in this file would compute pre-match form as
+            # if it already knew every later fixture's result too. Each fixture gets its own real
+            # kickoff as the cutoff instead.
             fixture, created = await self.reconciler.reconcile_fixture(
                 fixture_record, season.id, now, sport_code=sport_code.value,
                 match_by_teams_and_date=True, preserve_existing_score=True,
+                feature_as_of=record.scheduled_at,
             )
             if created:
                 report.fixtures_created += 1
