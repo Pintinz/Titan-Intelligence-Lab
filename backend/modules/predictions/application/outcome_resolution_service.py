@@ -650,4 +650,10 @@ class OutcomeResolutionService:
                     evaluated_at=outcome.evaluated_at if outcome else None,
                 )
             )
+        # Correct Score is the hardest market to call exactly right (an exact-scoreline grid, not a
+        # binary/three-way call) and is already excluded from the landing page's hero carousel for
+        # the same reason — sorted last here too so a match's higher-signal markets (Match Winner,
+        # BTTS, etc.) lead the actual-vs-predicted list. Display order only: still counted normally
+        # in the accuracy percentage above, never dropped or down-weighted.
+        rows.sort(key=lambda row: row.market_key.endswith(".correct_score"))
         return rows

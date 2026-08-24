@@ -964,3 +964,22 @@ class TestReviewForFixture:
         rows = await service.review_for_fixture("fx-1")
 
         assert rows == []
+
+    async def test_correct_score_sorts_last_regardless_of_prediction_order(
+        self, prediction_repo, market_repo, prediction_outcome_repo
+    ):
+        # Correct Score is the hardest market to call exactly right and is already excluded from
+        # the landing page's hero carousel for the same reason — the actual-vs-predicted list
+        # should lead with higher-signal markets, never let Correct Score sit first by accident of
+        # insertion order. Display order only: it's still a normal row, just sorted last.
+        correct_score_market = _market("football.correct_score", market_kind=MarketKind.CORRECT_SCORE)
+        winner_market = _market("football.match_winner")
+        await market_repo.upsert(correct_score_market)
+        await market_repo.upsert(winner_market)
+        await prediction_repo.record(_prediction(correct_score_market.id, value="1-1"))
+        await prediction_repo.record(_prediction(winner_market.id, value="HOME_WIN"))
+        service = OutcomeResolutionService(predictions=prediction_repo, markets=market_repo, outcomes=prediction_outcome_repo)
+
+        rows = await service.review_for_fixture("fx-1")
+
+        assert [row.market_key for row in rows] == ["football.match_winner", "football.correct_score"]
