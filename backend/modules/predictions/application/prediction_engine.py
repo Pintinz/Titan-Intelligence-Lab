@@ -147,6 +147,11 @@ class PredictionEngine:
         # other consumer already reads — but a REGRESSION market's frontend surface reads
         # `confidence_interval`/`expected_error` instead, never this value.
         calibrated_probability = await self.calibrator.calibrate(context.model.id, predictor_output.probability)
+        # Section 31 audit fix (2026-08-23): `calibrate()`'s identity pass-through for a
+        # never-fitted model is a legitimate return value, not an error — but the API must not
+        # then describe that raw pass-through as "calibrated probability" (spec: "Do not display
+        # calibrated probability unless the calibration pipeline has actually fitted parameters").
+        calibration_status = "calibrated" if await self.calibrator.is_fitted(context.model.id) else "uncalibrated"
         value, probability, probability_distribution, confidence_interval, expected_error = await self._shape_outcome(
             context, predictor_output, calibrated_probability
         )
@@ -187,6 +192,7 @@ class PredictionEngine:
             confidence_interval=confidence_interval,
             expected_error=expected_error,
             predictor_provenance=predictor_provenance,
+            calibration_status=calibration_status,
         )
 
     async def _shape_outcome(

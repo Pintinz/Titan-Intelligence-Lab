@@ -263,6 +263,13 @@ class Prediction:
     # `None` only for predictions generated before this field existed — never inferred after the
     # fact from `model_id` alone, since that's exactly the conflation this field exists to close.
     predictor_provenance: str | None = None
+    # Section 31 audit fix (2026-08-23): whether `self.probability` actually passed through a
+    # genuinely fitted `CalibratorPort.fit()` result, or the honest identity pass-through a
+    # never-fitted model returns. One of "calibrated" | "uncalibrated"; `None` only for predictions
+    # generated before this field existed. Same "never inferred after the fact" posture as
+    # `predictor_provenance` — the API must not call a raw pass-through "calibrated" just because
+    # a calibrator object was wired.
+    calibration_status: str | None = None
 
     def is_published(self) -> bool:
         return self.status is PredictionStatus.PUBLISHED

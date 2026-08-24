@@ -28,3 +28,11 @@ class CalibratorPort(Protocol):
         (raw_probability, actual_outcome) pair drawn from `PredictionOutcome` history. Called by
         `ModelRegistryService` whenever enough new outcomes have accumulated to re-calibrate."""
         ...
+
+    async def is_fitted(self, model_id: ModelId) -> bool:
+        """Whether `fit()` has ever actually produced real parameters for ``model_id`` — never
+        inferred from whether `calibrate()` has been called (its identity-mapping default for an
+        unfitted model is itself a valid return value, indistinguishable from a genuine fit unless
+        this is tracked separately). Lets a caller (Section 31 audit fix) refuse to present a
+        pass-through probability as "calibrated" when no calibration has actually happened yet."""
+        ...

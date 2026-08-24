@@ -576,6 +576,47 @@ async def test_generate_falls_back_to_registry_for_placeholder_champion_even_wit
 
 
 @pytest.mark.asyncio
+async def test_generate_reports_uncalibrated_when_the_model_has_never_been_fitted(
+    engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+):
+    """Section 31 audit fix (2026-08-23): `calibrate()`'s identity pass-through for a never-fitted
+    model must never be reported to the API as "calibrated" — every model starts unfitted, so a
+    freshly generated prediction must say so honestly rather than implying real calibration ran."""
+    market, champion = await _setup_production_market(
+        market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+        "football.uncalibrated_market",
+    )
+
+    prediction = await engine.generate(
+        market.market_key, EntityType.FIXTURE, "fixture-1", subject_ref="fixture-1", now=T0
+    )
+
+    assert prediction.model_id == champion.id
+    assert prediction.calibration_status == "uncalibrated"
+
+
+@pytest.mark.asyncio
+async def test_generate_reports_calibrated_once_the_model_has_actually_been_fitted(
+    engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+):
+    """The other half of the same fix: once `CalibratorPort.fit()` has genuinely run for this
+    model, a subsequent prediction must report the real "calibrated" status — this is not a
+    permanently-uncalibrated posture, just an honest one until a real fit has happened."""
+    market, champion = await _setup_production_market(
+        market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+        "football.calibrated_market",
+    )
+    await engine.calibrator.fit(champion.id, [(0.6, True), (0.4, False), (0.7, True), (0.3, False)])
+
+    prediction = await engine.generate(
+        market.market_key, EntityType.FIXTURE, "fixture-1", subject_ref="fixture-1", now=T0
+    )
+
+    assert prediction.model_id == champion.id
+    assert prediction.calibration_status == "calibrated"
+
+
+@pytest.mark.asyncio
 async def test_generate_falls_back_when_artifact_cannot_be_loaded(
     engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
     context_builder, predictors, confidence_engine_dep, explainability_engine, retrieval_service,

@@ -135,3 +135,62 @@ async def test_calibrate_falls_back_to_identity_when_repository_has_no_row(model
     calibrated = await calibrator.calibrate(model_id, 0.7)
 
     assert calibrated == pytest.approx(0.7, abs=1e-4)
+
+
+# --- Section 31 audit fix: is_fitted() must never be inferred from calibrate()'s own cache -----
+
+
+@pytest.mark.asyncio
+async def test_is_fitted_is_false_before_any_fit_in_memory(model_id):
+    calibrator = PlattScalingCalibrator()
+
+    assert await calibrator.is_fitted(model_id) is False
+
+
+@pytest.mark.asyncio
+async def test_is_fitted_stays_false_after_calibrate_caches_the_identity_default(model_id):
+    """The exact bug this fix closes: `calibrate()` caches SOMETHING into `_params` even for a
+    never-fitted model (the identity default), so `is_fitted` must not be derived from cache
+    presence alone — only `fit()` genuinely running should flip it."""
+    calibrator = PlattScalingCalibrator()
+
+    await calibrator.calibrate(model_id, 0.7)
+
+    assert await calibrator.is_fitted(model_id) is False
+
+
+@pytest.mark.asyncio
+async def test_is_fitted_is_true_in_memory_after_a_real_fit(model_id):
+    calibrator = PlattScalingCalibrator()
+
+    await calibrator.fit(model_id, [(0.9, True), (0.9, False)] * 25)
+
+    assert await calibrator.is_fitted(model_id) is True
+
+
+@pytest.mark.asyncio
+async def test_is_fitted_with_no_samples_stays_false(model_id):
+    """`fit([])` returns early without ever fitting anything — must not be reported as fitted."""
+    calibrator = PlattScalingCalibrator()
+
+    await calibrator.fit(model_id, [])
+
+    assert await calibrator.is_fitted(model_id) is False
+
+
+@pytest.mark.asyncio
+async def test_is_fitted_reads_through_repository_across_processes(model_id, sqlite_session):
+    fitting_instance = PlattScalingCalibrator(repository=SqlAlchemyCalibrationParametersRepository(session=sqlite_session))
+    await fitting_instance.fit(model_id, [(0.9, True), (0.9, False)] * 25)
+    await sqlite_session.commit()
+
+    serving_instance = PlattScalingCalibrator(repository=SqlAlchemyCalibrationParametersRepository(session=sqlite_session))
+
+    assert await serving_instance.is_fitted(model_id) is True
+
+
+@pytest.mark.asyncio
+async def test_is_fitted_false_with_repository_but_no_persisted_row(model_id, sqlite_session):
+    calibrator = PlattScalingCalibrator(repository=SqlAlchemyCalibrationParametersRepository(session=sqlite_session))
+
+    assert await calibrator.is_fitted(model_id) is False

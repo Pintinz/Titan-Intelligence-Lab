@@ -54,6 +54,12 @@ class PlattScalingCalibrator:
     iterations: int = 500
     repository: CalibrationParametersRepositoryPort | None = None
     _params: dict[ModelId, PlattParameters] = field(default_factory=dict)
+    # Section 31 audit fix (2026-08-23): tracks which models `fit()` has genuinely run gradient
+    # descent for in THIS process, for the `repository=None` fallback path only — `_params` alone
+    # can't answer "is_fitted" because `calibrate()`'s own cache-fill (below) caches the identity
+    # default on a miss too, making a never-fitted model indistinguishable from a fitted one by
+    # cache presence alone.
+    _fitted_model_ids: set[ModelId] = field(default_factory=set)
 
     async def calibrate(self, model_id: ModelId, raw_probability: float) -> float:
         params = self._params.get(model_id)
@@ -87,9 +93,15 @@ class PlattScalingCalibrator:
             b -= self.learning_rate * grad_b / n
 
         self._params[model_id] = PlattParameters(a=a, b=b)
+        self._fitted_model_ids.add(model_id)
         if self.repository is not None:
             await self.repository.upsert(
                 PlattCalibrationParameters(
                     model_id=model_id, a=a, b=b, sample_count=n, fitted_at=datetime.now(timezone.utc),
                 )
             )
+
+    async def is_fitted(self, model_id: ModelId) -> bool:
+        if self.repository is not None:
+            return await self.repository.get(model_id) is not None
+        return model_id in self._fitted_model_ids

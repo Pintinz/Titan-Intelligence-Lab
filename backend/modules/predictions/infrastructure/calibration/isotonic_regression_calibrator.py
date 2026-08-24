@@ -35,3 +35,6 @@ class IsotonicRegressionCalibrator:
         model = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
         model.fit(x, y)
         self._models[model_id] = model
+
+    async def is_fitted(self, model_id: ModelId) -> bool:
+        return model_id in self._models

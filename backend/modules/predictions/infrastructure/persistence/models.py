@@ -129,6 +129,10 @@ class PredictionModel(Base):
     # because rows from before this column existed have no recorded provenance (never inferred
     # after the fact — that's exactly the conflation this column exists to close).
     predictor_provenance: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # See modules.predictions.domain.entities.Prediction.calibration_status docstring — Section 31
+    # audit fix (2026-08-23): "calibrated" | "uncalibrated", nullable for the same
+    # before-this-column-existed reason as predictor_provenance above.
+    calibration_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class PredictionOutcomeModel(Base):

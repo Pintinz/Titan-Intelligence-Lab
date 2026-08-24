@@ -59,3 +59,6 @@ class TemperatureScalingCalibrator:
             temperature = max(temperature - self.learning_rate * dl_dt, _MIN_TEMPERATURE)
 
         self._temperatures[model_id] = temperature
+
+    async def is_fitted(self, model_id: ModelId) -> bool:
+        return model_id in self._temperatures

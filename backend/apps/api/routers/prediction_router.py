@@ -304,6 +304,13 @@ def _serialize_prediction(
             prediction.predictor_provenance, "UNKNOWN"
         ),
         "predictor_provenance": prediction.predictor_provenance,
+        # Section 31 audit fix (2026-08-23) — mirrors `champion_status`/`predictor_provenance`
+        # above: "INSUFFICIENT_PRODUCTION_DATA" (spec's own wording) rather than silently claiming
+        # a raw pass-through probability was calibrated. `None` status (predictions generated
+        # before this field existed) reports "UNKNOWN", same posture as `champion_status`.
+        "calibration_status": {"calibrated": "CALIBRATED", "uncalibrated": "INSUFFICIENT_PRODUCTION_DATA"}.get(
+            prediction.calibration_status, "UNKNOWN"
+        ),
         "explanation_status": "GENERATED" if explanation.ai_explanation else "UNAVAILABLE",
     }
 

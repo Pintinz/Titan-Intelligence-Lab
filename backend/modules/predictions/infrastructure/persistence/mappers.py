@@ -287,6 +287,7 @@ def prediction_to_domain(model: PredictionModel) -> Prediction:
         ),
         expected_error=model.expected_error,
         predictor_provenance=model.predictor_provenance,
+        calibration_status=model.calibration_status,
     )
 
 
@@ -310,6 +311,7 @@ def prediction_to_model(entity: Prediction, model: PredictionModel | None = None
     model.confidence_interval_high = entity.confidence_interval[1] if entity.confidence_interval else None
     model.expected_error = entity.expected_error
     model.predictor_provenance = entity.predictor_provenance
+    model.calibration_status = entity.calibration_status
     return model
 
 
