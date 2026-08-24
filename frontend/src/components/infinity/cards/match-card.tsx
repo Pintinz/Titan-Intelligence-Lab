@@ -1,9 +1,10 @@
 import { Link } from 'react-router-dom'
-import { Sparkles, MapPin, ChevronRight, Goal, Target, Flag, Crosshair, ShieldCheck, PieChart, RectangleVertical } from 'lucide-react'
+import { Sparkles, MapPin, ChevronRight, Goal, Target, Flag, Crosshair, ShieldCheck, PieChart, RectangleVertical, CircleCheck } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { DOMAIN_COLOR_VAR, type DomainKey } from '../primitives/badge'
 import { InfinityFollowButton } from '../primitives/follow-button'
 import { buildMatchSnapshot, type SnapshotStatChip } from '@/lib/match-snapshot'
+import type { FixtureReviewMetaDto } from '@/lib/api/types'
 
 const STAT_ICONS: Record<SnapshotStatChip['key'], typeof Goal> = {
   goals: Goal,
@@ -41,6 +42,11 @@ export interface MatchCardProps {
   stats?: { home?: MatchStatSide | null; away?: MatchStatSide | null } | null
   /** Whether TitanIQ has a market ready for this fixture — shows the AI badge when true. */
   aiAvailable?: boolean
+  /** Real actual-vs-predicted accuracy for a completed match, from `predictionsApi.review()`'s
+   * own `meta` — never a second, client-computed accuracy number. Omit (or leave `market_count`
+   * 0) to render no accuracy badge at all; `resolved_count` 0 with real predictions on file
+   * renders an honest "Awaiting resolution" instead of a fabricated accuracy figure. */
+  accuracy?: FixtureReviewMetaDto | null
   /** Omit both to render without a follow toggle (e.g. the design showcase). */
   following?: boolean
   onToggleFollow?: () => void
@@ -73,6 +79,7 @@ export function InfinityMatchCard({
   awayLogoUrl,
   stats,
   aiAvailable,
+  accuracy,
   following,
   onToggleFollow,
   href,
@@ -169,6 +176,16 @@ export function InfinityMatchCard({
         </>
       )}
 
+      {accuracy && accuracy.market_count > 0 && (
+        <div className="relative z-10 border-t border-infinity-border-hairline pt-2.5">
+          {accuracy.resolved_count > 0 ? (
+            <AccuracyBadge correct={accuracy.correct_count} resolved={accuracy.resolved_count} />
+          ) : (
+            <span className="font-infinity-mono text-[10px] text-infinity-text-muted">Awaiting resolution</span>
+          )}
+        </div>
+      )}
+
       {(venue || aiAvailable) && (
         <div className="relative z-10 flex items-center justify-between gap-2 border-t border-infinity-border-hairline pt-2.5">
           <span className="flex min-w-0 items-center gap-1 truncate font-infinity-mono text-[10px] text-infinity-text-muted">
@@ -254,6 +271,28 @@ function toMatchStats(side?: MatchStatSide | null): Record<string, number> | und
     if (typeof value === 'number') out[key] = value
   }
   return out
+}
+
+/** Tone reflects the real ratio, never a flat "green means AI" badge — a 1/5 result reads as
+ * amber/muted, not a false positive-looking green checkmark. Thresholds match the confidence
+ * band language used elsewhere in the product (high/moderate/low), not an arbitrary split. */
+function AccuracyBadge({ correct, resolved }: { correct: number; resolved: number }) {
+  const ratio = correct / resolved
+  const tone = ratio >= 0.6 ? 'success' : ratio >= 0.4 ? 'warning' : 'danger'
+  const Icon = tone === 'success' ? CircleCheck : undefined
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 rounded-infinity-full border px-2 py-0.5 font-infinity-body text-[11px] font-semibold"
+      style={{
+        color: `var(--infinity-${tone})`,
+        borderColor: `var(--infinity-${tone})40`,
+        backgroundColor: `var(--infinity-${tone})14`,
+      }}
+    >
+      {Icon && <Icon className="size-3" aria-hidden="true" />}
+      {correct}/{resolved} predictions correct
+    </span>
+  )
 }
 
 function StatChip({ stat, tone }: { stat: SnapshotStatChip; tone: string }) {

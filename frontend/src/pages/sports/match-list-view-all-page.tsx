@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQueries, useQuery } from '@tanstack/react-query'
 import { ArrowLeft, CalendarX, Star } from 'lucide-react'
 import { sportsApi, type FixtureQueryOpts } from '@/lib/api/sports'
+import { predictionsApi } from '@/lib/api/predictions'
 import { useSportParam } from '@/lib/hooks/use-sport'
 import { useWatchlist } from '@/lib/hooks/use-watchlist'
 import { fixtureCardStatus, fixtureScores } from '@/lib/sports-status'
@@ -89,15 +90,38 @@ export default function MatchListViewAllPage({ scope }: { scope: MatchesScope })
 
   const seasons = seasonsQuery.data ?? []
 
-  if (!sport) return null
-
-  const domain = sport.slug as Extract<DomainKey, 'football' | 'basketball' | 'baseball' | 'table-tennis'>
-  const meta = SCOPE_META[scope]
-
   const items = (query.data?.items ?? []).filter(
     (f) => !followingOnly || watchlist.isFollowing('fixture', f.id),
   )
   const hasMore = (query.data?.hasMore ?? false) && !followingOnly
+
+  // Real actual-vs-predicted accuracy per completed fixture, bounded to the currently-loaded page
+  // (same accepted per-page fan-out pattern discovery-section.tsx already uses for match
+  // statistics) — never a second, client-computed accuracy figure, always the same
+  // `predictionsApi.review()` meta the Match Review page itself reads.
+  const reviewQueries = useQueries({
+    queries:
+      scope === 'completed'
+        ? items.map((fixture) => ({
+            queryKey: ['predictions', 'review', fixture.id],
+            queryFn: () => predictionsApi.review(fixture.id),
+            staleTime: 5 * 60 * 1000,
+          }))
+        : [],
+  })
+  const loadedReviews = reviewQueries.filter((q) => q.data).map((q) => q.data!)
+  const pageAccuracy =
+    scope === 'completed' && loadedReviews.length > 0
+      ? {
+          resolved: loadedReviews.reduce((sum, r) => sum + r.meta.resolved_count, 0),
+          correct: loadedReviews.reduce((sum, r) => sum + r.meta.correct_count, 0),
+        }
+      : null
+
+  if (!sport) return null
+
+  const domain = sport.slug as Extract<DomainKey, 'football' | 'basketball' | 'baseball' | 'table-tennis'>
+  const meta = SCOPE_META[scope]
 
   return (
     <div className="space-y-6">
@@ -195,10 +219,19 @@ export default function MatchListViewAllPage({ scope }: { scope: MatchesScope })
         />
       )}
 
+      {scope === 'completed' && pageAccuracy && pageAccuracy.resolved > 0 && (
+        <p className="font-infinity-mono text-[11px] text-infinity-text-muted">
+          Across the {loadedReviews.length} loaded match{loadedReviews.length === 1 ? '' : 'es'} with resolved predictions:{' '}
+          <span className="font-semibold text-infinity-text-secondary">
+            {pageAccuracy.correct}/{pageAccuracy.resolved} correct ({Math.round((pageAccuracy.correct / pageAccuracy.resolved) * 100)}%)
+          </span>
+        </p>
+      )}
+
       {items.length > 0 && (
         <>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {items.map((fixture) => {
+            {items.map((fixture, i) => {
               const { homeScore, awayScore } = fixtureScores(fixture.final_state)
               const status = fixtureCardStatus(fixture.status)
               return (
@@ -217,6 +250,7 @@ export default function MatchListViewAllPage({ scope }: { scope: MatchesScope })
                   homeLogoUrl={fixture.home_team.logo_url}
                   awayLogoUrl={fixture.away_team.logo_url}
                   stats={fixture.stats}
+                  accuracy={scope === 'completed' ? reviewQueries[i]?.data?.meta : undefined}
                   following={watchlist.isFollowing('fixture', fixture.id)}
                   onToggleFollow={() => watchlist.toggle('fixture', fixture.id)}
                   href={status === 'completed' ? `/app/${sport.slug}/matches/${fixture.id}/review` : `/app/${sport.slug}/matches/${fixture.id}`}
