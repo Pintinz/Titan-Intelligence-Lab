@@ -1058,6 +1058,7 @@ export interface PublicFeaturedIntelligenceDto {
   market_key: string
   value: string | number
   probability: number
+  probability_distribution: Record<string, number>
   confidence_composite: number
   evidence_highlights: { supporting: string[]; contradicting: string[] }
   generated_at: string | null

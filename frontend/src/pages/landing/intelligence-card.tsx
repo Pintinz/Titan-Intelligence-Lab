@@ -17,13 +17,15 @@ import type { PublicFeaturedIntelligenceDto } from '@/lib/api/types'
  * its calibrated confidence, the market, the fixture's kickoff, up to a few real SHAP-derived
  * evidence factors (direction only), and the timestamp the inference actually ran.
  *
- * Data gaps, disclosed rather than papered over: this public endpoint has no per-outcome
- * distribution (Home/Draw/Away as three real numbers) — only the single predicted-outcome
- * probability — so the "distribution" visual below is a two-way honest split (this outcome vs.
- * everything else, which is a mathematical certainty from the one real number, not an invented
- * breakdown) rather than a fabricated three-way curve. There's also no model-provenance field
- * (algorithm/champion status) on this endpoint, so the card never claims one — it shows the real
- * market name instead of a guessed or hardcoded "Champion" badge.
+ * `probability_distribution` carries the model's real calibrated distribution when the market has
+ * one (every HOME_DRAW_AWAY-kind market — Match Winner, First/Second Half Winner, etc. — keyed
+ * `HOME_WIN`/`DRAW`/`AWAY_WIN`); the hero renders that as a real three-way Home/Draw/Away
+ * breakdown. For markets with no such shape (BTTS, Over/Under, ...) — or an older prediction row
+ * from before this field existed, where the dict is empty — `ProbabilityBand` falls back to the
+ * honest two-way split (this outcome vs. everything else, a mathematical certainty from the one
+ * real `probability` number) rather than inventing a three-way curve that isn't there. There's
+ * also no model-provenance field (algorithm/champion status) on this endpoint, so the card never
+ * claims one — it shows the real market name instead of a guessed or hardcoded "Champion" badge.
  */
 
 const SPACE_GROTESK = '"Space Grotesk", "Inter", system-ui, sans-serif'
@@ -108,17 +110,19 @@ function useCountUp(target: number, durationMs = 700): number {
 
 export function TeamCrest({
   team,
-  align = 'center',
   size = 'md',
 }: {
   team: TeamRef
-  align?: 'center' | 'start' | 'end'
   /** 'md' (44px) is the compact-card size; 'lg' (68px) is for the hero, which has enough
    * vertical headroom around the crest row to absorb a bigger mark without growing the card. */
   size?: 'md' | 'lg'
 }) {
   return (
-    <div className={cn('flex min-w-0 flex-1 flex-col items-center gap-2', align === 'start' && 'items-start', align === 'end' && 'items-end')}>
+    // Always centered, never edge-aligned: the crest must sit in the horizontal middle of its own
+    // team name regardless of how each name's truncated width compares to the crest's fixed size —
+    // edge-aligning them (as this used to via an `align` prop) visibly drifts the crest off-center
+    // whenever the name is narrower or wider than the crest.
+    <div className="flex min-w-0 flex-1 flex-col items-center gap-2">
       <span
         className={cn(
           'relative flex shrink-0 items-center justify-center overflow-hidden rounded-full border border-[var(--li-border)] bg-[var(--li-surface-elevated)]',
@@ -220,6 +224,57 @@ function ProbabilityBand({ predictedPct, predictedLabel }: { predictedPct: numbe
   )
 }
 
+/** The real three-way visual, shown only when `probability_distribution` actually carries all
+ * three `HOME_WIN`/`DRAW`/`AWAY_WIN` keys — every number here is the model's own calibrated
+ * distribution, never derived or invented. Whichever outcome leads gets the larger, brand-colored
+ * treatment; the other two stay small and muted, so the visual hierarchy always matches reality. */
+function HomeDrawAwayBreakdown({
+  homeLabel,
+  awayLabel,
+  homePct,
+  drawPct,
+  awayPct,
+}: {
+  homeLabel: string
+  awayLabel: string
+  homePct: number
+  drawPct: number
+  awayPct: number
+}) {
+  const entries = [
+    { key: 'home', label: homeLabel, pct: homePct },
+    { key: 'draw', label: 'Draw', pct: drawPct },
+    { key: 'away', label: awayLabel, pct: awayPct },
+  ]
+  const leaderPct = Math.max(homePct, drawPct, awayPct)
+
+  return (
+    <div className="mt-3 grid grid-cols-3 gap-2">
+      {entries.map((e) => {
+        const isLeading = e.pct === leaderPct
+        return (
+          <div key={e.key} className="flex min-w-0 flex-col items-center gap-1 text-center">
+            <p
+              className={cn('font-bold tabular-nums', isLeading ? 'text-3xl text-[var(--li-cyan)]' : 'text-lg text-[var(--li-text-muted)]')}
+              style={{ fontFamily: SPACE_GROTESK }}
+            >
+              {e.pct}%
+            </p>
+            <p
+              className={cn(
+                'max-w-full truncate text-[11px] font-medium uppercase tracking-wide',
+                isLeading ? 'text-[var(--li-cyan)]' : 'text-[var(--li-text-muted)]',
+              )}
+            >
+              {e.label}
+            </p>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 function FooterStat({
   label,
   value,
@@ -266,6 +321,9 @@ export function HeroIntelligenceReport({ pick }: { pick: PublicFeaturedIntellige
   const isStale = staleHours !== null && staleHours >= STALE_THRESHOLD_HOURS
   const lastComputedAbsolute = formatLastComputedAbsolute(pick.generated_at)
   const sportSlug = SPORT_SLUGS.find((s) => s.code === pick.sport_code)?.slug ?? pick.sport_code
+  const distribution = pick.probability_distribution
+  const hasHomeDrawAway =
+    distribution.HOME_WIN !== undefined && distribution.DRAW !== undefined && distribution.AWAY_WIN !== undefined
 
   return (
     <div>
@@ -296,32 +354,57 @@ export function HeroIntelligenceReport({ pick }: { pick: PublicFeaturedIntellige
       </div>
 
       <div
-        className="mt-5 flex items-center justify-center gap-4 motion-safe:animate-[li-rise_var(--motion-duration-slow,420ms)_ease-out]"
+        // Same grid-cols-3 as HomeDrawAwayBreakdown below, deliberately — a flex row here and a
+        // grid row there give each side its own, different column math (flex-1 vs. equal thirds),
+        // so the crest/name landed in a different horizontal spot than its own percentage below
+        // it. Sharing one column template keeps every column's center identical between rows.
+        className="mt-5 grid grid-cols-3 items-center gap-2 motion-safe:animate-[li-rise_var(--motion-duration-slow,420ms)_ease-out]"
         style={{ animationDelay: '90ms', animationFillMode: 'backwards' }}
       >
-        <TeamCrest team={homeTeam} align="end" size="lg" />
-        <span className="shrink-0 font-mono text-xs font-medium text-[var(--li-text-muted)]">VS</span>
-        <TeamCrest team={awayTeam} align="start" size="lg" />
+        <TeamCrest team={homeTeam} size="lg" />
+        <div className="flex justify-center">
+          <span className="shrink-0 rounded-full border border-[var(--li-border)] bg-[var(--li-surface)] px-2.5 py-1 font-mono text-[10px] font-medium text-[var(--li-text-muted)]">
+            VS
+          </span>
+        </div>
+        <TeamCrest team={awayTeam} size="lg" />
       </div>
 
-      <div
-        className="mt-6 text-center motion-safe:animate-[li-rise_var(--motion-duration-slow,420ms)_ease-out]"
-        style={{ animationDelay: '150ms', animationFillMode: 'backwards' }}
-      >
-        <p className="text-5xl font-bold tabular-nums text-[var(--li-cyan)]" style={{ fontFamily: SPACE_GROTESK }}>
-          {probabilityPct}%
-        </p>
-        <p className="mt-1 text-sm font-semibold uppercase tracking-wide text-[var(--li-cyan)]" style={{ fontFamily: SPACE_GROTESK }}>
-          {valueLabel}
-        </p>
-      </div>
+      {hasHomeDrawAway ? (
+        <div
+          className="motion-safe:animate-[li-rise_var(--motion-duration-slow,420ms)_ease-out]"
+          style={{ animationDelay: '150ms', animationFillMode: 'backwards' }}
+        >
+          <HomeDrawAwayBreakdown
+            homeLabel={homeTeam.name}
+            awayLabel={awayTeam.name}
+            homePct={Math.round(distribution.HOME_WIN * 100)}
+            drawPct={Math.round(distribution.DRAW * 100)}
+            awayPct={Math.round(distribution.AWAY_WIN * 100)}
+          />
+        </div>
+      ) : (
+        <>
+          <div
+            className="mt-6 text-center motion-safe:animate-[li-rise_var(--motion-duration-slow,420ms)_ease-out]"
+            style={{ animationDelay: '150ms', animationFillMode: 'backwards' }}
+          >
+            <p className="text-5xl font-bold tabular-nums text-[var(--li-cyan)]" style={{ fontFamily: SPACE_GROTESK }}>
+              {probabilityPct}%
+            </p>
+            <p className="mt-1 text-sm font-semibold uppercase tracking-wide text-[var(--li-cyan)]" style={{ fontFamily: SPACE_GROTESK }}>
+              {valueLabel}
+            </p>
+          </div>
 
-      <div
-        className="motion-safe:animate-[li-rise_var(--motion-duration-slow,420ms)_ease-out]"
-        style={{ animationDelay: '220ms', animationFillMode: 'backwards' }}
-      >
-        <ProbabilityBand predictedPct={probabilityPct} predictedLabel={valueLabel} />
-      </div>
+          <div
+            className="motion-safe:animate-[li-rise_var(--motion-duration-slow,420ms)_ease-out]"
+            style={{ animationDelay: '220ms', animationFillMode: 'backwards' }}
+          >
+            <ProbabilityBand predictedPct={probabilityPct} predictedLabel={valueLabel} />
+          </div>
+        </>
+      )}
 
       {supporting.length > 0 && (
         <p
@@ -381,13 +464,13 @@ export function CompactIntelligenceReport({ pick }: { pick: PublicFeaturedIntell
       </div>
 
       <div className="mt-4 flex items-center justify-center gap-3">
-        <TeamCrest team={homeTeam} align="end" />
+        <TeamCrest team={homeTeam} />
         <div className="shrink-0 text-center">
           <p className="text-2xl font-bold tabular-nums text-[var(--li-cyan)]" style={{ fontFamily: SPACE_GROTESK }}>
             {probabilityPct}%
           </p>
         </div>
-        <TeamCrest team={awayTeam} align="start" />
+        <TeamCrest team={awayTeam} />
       </div>
       <p className="mt-1 text-center text-xs font-semibold uppercase tracking-wide text-[var(--li-cyan)]" style={{ fontFamily: SPACE_GROTESK }}>
         {valueLabel}

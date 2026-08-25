@@ -310,6 +310,7 @@ async def featured_intelligence(limit: int = Query(default=3, ge=1, le=6), sessi
                 "market_key": market.market_key,
                 "value": prediction.value,
                 "probability": prediction.probability,
+                "probability_distribution": dict(prediction.probability_distribution or {}),
                 "confidence_composite": prediction.confidence.composite,
                 "evidence_highlights": {
                     "supporting": [name for name, _weight in prediction.explanation.top_positive_features[:2]],

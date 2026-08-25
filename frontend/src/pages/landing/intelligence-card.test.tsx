@@ -29,6 +29,7 @@ function pick(overrides: Partial<PublicFeaturedIntelligenceDto> = {}): PublicFea
     market_key: 'football.match_winner',
     value: 'HOME_WIN',
     probability: 0.43,
+    probability_distribution: {},
     confidence_composite: 0.6,
     evidence_highlights: { supporting: ['football.form_fouls_diff_last5'], contradicting: [] },
     generated_at: new Date().toISOString(),
@@ -62,6 +63,19 @@ describe('HeroIntelligenceReport', () => {
     expect(screen.getByText(/Hull City AFC · 43%/)).toBeInTheDocument()
     expect(screen.getByText(/Other outcomes · 57%/)).toBeInTheDocument()
     expect(screen.queryByText(/draw/i)).not.toBeInTheDocument()
+  })
+
+  it('shows a real three-way Home/Draw/Away breakdown when the backend provides one', () => {
+    renderHero(
+      pick({
+        probability_distribution: { HOME_WIN: 0.43, DRAW: 0.31, AWAY_WIN: 0.26 },
+      }),
+    )
+    expect(screen.getByText('31%')).toBeInTheDocument()
+    expect(screen.getByText('26%')).toBeInTheDocument()
+    expect(screen.getByText('Draw')).toBeInTheDocument()
+    // The two-way fallback text must not also render alongside the real breakdown.
+    expect(screen.queryByText(/Other outcomes/)).not.toBeInTheDocument()
   })
 
   it('displays confidence separately from probability', () => {

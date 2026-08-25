@@ -36,18 +36,18 @@ export function HeroSection({ loading, pick }: { loading: boolean; pick: PublicF
         aria-hidden="true"
       />
 
-      <div className="relative mx-auto grid max-w-7xl gap-14 px-6 py-16 lg:grid-cols-[0.95fr_1.2fr] lg:px-10 lg:py-20">
+      <div className="relative mx-auto grid max-w-7xl gap-10 px-6 pb-8 pt-8 sm:pb-12 sm:pt-12 lg:grid-cols-[0.95fr_1.2fr] lg:gap-14 lg:px-10 lg:pb-20 lg:pt-10">
         <div>
           <p className="inline-flex items-center gap-2 rounded-full border border-[var(--li-border)] bg-[var(--li-surface)] px-3 py-1 font-mono text-[11px] uppercase tracking-[0.1em] text-[var(--li-text-secondary)]">
             <span className="size-1.5 rounded-full bg-[var(--li-cyan)]" aria-hidden="true" />
             AI Prediction Intelligence
           </p>
 
-          <h1 className="mt-6 max-w-xl text-4xl font-bold leading-[1.1] tracking-tight text-[var(--li-text-primary)] lg:text-5xl">
+          <h1 className="mt-5 max-w-xl text-3xl font-bold leading-[1.15] tracking-tight text-[var(--li-text-primary)] sm:text-4xl lg:text-5xl lg:leading-[1.1]">
             Understand the prediction, <span className="text-[var(--li-cyan)]">not just</span> the prediction.
           </h1>
 
-          <p className="mt-6 max-w-lg text-base leading-relaxed text-[var(--li-text-secondary)] lg:text-lg">
+          <p className="mt-4 max-w-lg text-sm leading-relaxed text-[var(--li-text-secondary)] sm:text-base lg:mt-6 lg:text-lg">
             TitanIQ combines historical data, statistical models, machine learning, and verified
             context into one auditable prediction workflow.
           </p>
@@ -71,7 +71,7 @@ export function HeroSection({ loading, pick }: { loading: boolean; pick: PublicF
             <Button
               asChild
               size="lg"
-              className="group relative overflow-hidden rounded-[10px] bg-[var(--li-cyan)] text-[var(--li-text-inverse)] shadow-[var(--li-glow-cyan-sm)] transition-[transform,box-shadow] duration-200 hover:-translate-y-0.5 hover:bg-[var(--li-cyan-hover)] hover:shadow-[var(--li-glow-cyan)] active:translate-y-0"
+              className="group relative h-9 overflow-hidden rounded-[10px] bg-[var(--li-cyan)] px-4 text-sm text-[var(--li-text-inverse)] shadow-[var(--li-glow-cyan-sm)] transition-[transform,box-shadow] duration-200 hover:-translate-y-0.5 hover:bg-[var(--li-cyan-hover)] hover:shadow-[var(--li-glow-cyan)] active:translate-y-0 sm:h-11 sm:px-6 sm:text-base"
             >
               <a href="#proof-of-mechanism">
                 <span
@@ -85,7 +85,7 @@ export function HeroSection({ loading, pick }: { loading: boolean; pick: PublicF
               asChild
               variant="secondary"
               size="lg"
-              className="rounded-[10px] border-[var(--li-border)] bg-[var(--li-surface)] text-[var(--li-text-primary)] transition-colors duration-200 hover:border-[var(--li-border-strong)] hover:bg-[var(--li-surface-elevated)]"
+              className="h-9 rounded-[10px] border-[var(--li-border)] bg-[var(--li-surface)] px-4 text-sm text-[var(--li-text-primary)] transition-colors duration-200 hover:border-[var(--li-border-strong)] hover:bg-[var(--li-surface-elevated)] sm:h-11 sm:px-6 sm:text-base"
             >
               <a href="#how-it-works">
                 <PlayCircle className="size-4" aria-hidden="true" />
