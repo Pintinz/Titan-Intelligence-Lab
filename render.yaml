@@ -55,7 +55,13 @@ services:
     runtime: docker
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
-    dockerCommand: celery -A apps.worker.bootstrap worker --loglevel=info
+    # --pool=solo: Render's starter-plan memory ceiling OOM-killed the default prefork pool in
+    # production (each forked child duplicates the parent's already-loaded sklearn/shap/xgboost
+    # import weight) — solo runs every task in the single worker process instead, the fix already
+    # applied live in the Render dashboard. Encoded here too so a future Blueprint re-sync (Render
+    # can overwrite a dashboard-only Start Command override with whatever this file says) doesn't
+    # silently revert it and reintroduce the crash.
+    dockerCommand: celery -A apps.worker.bootstrap worker --loglevel=info --pool=solo
     plan: starter
     envVars:
       - key: TITANIQ_DB_URL
@@ -77,7 +83,12 @@ services:
     runtime: docker
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
-    dockerCommand: celery -A apps.worker.bootstrap beat --loglevel=info
+    # --schedule/--pidfile: Beat's default schedule file lands in the container's working
+    # directory, which isn't guaranteed writable under Render's runtime user — a real production
+    # crash already hit and fixed live in the Render dashboard by relocating both to /tmp (always
+    # writable). Encoded here too, same "don't let a Blueprint re-sync silently revert a
+    # dashboard-only fix" reasoning as titaniq-worker's --pool=solo above.
+    dockerCommand: celery -A apps.worker.bootstrap beat --loglevel=info --schedule=/tmp/celerybeat-schedule --pidfile=/tmp/celerybeat.pid
     plan: starter
     envVars:
       - key: TITANIQ_DB_URL
