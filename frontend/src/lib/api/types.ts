@@ -1054,6 +1054,13 @@ export interface PublicFeaturedIntelligenceDto {
   away_team: { name: string; short_name: string; logo_url: string | null } | null
   scheduled_at: string
   status: string
+  home_score: number | null
+  away_score: number | null
+  /** Only set once the fixture is `completed` AND `OutcomeResolutionService` has resolved this
+   * specific prediction — `null` for an upcoming/live fixture, and also `null` for a completed
+   * one whose outcome hasn't been resolved yet (never inferred client-side). `is_correct` is
+   * `null` for a REGRESSION market (no 0/1 "correct" concept for a continuous prediction). */
+  outcome: { actual_value: string; is_correct: boolean | null } | null
   market_name: string
   market_key: string
   value: string | number

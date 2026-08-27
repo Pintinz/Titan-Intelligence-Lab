@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { CircleCheck, CircleX, CircleHelp } from 'lucide-react'
 import { confidenceTier, type ConfidenceTier } from '@/components/domain/confidence-telemetry'
 import { LiveDot } from '@/components/ui/live-dot'
 import { humanizeFactorKey, type TeamRef } from '@/components/infinity/evidence-explorer'
@@ -59,10 +60,9 @@ function tierPillClass(tier: ConfidenceTier) {
 
 function formatKickoffShort(iso: string) {
   const date = new Date(iso)
-  const today = new Date()
-  const isToday = date.toDateString() === today.toDateString()
+  const weekdayAndDate = date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
   const time = date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
-  return isToday ? `Today · ${time}` : `${date.toLocaleDateString(undefined, { weekday: 'short' })} · ${time}`
+  return `${weekdayAndDate} · ${time}`
 }
 
 function hoursSince(iso: string | null): number | null {
@@ -224,6 +224,56 @@ function ProbabilityBand({ predictedPct, predictedLabel }: { predictedPct: numbe
   )
 }
 
+/** A completed fixture's real predicted-vs-actual comparison — never a fabricated verdict.
+ * `outcome` is `null` whenever `OutcomeResolutionService` hasn't resolved this specific
+ * prediction yet (e.g. its market has no resolver), in which case this honestly says so instead
+ * of guessing "correct" from the raw score alone. `is_correct` itself is `null` (not shown as
+ * either verdict) for a REGRESSION market, which has no 0/1 "correct" concept. */
+function ResultVerdict({
+  predictedLabel,
+  predictedPct,
+  outcome,
+}: {
+  predictedLabel: string
+  predictedPct: number
+  outcome: PublicFeaturedIntelligenceDto['outcome']
+}) {
+  const verdict = outcome?.is_correct ?? null
+  return (
+    <div className="mt-6 rounded-[var(--li-radius-md)] border border-[var(--li-border)] bg-[var(--li-surface)] p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-[var(--li-text-muted)]">Predicted</p>
+          <p className="mt-0.5 truncate text-lg font-bold text-[var(--li-cyan)]" style={{ fontFamily: SPACE_GROTESK }}>
+            {predictedLabel} · {predictedPct}%
+          </p>
+        </div>
+        {verdict === true && (
+          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-[var(--li-positive)]/30 bg-[var(--li-positive)]/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-[var(--li-positive)]">
+            <CircleCheck className="size-3.5" aria-hidden="true" /> Correct
+          </span>
+        )}
+        {verdict === false && (
+          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-[var(--li-warning)]/30 bg-[var(--li-warning)]/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-[var(--li-warning)]">
+            <CircleX className="size-3.5" aria-hidden="true" /> Missed
+          </span>
+        )}
+        {verdict === null && (
+          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-[var(--li-border-strong)] bg-[var(--li-surface-elevated)] px-2.5 py-1 text-[11px] font-medium uppercase tracking-wide text-[var(--li-text-muted)]">
+            <CircleHelp className="size-3.5" aria-hidden="true" /> {outcome ? 'Unscored' : 'Verifying'}
+          </span>
+        )}
+      </div>
+      <div className="mt-3 border-t border-[var(--li-border)] pt-3">
+        <p className="text-[10px] font-semibold uppercase tracking-wider text-[var(--li-text-muted)]">Actual result</p>
+        <p className="mt-0.5 text-sm font-medium text-[var(--li-text-primary)]">
+          {outcome ? outcome.actual_value : 'Awaiting verified outcome'}
+        </p>
+      </div>
+    </div>
+  )
+}
+
 /** The real three-way visual, shown only when `probability_distribution` actually carries all
  * three `HOME_WIN`/`DRAW`/`AWAY_WIN` keys — every number here is the model's own calibrated
  * distribution, never derived or invented. Whichever outcome leads gets the larger, brand-colored
@@ -348,6 +398,10 @@ export function HeroIntelligenceReport({ pick }: { pick: PublicFeaturedIntellige
           <span className="inline-flex shrink-0 items-center gap-1.5 text-[11px] font-medium text-[var(--li-risk)]">
             <LiveDot /> Live
           </span>
+        ) : pick.status === 'completed' ? (
+          <span className="shrink-0 font-mono text-xs font-semibold text-[var(--li-text-secondary)]">
+            FINAL{pick.home_score !== null && pick.away_score !== null ? ` · ${pick.home_score}–${pick.away_score}` : ''}
+          </span>
         ) : (
           <span className="shrink-0 font-mono text-xs text-[var(--li-text-muted)]">{formatKickoffShort(pick.scheduled_at)}</span>
         )}
@@ -458,6 +512,10 @@ export function CompactIntelligenceReport({ pick }: { pick: PublicFeaturedIntell
           <span className="inline-flex shrink-0 items-center gap-1.5 text-[11px] font-medium text-[var(--li-risk)]">
             <LiveDot /> Live
           </span>
+        ) : pick.status === 'completed' ? (
+          <span className="shrink-0 font-mono text-[10px] font-semibold text-[var(--li-text-secondary)]">
+            FINAL{pick.home_score !== null && pick.away_score !== null ? ` · ${pick.home_score}–${pick.away_score}` : ''}
+          </span>
         ) : (
           <span className="shrink-0 font-mono text-[10px] text-[var(--li-text-muted)]">{formatKickoffShort(pick.scheduled_at)}</span>
         )}
@@ -472,9 +530,11 @@ export function CompactIntelligenceReport({ pick }: { pick: PublicFeaturedIntell
         </div>
         <TeamCrest team={awayTeam} />
       </div>
-      <p className="mt-1 text-center text-xs font-semibold uppercase tracking-wide text-[var(--li-cyan)]" style={{ fontFamily: SPACE_GROTESK }}>
-        {valueLabel}
-      </p>
+      <div className="mt-1 flex items-center justify-center gap-1.5">
+        <p className="truncate text-center text-xs font-semibold uppercase tracking-wide text-[var(--li-cyan)]" style={{ fontFamily: SPACE_GROTESK }}>
+          {valueLabel}
+        </p>
+      </div>
 
       <div className="mt-4 grid grid-cols-3 gap-2 border-t border-[var(--li-border)] pt-3 text-center">
         <div>
@@ -492,6 +552,44 @@ export function CompactIntelligenceReport({ pick }: { pick: PublicFeaturedIntell
           </p>
         </div>
       </div>
+    </>
+  )
+}
+
+/** The "Verified Intelligence" section's card — a completed, resolved match's predicted-vs-actual
+ * comparison. Distinct from `CompactIntelligenceReport` (which is exclusively forecast-mode now):
+ * this component only ever renders for a pick whose fixture is completed and whose outcome has
+ * actually resolved (the section itself only fetches picks meeting that bar), so it always has a
+ * real verdict to show — never the "Verifying"/"Awaiting" states `ResultVerdict` also handles for
+ * the hero's own (rare) completed-fallback case. */
+export function VerifiedIntelligenceReport({ pick }: { pick: PublicFeaturedIntelligenceDto }) {
+  const probabilityPct = Math.round(pick.probability * 100)
+  const valueLabel = predictionValueLabel(pick.value, pick.home_team ?? undefined, pick.away_team ?? undefined)
+  const homeTeam: TeamRef = { name: pick.home_team?.short_name ?? pick.home_team?.name ?? 'TBD', logoUrl: pick.home_team?.logo_url }
+  const awayTeam: TeamRef = { name: pick.away_team?.short_name ?? pick.away_team?.name ?? 'TBD', logoUrl: pick.away_team?.logo_url }
+
+  return (
+    <>
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate text-[11px] font-semibold uppercase tracking-wider text-[var(--li-blue)]">
+          {pick.competition_name ?? pick.sport_code}
+        </span>
+        <span className="shrink-0 font-mono text-[10px] font-semibold text-[var(--li-text-secondary)]">
+          FINAL{pick.home_score !== null && pick.away_score !== null ? ` · ${pick.home_score}–${pick.away_score}` : ''}
+        </span>
+      </div>
+
+      <div className="mt-4 flex items-center justify-center gap-3">
+        <TeamCrest team={homeTeam} />
+        <span className="shrink-0 rounded-full border border-[var(--li-border)] bg-[var(--li-surface)] px-2.5 py-1 font-mono text-[10px] font-medium text-[var(--li-text-muted)]">
+          VS
+        </span>
+        <TeamCrest team={awayTeam} />
+      </div>
+
+      <ResultVerdict predictedLabel={valueLabel} predictedPct={probabilityPct} outcome={pick.outcome} />
+
+      <p className="mt-3 text-center font-mono text-[10px] text-[var(--li-text-muted)]">{pick.market_name}</p>
     </>
   )
 }

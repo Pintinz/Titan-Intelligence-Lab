@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import { HeroIntelligenceReport, EngineIdleState } from './intelligence-card'
+import { HeroIntelligenceReport, VerifiedIntelligenceReport, EngineIdleState } from './intelligence-card'
 import type { PublicFeaturedIntelligenceDto } from '@/lib/api/types'
 
 // The hero count-up animates via requestAnimationFrame; jsdom never fires real frames, so use
@@ -25,6 +25,9 @@ function pick(overrides: Partial<PublicFeaturedIntelligenceDto> = {}): PublicFea
     away_team: { name: 'Manchester United', short_name: 'MUN', logo_url: null },
     scheduled_at: '2026-08-22T11:30:00Z',
     status: 'scheduled',
+    home_score: null,
+    away_score: null,
+    outcome: null,
     market_name: 'Match Winner',
     market_key: 'football.match_winner',
     value: 'HOME_WIN',
@@ -89,10 +92,74 @@ describe('HeroIntelligenceReport', () => {
     expect(screen.queryByText(/champion/i)).not.toBeInTheDocument()
   })
 
+  describe('a completed fixture (rare hero fallback)', () => {
+    // Featured Intelligence is forecast-only now — a completed pick only ever reaches the hero
+    // when nothing live/upcoming is available at all (landing-page.tsx's own fallback), and even
+    // then it renders exactly like any other forecast, never the "Verified Outcome" treatment.
+    // That comparison view now lives exclusively in the "Verified Intelligence" section
+    // (VerifiedIntelligenceReport, tested below).
+    it('still shows the normal forecast, never a verified-outcome comparison', () => {
+      renderHero(
+        pick({ status: 'completed', home_score: 2, away_score: 0, outcome: { actual_value: 'HOME_WIN', is_correct: true } }),
+      )
+      expect(screen.getByText("Today's Top Forecast")).toBeInTheDocument()
+      expect(screen.getByText('43%')).toBeInTheDocument()
+      expect(screen.queryByText('Verified Outcome')).not.toBeInTheDocument()
+      expect(screen.queryByText('Correct')).not.toBeInTheDocument()
+      expect(screen.queryByText('Predicted')).not.toBeInTheDocument()
+    })
+
+    it('still shows the real final score on the status line', () => {
+      renderHero(pick({ status: 'completed', home_score: 2, away_score: 0 }))
+      expect(screen.getByText('FINAL · 2–0')).toBeInTheDocument()
+    })
+  })
+
   it('flags a stale prediction instead of implying it is fresh', () => {
     const staleTime = new Date(Date.now() - 24 * 3_600_000).toISOString()
     renderHero(pick({ generated_at: staleTime }))
     expect(screen.getByText('1d ago')).toBeInTheDocument()
+  })
+})
+
+function renderVerified(dto: PublicFeaturedIntelligenceDto) {
+  return render(
+    <MemoryRouter>
+      <VerifiedIntelligenceReport pick={dto} />
+    </MemoryRouter>,
+  )
+}
+
+describe('VerifiedIntelligenceReport', () => {
+  it('shows the real final score and predicted value', () => {
+    renderVerified(
+      pick({ status: 'completed', home_score: 2, away_score: 0, outcome: { actual_value: 'HOME_WIN', is_correct: true } }),
+    )
+    expect(screen.getByText('FINAL · 2–0')).toBeInTheDocument()
+    expect(screen.getByText(/43%/)).toBeInTheDocument()
+  })
+
+  it('shows a real correct verdict when OutcomeResolutionService resolved this prediction as a match', () => {
+    renderVerified(
+      pick({ status: 'completed', home_score: 2, away_score: 0, outcome: { actual_value: 'HOME_WIN', is_correct: true } }),
+    )
+    expect(screen.getByText('Correct')).toBeInTheDocument()
+    expect(screen.getByText('HOME_WIN')).toBeInTheDocument()
+  })
+
+  it('shows a real missed verdict when the prediction did not match', () => {
+    renderVerified(
+      pick({ status: 'completed', home_score: 2, away_score: 0, outcome: { actual_value: 'AWAY_WIN', is_correct: false } }),
+    )
+    expect(screen.getByText('Missed')).toBeInTheDocument()
+  })
+
+  it('never fabricates a verdict when the outcome has not been resolved yet', () => {
+    renderVerified(pick({ status: 'completed', home_score: 2, away_score: 0, outcome: null }))
+    expect(screen.getByText('Verifying')).toBeInTheDocument()
+    expect(screen.getByText('Awaiting verified outcome')).toBeInTheDocument()
+    expect(screen.queryByText('Correct')).not.toBeInTheDocument()
+    expect(screen.queryByText('Missed')).not.toBeInTheDocument()
   })
 })
 

@@ -16,6 +16,8 @@ export const publicApi = {
   platformSummary: () => api.get<PublicPlatformSummaryDto>('/api/v1/public/platform-summary'),
   featuredIntelligence: (limit?: number) =>
     api.get<PublicFeaturedIntelligenceDto[]>('/api/v1/public/featured-intelligence', { limit }),
+  verifiedIntelligence: (limit?: number) =>
+    api.get<PublicFeaturedIntelligenceDto[]>('/api/v1/public/verified-intelligence', { limit }),
   newsIntelligence: (limit?: number) =>
     api.get<PublicNewsIntelligenceItemDto[]>('/api/v1/public/news-intelligence', { limit }),
   knowledgeGraphPreview: () => api.get<PublicKnowledgeGraphPreviewDto>('/api/v1/public/knowledge-graph-preview'),

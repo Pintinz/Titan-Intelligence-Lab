@@ -7,6 +7,8 @@ import { useThemeStore } from '@/stores/theme-store'
 import { useCommandPaletteStore } from '@/stores/command-palette-store'
 import { useUnreadAlertCount } from '@/lib/hooks/use-alerts'
 import { isNativePlatform } from '@/lib/capacitor'
+import logoUrl from '@/assets/logo.png'
+import { BRAND } from '@/components/layout/nav-config'
 import { InfinityAppBreadcrumbs } from './infinity-breadcrumbs'
 import { InfinityCommandPalette } from './infinity-command-palette'
 
@@ -16,6 +18,13 @@ import { InfinityCommandPalette } from './infinity-command-palette'
  * (links to `/app/notifications`, now a real Alert Center — the unread badge reflects
  * `GET /api/v1/alerts/unread-count`, polled every 30s), and a real profile menu (email,
  * role, settings, help, sign out) sourced from `useAuthStore`.
+ *
+ * The brand mark (`lg:hidden`, same breakpoint the hamburger button itself uses) covers the one
+ * gap `InfinitySidebar`'s own logo doesn't: below `lg`, the sidebar is hidden entirely (mobile
+ * drawer takes over instead), so without this the topbar carried no brand presence at all until
+ * a user opened the drawer. The topbar's own glass treatment (this header's own background/
+ * backdrop-blur below, `--infinity-glass-1-*`) already applies at every width — only the
+ * sidebar's logo+glass are what disappear below `lg`.
  */
 export function InfinityTopbar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
   const paletteOpen = useCommandPaletteStore((s) => s.open)
@@ -51,6 +60,10 @@ export function InfinityTopbar({ onOpenMobileNav }: { onOpenMobileNav: () => voi
         >
           <Menu className="size-4.5" />
         </button>
+
+        <Link to="/" aria-label={`${BRAND.name} — back to the public site`} className="shrink-0 lg:hidden">
+          <img src={logoUrl} alt={BRAND.name} className="h-6 w-auto" />
+        </Link>
 
         <div className="hidden lg:block">
           <InfinityAppBreadcrumbs />

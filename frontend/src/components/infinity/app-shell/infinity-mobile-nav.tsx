@@ -4,6 +4,7 @@ import { Link, NavLink } from 'react-router-dom'
 import { cn } from '@/lib/cn'
 import { useAuthStore } from '@/stores/auth-store'
 import { isAtLeast } from '@/lib/api/types'
+import logoUrl from '@/assets/logo.png'
 import { NAV_GROUPS, BRAND } from '@/components/layout/nav-config'
 
 /** Infinity Mobile Nav — same drawer pattern and NAV_GROUPS data as the legacy
@@ -24,7 +25,12 @@ export function InfinityMobileNav({ open, onOpenChange }: { open: boolean; onOpe
         />
         <DialogPrimitive.Content
           className={cn(
-            'fixed inset-y-0 left-0 z-50 flex w-72 flex-col bg-infinity-ground-1 lg:hidden',
+            'fixed inset-y-0 left-0 z-50 flex w-72 flex-col border-r lg:hidden',
+            // Same Level 2 glass the desktop sidebar's own expanded panel uses
+            // (infinity-sidebar.tsx) — this drawer is that panel's mobile equivalent, so it
+            // carries the same translucent-surface/backdrop-blur/elevation treatment rather than
+            // a flat, opaque fill.
+            'border-[var(--infinity-glass-2-border)] bg-[var(--infinity-glass-2-bg)] shadow-[var(--infinity-elevation-2)] backdrop-blur-[var(--infinity-glass-2-blur)]',
             'data-[state=open]:animate-[dialog-content-in_var(--infinity-motion-hold)_ease-out]',
           )}
         >
@@ -34,9 +40,9 @@ export function InfinityMobileNav({ open, onOpenChange }: { open: boolean; onOpe
               to="/"
               aria-label={`${BRAND.name} — back to the public site`}
               onClick={() => onOpenChange(false)}
-              className="font-infinity-display text-sm font-semibold text-infinity-text-primary transition-opacity hover:opacity-80"
+              className="opacity-100 transition-opacity hover:opacity-80"
             >
-              {BRAND.name}
+              <img src={logoUrl} alt={BRAND.name} className="h-7 w-auto" />
             </Link>
             <DialogPrimitive.Close aria-label="Close navigation menu" className="text-infinity-text-secondary">
               <X className="size-4" />

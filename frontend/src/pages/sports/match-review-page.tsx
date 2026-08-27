@@ -185,7 +185,7 @@ export default function MatchReviewPage() {
         <ArrowLeft className="size-3.5" aria-hidden="true" /> Back to match
       </Link>
 
-      <CDPanel>
+      <CDPanel accent>
         <div className="flex items-center justify-between gap-2">
           <CDLabel tone="accent">AI Match Review</CDLabel>
           {meta && meta.resolved_count > 0 && (

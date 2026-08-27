@@ -46,7 +46,11 @@ export function SiteHeader() {
                 </NavigationMenu.Trigger>
                 <NavigationMenu.Content
                   className={cn(
-                    'absolute left-0 top-0 w-[520px] rounded-lg border border-border-default bg-bg-elevated p-3 shadow-elevation-3',
+                    'absolute left-0 top-0 w-[520px] rounded-lg border p-3 shadow-elevation-3',
+                    // Same Level 2 glass the authenticated app's sidebar/drawer use
+                    // (infinity-sidebar.tsx, infinity-mobile-nav.tsx) — translucent surface +
+                    // backdrop-blur instead of a flat, opaque fill.
+                    'border-[var(--infinity-glass-2-border)] bg-[var(--infinity-glass-2-bg)] backdrop-blur-[var(--infinity-glass-2-blur)]',
                     'data-[motion=from-start]:animate-[popover-content-in_var(--motion-duration-fast)_var(--motion-easing-decelerate)]',
                     'data-[motion=from-end]:animate-[popover-content-in_var(--motion-duration-fast)_var(--motion-easing-decelerate)]',
                   )}
@@ -106,20 +110,23 @@ export function SiteHeader() {
             <DropdownMenu.Root>
               <DropdownMenu.Trigger asChild>
                 <button
-                  className="flex items-center gap-2 rounded-full border border-border-default py-1 pl-1 pr-2.5 transition-colors hover:border-border-strong"
+                  className="flex items-center rounded-full border border-border-default p-1 transition-colors hover:border-border-strong"
                   aria-label="Account menu"
                 >
                   <span className="flex size-6 items-center justify-center rounded-full bg-accent-primary-muted font-mono text-xs font-medium text-accent-primary">
                     {(profile.email ?? '?').charAt(0).toUpperCase()}
                   </span>
-                  <span className="max-w-[120px] truncate text-xs text-text-secondary">{profile.email}</span>
                 </button>
               </DropdownMenu.Trigger>
               <DropdownMenu.Portal>
                 <DropdownMenu.Content
                   align="end"
                   sideOffset={8}
-                  className="z-50 w-56 rounded-lg border border-border-default bg-bg-elevated p-1.5 shadow-elevation-3 data-[state=open]:animate-[popover-content-in_var(--motion-duration-fast)_var(--motion-easing-decelerate)]"
+                  className={cn(
+                    'z-50 w-56 rounded-lg border p-1.5 shadow-elevation-3',
+                    'border-[var(--infinity-glass-2-border)] bg-[var(--infinity-glass-2-bg)] backdrop-blur-[var(--infinity-glass-2-blur)]',
+                    'data-[state=open]:animate-[popover-content-in_var(--motion-duration-fast)_var(--motion-easing-decelerate)]',
+                  )}
                 >
                   <DropdownMenu.Item asChild>
                     <Link
@@ -181,6 +188,10 @@ export function SiteHeader() {
 function MobileMarketingNav({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const profile = useAuthStore((s) => s.profile)
   const signOut = useAuthStore((s) => s.signOut)
+  // Accordion, one group open at a time — mirrors the desktop mega-menu's own "click a trigger,
+  // its list drops down" interaction instead of dumping every group's full link list open at
+  // once, which made the drawer long to scroll through for no reason on a small screen.
+  const [openGroup, setOpenGroup] = useState<string | null>(null)
 
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
@@ -205,26 +216,45 @@ function MobileMarketingNav({ open, onOpenChange }: { open: boolean; onOpenChang
             </DialogPrimitive.Close>
           </div>
           <nav className="flex-1 overflow-y-auto px-4 py-4" aria-label="Primary">
-            {HEADER_MENUS.map((menu) => (
-              <div key={menu.label} className="mb-5">
-                <h2 className="px-1 pb-2 text-[11px] font-medium uppercase tracking-wider text-text-muted">
-                  {menu.label}
-                </h2>
-                <ul className="flex flex-col gap-0.5">
-                  {menu.links.map((link) => (
-                    <li key={link.href}>
-                      <Link
-                        to={link.href}
-                        onClick={() => onOpenChange(false)}
-                        className="block rounded-md px-2 py-1.5 text-sm text-text-secondary hover:bg-bg-elevated hover:text-text-primary"
-                      >
-                        {link.label}
-                      </Link>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
+            {HEADER_MENUS.map((menu) => {
+              const isOpen = openGroup === menu.label
+              return (
+                <div key={menu.label} className="mb-1 border-b border-border-subtle/60">
+                  <button
+                    type="button"
+                    onClick={() => setOpenGroup(isOpen ? null : menu.label)}
+                    aria-expanded={isOpen}
+                    className="flex w-full items-center justify-between px-1 py-3 text-left text-sm font-medium text-text-primary"
+                  >
+                    {menu.label}
+                    <ChevronDown
+                      className={cn('size-4 shrink-0 text-text-muted transition-transform duration-200', isOpen && 'rotate-180')}
+                      aria-hidden="true"
+                    />
+                  </button>
+                  <div
+                    className={cn(
+                      'grid overflow-hidden transition-[grid-template-rows] duration-200 ease-out',
+                      isOpen ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]',
+                    )}
+                  >
+                    <ul className="flex min-h-0 flex-col gap-0.5 pb-3">
+                      {menu.links.map((link) => (
+                        <li key={link.href}>
+                          <Link
+                            to={link.href}
+                            onClick={() => onOpenChange(false)}
+                            className="block rounded-md px-2 py-1.5 text-sm text-text-secondary hover:bg-bg-elevated hover:text-text-primary"
+                          >
+                            {link.label}
+                          </Link>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              )
+            })}
             <div className="mb-5">
               <h2 className="px-1 pb-2 text-[11px] font-medium uppercase tracking-wider text-text-muted">More</h2>
               <ul className="flex flex-col gap-0.5">

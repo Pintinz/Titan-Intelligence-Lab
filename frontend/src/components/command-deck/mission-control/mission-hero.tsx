@@ -46,8 +46,8 @@ export function MissionHero({
 
   return (
     <div
-      className="relative overflow-hidden rounded-[var(--cd-radius-2xl)] p-6 sm:p-9"
-      style={{ background: 'var(--cd-card-surface)', border: '1px solid var(--cd-card-border)', boxShadow: 'var(--cd-card-shadow)' }}
+      className="relative overflow-hidden rounded-[var(--cd-radius-2xl)] border border-[var(--cd-glass-3-border)] bg-[var(--cd-glass-3-bg)] p-6 backdrop-blur-[var(--cd-glass-3-blur)] sm:p-9"
+      style={{ boxShadow: 'var(--cd-card-shadow-hover)' }}
     >
       <div
         className="animate-hero-glow motion-reduce:animate-none pointer-events-none absolute -left-[10%] -top-[30%] h-[420px] w-[420px] rounded-full opacity-70"

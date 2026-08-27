@@ -34,7 +34,7 @@ export function DiscoveryHero({
   kpis: DiscoveryKpis
 }) {
   return (
-    <CDPanel className="relative overflow-hidden">
+    <CDPanel accent className="relative overflow-hidden">
       <div
         className="pointer-events-none absolute inset-0 opacity-50"
         style={{ background: 'radial-gradient(110% 90% at 15% -10%, var(--cd-accent-muted), transparent 60%)' }}
