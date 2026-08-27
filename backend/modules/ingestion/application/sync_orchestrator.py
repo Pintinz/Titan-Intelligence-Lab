@@ -12,6 +12,7 @@ record — matching the same "shared machinery, explicit per-entity methods" sha
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -42,6 +43,8 @@ from modules.predictions.football.odds_feature_writer import FootballOddsFeature
 from modules.sports.domain.value_objects import FixtureId, FixtureStatus, ProviderRef, SportCode
 from modules.sports.infrastructure.providers.provider_router import SportsProviderRouter
 from modules.sports.ports.repositories import SportRepositoryPort
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MIN_SYNC_INTERVAL_SECONDS = 300  # "never reload complete datasets unnecessarily"
 LIVE_MIN_SYNC_INTERVAL_SECONDS = 30  # live fixtures poll far more often — adaptive scheduling
@@ -173,6 +176,16 @@ class SyncOrchestrator:
             try:
                 records = await fetch()
             except Exception as exc:  # noqa: BLE001 — deliberately broad: any provider/transport failure is a sync failure
+                # Previously silent: `_fail` stores `str(exc)` only in the SyncRun row, never in the
+                # process log stream — a real production incident (2026-08-27) where every single
+                # sync attempt failed for days took a live DB/admin-panel investigation to diagnose
+                # because there was no other way to see why. Logged here, not inside `_fail`, so the
+                # real traceback (fetch()'s actual exception) is captured, not a stringified re-throw.
+                logger.error(
+                    "sync_orchestrator.fetch_failed",
+                    extra={"sport_code": sport_code, "entity_kind": entity_kind.value, "scope_key": scope_key},
+                    exc_info=True,
+                )
                 return await self._fail(run, checkpoint, sport_code, entity_kind, scope_key, now, str(exc))
 
             run.records_fetched = len(records)
