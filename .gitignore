@@ -48,6 +48,14 @@ frontend/ios/DerivedData/
 frontend/**/*.xcuserstate
 frontend/**/xcuserdata/
 
+# Local model artifact store (backend/.model_artifacts) — trained model binaries written by
+# `get_model_artifact_store()` on every retrain; regenerated locally/in prod, not source.
+backend/.model_artifacts/
+
+# Celery worker/beat logs from local runs — operational output, not source.
+backend/celery_worker.log
+backend/celery_beat.log
+
 # OS
 .DS_Store
 Thumbs.db
