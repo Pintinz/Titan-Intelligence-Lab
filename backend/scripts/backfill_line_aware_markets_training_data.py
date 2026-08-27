@@ -131,9 +131,11 @@ async def main() -> None:
                             SELECT f.home_score, f.away_score, f.scheduled_at,
                               (SELECT v.value FROM feature_values_offline v
                                WHERE v.feature_key = 'football.fixture.expected_home_goals' AND v.entity_id = :dashed
+                               AND v.as_of <= f.scheduled_at
                                ORDER BY v.as_of DESC LIMIT 1) AS eh,
                               (SELECT v.value FROM feature_values_offline v
                                WHERE v.feature_key = 'football.fixture.expected_away_goals' AND v.entity_id = :dashed
+                               AND v.as_of <= f.scheduled_at
                                ORDER BY v.as_of DESC LIMIT 1) AS ea
                             FROM fixtures f WHERE f.id = :fixture_id
                             """

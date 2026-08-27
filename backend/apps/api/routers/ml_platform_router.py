@@ -63,6 +63,8 @@ from modules.predictions.application.model_registry_service import (
     InvalidDeploymentModeError,
     InvalidModelLifecycleTransitionError,
     ModelNotFoundError,
+    PromotionPolicyViolationError,
+    TrainingIntegrityError,
 )
 from modules.predictions.domain.calibration import CalibrationMethod
 from modules.predictions.domain.dataset import DatasetId
@@ -337,6 +339,15 @@ async def promote_champion(
         raise HTTPException(status_code=404, detail="model not found") from None
     except InvalidModelLifecycleTransitionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
+    except TrainingIntegrityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except PromotionPolicyViolationError as exc:
+        # Forensic audit §11/§12 — machine-readable `reason_code` alongside the human-readable
+        # detail, so an admin UI can render "no comparison recorded yet" differently from "the
+        # comparison says the current Champion is still better" without string-matching `detail`.
+        raise HTTPException(
+            status_code=409, detail={"reason_code": exc.reason_code, "message": str(exc)}
+        ) from None
     return envelope(data={"id": str(model.id), "status": model.status.value})
 
 

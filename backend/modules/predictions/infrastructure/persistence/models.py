@@ -96,6 +96,10 @@ class ModelDefinitionModel(Base):
     # silently upgraded — see scripts/trace_football_champion_provenance.py.
     provenance_status: Mapped[str] = mapped_column(String(24), default="PROVENANCE_UNVERIFIED")
     trained_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # See modules.predictions.domain.entities.ModelDefinition.artifact_checksum docstring —
+    # forensic audit §15, sha256 hex digest (64 chars), nullable for any row registered before
+    # this column existed or by a training path not yet updated to compute one.
+    artifact_checksum: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class PredictionModel(Base):
@@ -133,6 +137,15 @@ class PredictionModel(Base):
     # audit fix (2026-08-23): "calibrated" | "uncalibrated", nullable for the same
     # before-this-column-existed reason as predictor_provenance above.
     calibration_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # See modules.predictions.domain.entities.Prediction.fallback_reason docstring — forensic
+    # audit §3/§13, populated only when predictor_provenance == "formula_fallback".
+    fallback_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Phase 4 (Calibration Integrity, 2026-08-25) — see modules.predictions.domain.entities
+    # .Prediction docstrings for each. Additive/nullable, same "never backfilled" posture as
+    # every other provenance-style column in this table.
+    raw_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    calibration_sample_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    calibration_fitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class PredictionOutcomeModel(Base):
@@ -332,7 +345,9 @@ class ChallengerEvaluationModel(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     market_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("prediction_markets.id"), index=True)
-    challenger_model_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("models.id"))
+    # Phase 7 audit fix (2026-08-25) — indexed: promotion's `get_for_challenger` now looks up
+    # directly by (market_id, challenger_model_id) instead of scanning a bounded "recent N" window.
+    challenger_model_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("models.id"), index=True)
     champion_model_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("models.id"), nullable=True)
     challenger_metrics: Mapped[dict] = mapped_column(JSON, default=dict)
     champion_metrics: Mapped[dict | None] = mapped_column(JSON, nullable=True)

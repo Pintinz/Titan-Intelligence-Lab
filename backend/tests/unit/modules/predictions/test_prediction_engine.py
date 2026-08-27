@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -31,6 +31,7 @@ from modules.predictions.application.model_registry_service import ModelRegistry
 from modules.predictions.application.prediction_context_builder import PredictionContextBuilder
 from modules.predictions.application.prediction_engine import PredictionEngine, _calibrate_distribution
 from modules.predictions.application.predictor_registry import PredictorRegistry
+from modules.predictions.domain.calibration import CalibrationMetadata
 from modules.predictions.domain.entities import PredictionOutcome
 from modules.predictions.domain.value_objects import (
     MarketKind,
@@ -43,6 +44,7 @@ from modules.predictions.domain.ml_value_objects import MLAlgorithm
 from modules.predictions.infrastructure.calibration.platt_scaling_calibrator import PlattScalingCalibrator
 from modules.predictions.infrastructure.ml.model_loader import ModelLoaderService
 from modules.predictions.infrastructure.ml.sklearn_adapter import SklearnAdapter
+from modules.predictions.infrastructure.persistence.repositories import SqlAlchemyCalibrationParametersRepository
 from modules.predictions.infrastructure.predictors.weighted_scoring import (
     WeightedLinearPredictor,
     WeightedLogisticPredictor,
@@ -450,6 +452,52 @@ async def test_generate_computes_historical_accuracy_from_outcomes(
 
 
 @pytest.mark.asyncio
+async def test_generate_normalizes_regression_error_for_historical_accuracy(
+    context_builder, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+    confidence_engine_dep, explainability_engine, retrieval_service, prediction_outcome_repo,
+    model_evaluation_repo, prediction_repo,
+):
+    """Phase 6 fix (2026-08-25): a regression market's `PredictionOutcome.error` is a raw
+    magnitude (e.g. 8 points off a ~220-point total), never bounded to [0, 1] the way a
+    classification outcome's already is. Before the fix, `_historical_accuracy` fed that raw
+    magnitude straight into `1 - clamp(error, 0, 1)`, which always clamped to 0.0 (the worst
+    possible score) for any error >= 1.0 — silently reporting ~0% historical accuracy for every
+    regression market regardless of how good the predictions actually were. A tight relative
+    error (8/220 ≈ 3.6%) must now produce a high, not a floored-to-zero, accuracy."""
+    market, _ = await _setup_regression_market(
+        market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+        "basketball.accuracy_regression_market",
+    )
+    linear_predictors = PredictorRegistry()
+    linear_predictors.register_many(WeightedLinearPredictor.SUPPORTED_KINDS, WeightedLinearPredictor())
+    engine = PredictionEngine(
+        context_builder=context_builder, predictors=linear_predictors, calibrator=PlattScalingCalibrator(),
+        confidence_engine=confidence_engine_dep, explainability_engine=explainability_engine,
+        retrieval=retrieval_service, outcomes=prediction_outcome_repo, model_evaluations=model_evaluation_repo,
+        predictions=prediction_repo,
+    )
+    for _ in range(3):
+        await prediction_outcome_repo.record(
+            PredictionOutcome(
+                id=PredictionOutcomeId(uuid4()),
+                prediction_id=PredictionId(uuid4()),
+                actual_value="220.0",
+                error=8.0,  # a genuinely tight regression miss, NOT a bounded [0,1] value
+                evaluated_at=T0,
+            )
+        )
+
+    prediction = await engine.generate(
+        market.market_key, EntityType.FIXTURE, "fixture-1", subject_ref="fixture-1", now=T0
+    )
+
+    # Old (broken) behavior would have clamped this to 0.0. Relative error is 8/220 ≈ 0.036, so
+    # accuracy should land close to 1 - 0.036 ≈ 0.964, not 0.
+    assert prediction.confidence.historical_accuracy == pytest.approx(1.0 - 8.0 / 220.0, abs=1e-6)
+    assert prediction.confidence.historical_accuracy > 0.9
+
+
+@pytest.mark.asyncio
 async def test_generate_reflects_kg_and_news_and_community_signals(
     engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo
 ):
@@ -542,6 +590,8 @@ async def test_generate_serves_a_real_trained_model_when_champion_has_an_artifac
     assert prediction.value in ("positive", "negative")
     assert 0.0 <= prediction.probability <= 1.0
     assert prediction.predictor_provenance == "trained_model"
+    # Forensic audit §3/§13 — no fallback occurred, so there's nothing to explain.
+    assert prediction.fallback_reason is None
 
 
 @pytest.mark.asyncio
@@ -573,15 +623,20 @@ async def test_generate_falls_back_to_registry_for_placeholder_champion_even_wit
     assert prediction.model_id == champion.id
     assert prediction.value in ("positive", "negative")
     assert prediction.predictor_provenance == "formula_fallback"
+    # Forensic audit §3/§13 — a placeholder Champion was never trained at all, distinct from a
+    # real artifact that exists but failed to load.
+    assert prediction.fallback_reason == "NO_ARTIFACT_REGISTERED"
 
 
 @pytest.mark.asyncio
 async def test_generate_reports_uncalibrated_when_the_model_has_never_been_fitted(
     engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
 ):
-    """Section 31 audit fix (2026-08-23): `calibrate()`'s identity pass-through for a never-fitted
-    model must never be reported to the API as "calibrated" — every model starts unfitted, so a
-    freshly generated prediction must say so honestly rather than implying real calibration ran."""
+    """Section 31 audit fix (2026-08-23), extended by Phase 4: `calibrate()`'s identity
+    pass-through for a never-fitted model must never be reported to the API as calibrated —
+    every model starts unfitted, so a freshly generated prediction must say so honestly rather
+    than implying real calibration ran. `raw_probability` must equal `probability` (identity),
+    and no metadata is recorded since no fit exists."""
     market, champion = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
         "football.uncalibrated_market",
@@ -592,7 +647,10 @@ async def test_generate_reports_uncalibrated_when_the_model_has_never_been_fitte
     )
 
     assert prediction.model_id == champion.id
-    assert prediction.calibration_status == "uncalibrated"
+    assert prediction.calibration_status == "UNFITTED"
+    assert prediction.raw_probability == prediction.probability
+    assert prediction.calibration_sample_count is None
+    assert prediction.calibration_fitted_at is None
 
 
 @pytest.mark.asyncio
@@ -600,8 +658,10 @@ async def test_generate_reports_calibrated_once_the_model_has_actually_been_fitt
     engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
 ):
     """The other half of the same fix: once `CalibratorPort.fit()` has genuinely run for this
-    model, a subsequent prediction must report the real "calibrated" status — this is not a
-    permanently-uncalibrated posture, just an honest one until a real fit has happened."""
+    model, a subsequent prediction must report the real "FITTED" status (Phase 4 taxonomy) — this
+    is not a permanently-unfitted posture, just an honest one until a real fit has happened. The
+    fit's sample count/fitted_at must be recorded, and `raw_probability` must differ from the
+    now-calibrated `probability` (the fit is a genuine transform, not an identity)."""
     market, champion = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
         "football.calibrated_market",
@@ -613,7 +673,166 @@ async def test_generate_reports_calibrated_once_the_model_has_actually_been_fitt
     )
 
     assert prediction.model_id == champion.id
-    assert prediction.calibration_status == "calibrated"
+    assert prediction.calibration_status == "FITTED"
+    assert prediction.calibration_sample_count == 4
+    assert prediction.calibration_fitted_at is not None
+    assert prediction.raw_probability != prediction.probability
+
+
+@pytest.mark.asyncio
+async def test_generate_reports_stale_when_the_fit_is_older_than_the_staleness_window(
+    context_builder, predictors, confidence_engine_dep, explainability_engine, retrieval_service,
+    prediction_outcome_repo, model_evaluation_repo, prediction_repo,
+    market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+):
+    """Phase 4 (Calibration Integrity): a fit that exists but predates the configured staleness
+    window must be reported as "STALE", not "FITTED" — still applied (a stale calibration is
+    still better than none), but flagged so a caller can tell the difference.
+
+    `PlattScalingCalibrator.fit()`'s in-memory (no `repository`) mode stamps `fitted_at` with
+    real wall-clock `datetime.now()`, not a caller-supplied `now` — unlike the rest of this
+    codebase's explicit-`now`-threading convention, but harmless in production (a real fit's
+    "when it happened" genuinely is wall-clock time) and only a testability wrinkle: this test
+    anchors `generate()`'s `now` off real wall-clock time too, rather than the fixed historical
+    `T0` every other test in this file uses, so the elapsed time is real and positive."""
+    engine = PredictionEngine(
+        context_builder=context_builder, predictors=predictors, calibrator=PlattScalingCalibrator(),
+        confidence_engine=confidence_engine_dep, explainability_engine=explainability_engine,
+        retrieval=retrieval_service, outcomes=prediction_outcome_repo, model_evaluations=model_evaluation_repo,
+        predictions=prediction_repo, expected_kg_facts=10, calibration_staleness=timedelta(days=1),
+    )
+    market, champion = await _setup_production_market(
+        market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+        "football.stale_calibration_market",
+    )
+    await engine.calibrator.fit(champion.id, [(0.6, True), (0.4, False), (0.7, True), (0.3, False)])
+
+    prediction = await engine.generate(
+        market.market_key, EntityType.FIXTURE, "fixture-1", subject_ref="fixture-1",
+        now=datetime.now(timezone.utc) + timedelta(days=2),
+    )
+
+    assert prediction.calibration_status == "STALE"
+    assert prediction.calibration_sample_count == 4
+    assert prediction.raw_probability != prediction.probability  # still applied, just flagged
+
+
+@pytest.mark.asyncio
+async def test_generate_reports_invalid_and_uses_raw_probability_when_calibration_is_non_finite(
+    context_builder, predictors, confidence_engine_dep, explainability_engine, retrieval_service,
+    prediction_outcome_repo, model_evaluation_repo, prediction_repo,
+    market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+):
+    """Phase 4: a corrupt/degenerate calibration fit (NaN/Inf) must never poison the published
+    probability — `generate()` must detect it, discard it, and honestly report "INVALID" rather
+    than publishing a NaN or silently pretending the raw pass-through was a real calibration."""
+
+    @dataclass
+    class _NonFiniteCalibrator:
+        async def calibrate(self, model_id, raw_probability: float) -> float:
+            return float("nan")
+
+        async def fit(self, model_id, samples) -> None:
+            raise NotImplementedError
+
+        async def is_fitted(self, model_id) -> bool:
+            return True
+
+        async def get_metadata(self, model_id):
+            return CalibrationMetadata(sample_count=25, fitted_at=T0)
+
+    engine = PredictionEngine(
+        context_builder=context_builder, predictors=predictors, calibrator=_NonFiniteCalibrator(),
+        confidence_engine=confidence_engine_dep, explainability_engine=explainability_engine,
+        retrieval=retrieval_service, outcomes=prediction_outcome_repo, model_evaluations=model_evaluation_repo,
+        predictions=prediction_repo, expected_kg_facts=10,
+    )
+    market, champion = await _setup_production_market(
+        market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+        "football.invalid_calibration_market",
+    )
+
+    prediction = await engine.generate(
+        market.market_key, EntityType.FIXTURE, "fixture-1", subject_ref="fixture-1", now=T0
+    )
+
+    assert prediction.calibration_status == "INVALID"
+    assert prediction.probability == prediction.raw_probability  # non-finite result discarded
+    assert prediction.probability == prediction.probability  # not NaN (NaN != NaN)
+
+
+@pytest.mark.asyncio
+async def test_generate_skips_the_post_hoc_calibrator_when_the_champions_own_artifact_is_already_calibrated(
+    engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+):
+    """Phase 4: `CalibrationValidationService` can promote a Champion whose own artifact already
+    bakes in calibration (`ModelDefinition.calibration_ref` set). Passing that Champion's
+    already-calibrated output through the separate post-hoc `PlattScalingCalibrator` layer too
+    would double-calibrate every prediction — a real correctness gap between this codebase's two
+    independent calibration mechanisms. Even with a genuine, non-identity Platt fit sitting right
+    there for the same model_id, `generate()` must not apply it."""
+    market, champion = await _setup_production_market(
+        market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+        "football.model_baked_calibration_market",
+    )
+    await model_registry.models.upsert(replace(champion, calibration_ref="isotonic_regression"))
+    # A real, non-identity fit for the same model_id — proves it's genuinely bypassed, not just
+    # coincidentally unfitted.
+    await engine.calibrator.fit(champion.id, [(0.6, True), (0.4, False), (0.7, True), (0.3, False)])
+
+    prediction = await engine.generate(
+        market.market_key, EntityType.FIXTURE, "fixture-1", subject_ref="fixture-1", now=T0
+    )
+
+    assert prediction.calibration_status == "FITTED"
+    assert prediction.calibration_sample_count is None
+    assert prediction.calibration_fitted_at is None
+    assert prediction.raw_probability == prediction.probability
+
+
+@pytest.mark.asyncio
+async def test_generate_staleness_check_survives_a_real_sql_backed_naive_datetime_round_trip(
+    context_builder, predictors, confidence_engine_dep, explainability_engine, retrieval_service,
+    prediction_outcome_repo, model_evaluation_repo, prediction_repo,
+    market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+    sqlite_session,
+):
+    """Phase 3 verification found the exact same bug shape in `model_registry_service.py`:
+    `now - <a real SQL-backed timestamp>` crashes with `TypeError: can't subtract offset-naive
+    and offset-aware datetimes` once SQLite/aiosqlite has dropped tzinfo on read-back (ADR-007) —
+    invisible to any test using an in-memory calibrator, since only a real repository round-trip
+    exhibits it. This is that same regression, reproduced for `_calibrate()`'s own
+    `_ensure_aware(metadata.fitted_at, now)` staleness check via the real
+    `SqlAlchemyCalibrationParametersRepository`, not an in-memory stand-in."""
+    engine = PredictionEngine(
+        context_builder=context_builder, predictors=predictors,
+        calibrator=PlattScalingCalibrator(repository=SqlAlchemyCalibrationParametersRepository(session=sqlite_session)),
+        confidence_engine=confidence_engine_dep, explainability_engine=explainability_engine,
+        retrieval=retrieval_service, outcomes=prediction_outcome_repo, model_evaluations=model_evaluation_repo,
+        predictions=prediction_repo, expected_kg_facts=10, calibration_staleness=timedelta(days=1),
+    )
+    market, champion = await _setup_production_market(
+        market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+        "football.sql_backed_staleness_market",
+    )
+    await engine.calibrator.fit(champion.id, [(0.6, True), (0.4, False), (0.7, True), (0.3, False)])
+    await sqlite_session.commit()
+
+    # `PlattScalingCalibrator.fit()` stamps `fitted_at` with real wall-clock time regardless of
+    # repository mode (see its own docstring note) — anchored here off real `datetime.now()`
+    # rather than the fixed historical `T0` every other test in this file uses, same reasoning as
+    # `test_generate_reports_stale_when_the_fit_is_older_than_the_staleness_window` above.
+    real_now = datetime.now(timezone.utc)
+    fresh = await engine.generate(
+        market.market_key, EntityType.FIXTURE, "fixture-1", subject_ref="fixture-1", now=real_now
+    )
+    stale = await engine.generate(
+        market.market_key, EntityType.FIXTURE, "fixture-1", subject_ref="fixture-1",
+        now=real_now + timedelta(days=2),
+    )
+
+    assert fresh.calibration_status == "FITTED"
+    assert stale.calibration_status == "STALE"
 
 
 @pytest.mark.asyncio
@@ -653,6 +872,50 @@ async def test_generate_falls_back_when_artifact_cannot_be_loaded(
     # fails, so a formula predictor actually computed `value`/`probability` above. Provenance must
     # say so, never "trained_model" just because a Champion with an artifact_ref exists.
     assert prediction.predictor_provenance == "formula_fallback"
+    # Forensic audit §3/§13 — a genuinely missing/unreachable artifact, distinct from a checksum
+    # mismatch (real file exists but doesn't hash to what was recorded) or no artifact at all.
+    assert prediction.fallback_reason == "ARTIFACT_LOAD_FAILURE"
+
+
+@pytest.mark.asyncio
+async def test_generate_falls_back_and_flags_integrity_mismatch_on_checksum_mismatch(
+    engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+    context_builder, predictors, confidence_engine_dep, explainability_engine, retrieval_service,
+    prediction_outcome_repo, model_evaluation_repo, prediction_repo, model_loader, artifact_store,
+):
+    """Forensic audit §15 "Model Artifact Integrity": a real, loadable artifact whose bytes don't
+    hash to the checksum recorded at training time (corrupted, overwritten, or swapped out-of-band)
+    must fall back exactly like a missing artifact, but be distinguishable from one — this is a
+    materially more concerning signal (possible tampering) than "the file was never uploaded"."""
+    market, _placeholder = await _setup_production_market(
+        market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+        "football.tampered_artifact_market",
+    )
+    feature_key = "football.team.form_index_last5"
+    artifact_ref = await _fit_and_store_sklearn_model(artifact_store, TargetType.CLASSIFICATION, feature_key)
+
+    tampered_model = await model_registry.register(
+        market_id=market.id, model_key="football.tampered_artifact_market.logistic_regression", version=2,
+        algorithm=MLAlgorithm.LOGISTIC_REGRESSION.value, framework="sklearn", artifact_ref=artifact_ref, now=T0,
+        artifact_checksum="0" * 64,  # deliberately wrong — cannot match the real artifact's real hash
+    )
+    await model_registry.promote_to_challenger(tampered_model.id)
+    await model_registry.promote_to_champion(tampered_model.id, approved_by="cto", now=T0)
+
+    engine_with_loader = PredictionEngine(
+        context_builder=context_builder, predictors=predictors, calibrator=PlattScalingCalibrator(),
+        confidence_engine=confidence_engine_dep, explainability_engine=explainability_engine,
+        retrieval=retrieval_service, outcomes=prediction_outcome_repo, model_evaluations=model_evaluation_repo,
+        predictions=prediction_repo, model_loader=model_loader,
+    )
+
+    prediction = await engine_with_loader.generate(
+        market.market_key, EntityType.FIXTURE, "fixture-1", subject_ref="fixture-1", now=T0
+    )
+
+    assert prediction.value in ("positive", "negative")
+    assert prediction.predictor_provenance == "formula_fallback"
+    assert prediction.fallback_reason == "ARTIFACT_INTEGRITY_MISMATCH"
 
 
 @pytest.mark.asyncio

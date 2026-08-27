@@ -20,13 +20,16 @@ preserves the exact previous in-memory-only behavior for any caller/test that do
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from modules.predictions.domain.calibration import PlattCalibrationParameters
+from modules.predictions.domain.calibration import CalibrationMetadata, PlattCalibrationParameters
 from modules.predictions.domain.value_objects import ModelId
 from modules.predictions.ports.calibration_parameters_repository import CalibrationParametersRepositoryPort
+
+logger = logging.getLogger("titaniq.predictions")
 
 
 def _logit(p: float, eps: float = 1e-6) -> float:
@@ -60,6 +63,9 @@ class PlattScalingCalibrator:
     # default on a miss too, making a never-fitted model indistinguishable from a fitted one by
     # cache presence alone.
     _fitted_model_ids: set[ModelId] = field(default_factory=set)
+    # Phase 4 (Calibration Integrity) — `get_metadata()`'s in-memory-mode source (`repository=None`
+    # callers/tests). Populated alongside `_fitted_model_ids` in `fit()`, never separately.
+    _metadata: dict[ModelId, CalibrationMetadata] = field(default_factory=dict)
 
     async def calibrate(self, model_id: ModelId, raw_probability: float) -> float:
         params = self._params.get(model_id)
@@ -92,16 +98,40 @@ class PlattScalingCalibrator:
             a -= self.learning_rate * grad_a / n
             b -= self.learning_rate * grad_b / n
 
+        if not (math.isfinite(a) and math.isfinite(b)):
+            # A degenerate sample set (e.g. every outcome the same class) can send gradient
+            # descent to +/-inf or NaN. Persisting/caching that would make every future
+            # `calibrate()` call for this model return NaN (`sigmoid(nan)` is NaN) — silently
+            # corrupting every prediction's published probability. Treat as a failed fit instead:
+            # leave whatever parameters (or identity default) were already active untouched.
+            logger.error(
+                "platt_scaling_calibrator.fit_diverged",
+                extra={"model_id": str(model_id.value), "sample_count": n, "a": a, "b": b},
+            )
+            return
+
         self._params[model_id] = PlattParameters(a=a, b=b)
         self._fitted_model_ids.add(model_id)
+        # Real wall-clock time, not a caller-supplied `now` (unlike this codebase's usual explicit
+        # `now`-threading convention) — `CalibratorPort.fit()` takes no `now` parameter. Harmless
+        # in production (a fit's "when it happened" genuinely is wall-clock time); only a
+        # testability wrinkle for a caller trying to fix `now` to a historical value.
+        fitted_at = datetime.now(timezone.utc)
+        self._metadata[model_id] = CalibrationMetadata(sample_count=n, fitted_at=fitted_at)
         if self.repository is not None:
             await self.repository.upsert(
-                PlattCalibrationParameters(
-                    model_id=model_id, a=a, b=b, sample_count=n, fitted_at=datetime.now(timezone.utc),
-                )
+                PlattCalibrationParameters(model_id=model_id, a=a, b=b, sample_count=n, fitted_at=fitted_at)
             )
 
     async def is_fitted(self, model_id: ModelId) -> bool:
         if self.repository is not None:
             return await self.repository.get(model_id) is not None
         return model_id in self._fitted_model_ids
+
+    async def get_metadata(self, model_id: ModelId) -> CalibrationMetadata | None:
+        if self.repository is not None:
+            persisted = await self.repository.get(model_id)
+            if persisted is None:
+                return None
+            return CalibrationMetadata(sample_count=persisted.sample_count, fitted_at=persisted.fitted_at)
+        return self._metadata.get(model_id)

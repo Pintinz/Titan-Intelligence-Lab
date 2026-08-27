@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from modules.predictions.domain.calibration import CalibrationMetadata
 from modules.predictions.domain.value_objects import ModelId
 
 
@@ -35,4 +36,13 @@ class CalibratorPort(Protocol):
         unfitted model is itself a valid return value, indistinguishable from a genuine fit unless
         this is tracked separately). Lets a caller (Section 31 audit fix) refuse to present a
         pass-through probability as "calibrated" when no calibration has actually happened yet."""
+        ...
+
+    async def get_metadata(self, model_id: ModelId) -> CalibrationMetadata | None:
+        """Phase 4 (Calibration Integrity) — how much evidence backed ``model_id``'s currently
+        active fit and when it was fitted, or `None` if `is_fitted(model_id)` would return
+        `False`. Lets a caller distinguish FITTED from STALE (parameters exist but haven't been
+        refit in too long) without the calibrator exposing its internal (a, b)/step-function
+        parameters — the same "report the fact, not the internals" posture `is_fitted()` already
+        established."""
         ...

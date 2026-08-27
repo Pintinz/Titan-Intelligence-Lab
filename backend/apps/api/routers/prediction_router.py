@@ -304,12 +304,30 @@ def _serialize_prediction(
             prediction.predictor_provenance, "UNKNOWN"
         ),
         "predictor_provenance": prediction.predictor_provenance,
-        # Section 31 audit fix (2026-08-23) — mirrors `champion_status`/`predictor_provenance`
-        # above: "INSUFFICIENT_PRODUCTION_DATA" (spec's own wording) rather than silently claiming
-        # a raw pass-through probability was calibrated. `None` status (predictions generated
-        # before this field existed) reports "UNKNOWN", same posture as `champion_status`.
-        "calibration_status": {"calibrated": "CALIBRATED", "uncalibrated": "INSUFFICIENT_PRODUCTION_DATA"}.get(
-            prediction.calibration_status, "UNKNOWN"
+        # Forensic audit §3/§13 — WHY it's a fallback, when it is: "NO_ARTIFACT_REGISTERED" |
+        # "ARTIFACT_LOAD_FAILURE" | "ARTIFACT_INTEGRITY_MISMATCH" | "ARTIFACT_DESERIALIZE_FAILURE" |
+        # "MODEL_LOADER_NOT_WIRED" | "UNKNOWN_ARTIFACT_ERROR". `None` whenever a trained model
+        # actually served (predictor_provenance == "trained_model") or for predictions from before
+        # this field existed.
+        "fallback_reason": prediction.fallback_reason,
+        # Section 31 audit fix (2026-08-23), extended by Phase 4 (Calibration Integrity,
+        # 2026-08-25) to the full UNFITTED/FITTED/STALE/INVALID state taxonomy. The two legacy
+        # values map onto it for continuity with rows generated before this taxonomy existed;
+        # `None` (no recorded status at all) reports "UNKNOWN", same posture as `champion_status`.
+        "calibration_status": {"calibrated": "FITTED", "uncalibrated": "UNFITTED"}.get(
+            prediction.calibration_status, prediction.calibration_status or "UNKNOWN"
+        ),
+        # Phase 4 — the pre-calibration probability for `value`, so a caller can show raw vs.
+        # calibrated distinctly instead of only ever seeing the number `calibration_status`
+        # already describes. `None` for predictions generated before this field existed.
+        "raw_probability": prediction.raw_probability,
+        # Phase 4 — how much evidence backed, and when, the calibration fit `calibration_status`
+        # describes. Both `None` when status is "UNFITTED", for a model-baked calibration (the
+        # Champion's own artifact already bakes it in), or for predictions from before these
+        # fields existed.
+        "calibration_sample_count": prediction.calibration_sample_count,
+        "calibration_fitted_at": (
+            prediction.calibration_fitted_at.isoformat() if prediction.calibration_fitted_at else None
         ),
         "explanation_status": "GENERATED" if explanation.ai_explanation else "UNAVAILABLE",
     }

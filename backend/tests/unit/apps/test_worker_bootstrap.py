@@ -21,20 +21,26 @@ T0 = datetime(2026, 7, 26, tzinfo=timezone.utc)
 
 def _reset_all_factories() -> None:
     """Every factory setter accepts None to reset — same teardown shape the existing per-module
-    Celery test suites already establish (test_celery_tasks.py etc.), applied to all 6 here so no
+    Celery test suites already establish (test_celery_tasks.py etc.), applied to all 8 here so no
     state leaks between this file's tests or into other test modules."""
     from modules.admin.infrastructure.celery.tasks import set_admin_context_factory
-    from modules.ingestion.infrastructure.celery.tasks import set_orchestrator_factory
+    from modules.ingestion.infrastructure.celery.tasks import (
+        set_orchestrator_factory,
+        set_team_statistics_sync_orchestrator_factory,
+    )
     from modules.intelligence.infrastructure.celery.tasks import set_scheduled_news_sync_service_factory
     from modules.predictions.infrastructure.celery.tasks import (
         set_calibration_service_factory,
         set_calibration_validation_service_factory,
+        set_prediction_generation_orchestrator_factory,
         set_retraining_orchestrator_factory,
     )
 
     set_orchestrator_factory(None)
     set_admin_context_factory(None)
     set_retraining_orchestrator_factory(None)
+    set_prediction_generation_orchestrator_factory(None)
+    set_team_statistics_sync_orchestrator_factory(None)
     set_calibration_service_factory(None)
     set_calibration_validation_service_factory(None)
     set_scheduled_news_sync_service_factory(None)
@@ -83,6 +89,26 @@ def test_import_task_modules_registers_every_expected_task_name():
     assert not missing, f"tasks never registered with celery_app: {missing}"
 
 
+def test_factory_registry_names_every_real_task_with_no_orphans(monkeypatch):
+    """The other direction of the check above: `test_import_task_modules_registers_every_
+    expected_task_name` only proves every name FACTORY_REGISTRY claims is real — it can't catch a
+    real, actually-scheduled task that FACTORY_REGISTRY's `task_names` tuple simply forgot to
+    list (a real drift found and fixed during Phase 5 verification: `import_task_modules()`
+    registers `ingestion.sync_players_for_competition`, and Beat schedules it, but the
+    `orchestrator` factory record's `task_names` never named it — harmless for wiring itself,
+    since one shared factory covers the whole module, but it silently made
+    `validate_factory_registry()`'s own failure-detail message incomplete). This test would have
+    caught that: every real, non-Celery-builtin task name must belong to exactly one factory
+    record."""
+    bootstrap.import_task_modules()
+
+    all_task_names = {name for record in bootstrap._fresh_registry().values() for name in record.task_names}
+    own_prefixes = ("ingestion.", "admin.", "predictions.", "intelligence.")
+    real_task_names = {name for name in bootstrap.celery_app.tasks if name.startswith(own_prefixes)}
+    orphaned = real_task_names - all_task_names
+    assert not orphaned, f"tasks registered with celery_app but not named by any FACTORY_REGISTRY record: {orphaned}"
+
+
 # --- C/D. Factory registry ----------------------------------------------------------------
 
 def test_fresh_registry_starts_entirely_unregistered():
@@ -90,8 +116,9 @@ def test_fresh_registry_starts_entirely_unregistered():
 
     assert all(not record.registered for record in registry.values())
     assert set(registry.keys()) == {
-        "orchestrator", "admin_context", "retraining_orchestrator", "calibration_service",
-        "calibration_validation_service", "scheduled_news_sync",
+        "orchestrator", "admin_context", "retraining_orchestrator", "prediction_generation_orchestrator",
+        "team_statistics_sync_orchestrator", "calibration_service", "calibration_validation_service",
+        "scheduled_news_sync",
     }
 
 
@@ -108,7 +135,9 @@ def test_validate_factory_registry_fails_closed_with_clear_detail_when_incomplet
     assert "admin_context" in message
     assert "scheduled_news_sync" in message
     assert "intelligence.sync_scheduled_news" in message
-    assert "orchestrator" not in message.replace("retraining_orchestrator", "").replace("admin_context", "")
+    assert "orchestrator" not in message.replace("retraining_orchestrator", "").replace(
+        "prediction_generation_orchestrator", ""
+    ).replace("team_statistics_sync_orchestrator", "").replace("admin_context", "")
 
 
 def test_validate_factory_registry_passes_once_everything_is_registered(monkeypatch):
@@ -171,17 +200,23 @@ def test_bootstrap_worker_runs_the_real_production_path_end_to_end(worker_env):
     assert all(record.registered for record in bootstrap.FACTORY_REGISTRY.values())
 
     from modules.admin.infrastructure.celery.tasks import _admin_context_factory
-    from modules.ingestion.infrastructure.celery.tasks import _orchestrator_factory
+    from modules.ingestion.infrastructure.celery.tasks import (
+        _orchestrator_factory,
+        _team_statistics_sync_orchestrator_factory,
+    )
     from modules.intelligence.infrastructure.celery.tasks import _scheduled_news_sync_service_factory
     from modules.predictions.infrastructure.celery.tasks import (
         _calibration_service_factory,
         _calibration_validation_service_factory,
+        _prediction_generation_orchestrator_factory,
         _retraining_orchestrator_factory,
     )
 
     assert _orchestrator_factory is not None
     assert _admin_context_factory is not None
     assert _retraining_orchestrator_factory is not None
+    assert _prediction_generation_orchestrator_factory is not None
+    assert _team_statistics_sync_orchestrator_factory is not None
     assert _calibration_service_factory is not None
     assert _calibration_validation_service_factory is not None
     assert _scheduled_news_sync_service_factory is not None

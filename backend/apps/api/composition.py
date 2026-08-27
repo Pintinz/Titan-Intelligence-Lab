@@ -76,6 +76,9 @@ from modules.ingestion.application.cross_provider_team_mapping_service import Cr
 from modules.ingestion.application.entity_reconciliation_service import EntityReconciliationService
 from modules.ingestion.application.historical_import_service import HistoricalImportService
 from modules.ingestion.application.monitoring_service import MonitoringService
+from modules.ingestion.application.scheduled_team_statistics_sync_orchestrator import (
+    ScheduledTeamStatisticsSyncOrchestrator,
+)
 from modules.ingestion.application.sync_orchestrator import SyncOrchestrator
 from modules.ingestion.infrastructure.cache.redis_lock import RedisDistributedLock
 from modules.ingestion.infrastructure.cache.redis_sync_cache import RedisSyncCache
@@ -128,6 +131,7 @@ from modules.intelligence.application.scheduled_news_sync_service import Schedul
 from modules.intelligence.application.sentiment_service import SentimentService
 from modules.intelligence.application.source_reliability_service import SourceReliabilityService
 from modules.intelligence.application.summarization_service import SummarizationService
+from modules.intelligence.infrastructure.claude_adapter import ClaudeAdapter
 from modules.intelligence.infrastructure.gemini_adapter import GeminiAdapter
 from modules.intelligence.infrastructure.mock_gemini_adapter import MockGeminiAdapter
 from modules.intelligence.infrastructure.providers.rss_news_provider import RssNewsProvider
@@ -176,15 +180,23 @@ from modules.predictions.application.predictor_registry import PredictorRegistry
 from modules.predictions.application.backtest_service import BacktestService
 from modules.predictions.application.challenger_evaluation_service import ChallengerEvaluationService
 from modules.predictions.application.error_memory_service import ErrorMemoryService
+from modules.predictions.application.scheduled_prediction_generation_orchestrator import (
+    ScheduledPredictionGenerationOrchestrator,
+)
 from modules.predictions.application.scheduled_retraining_orchestrator import ScheduledRetrainingOrchestrator
 from modules.predictions.application.training_pipeline_service import RetrainingScheduler, TrainingPipelineService
 from modules.predictions.application.historical_feature_reconstruction_service import (
     HistoricalFeatureReconstructionService,
 )
+from modules.predictions.application.manager_change_context_calculator import (
+    ManagerChangeContextCalculator,
+    football_manager_change_context_calculator,
+)
 from modules.predictions.application.news_market_impact_engine import NewsMarketImpactEngine
 from modules.predictions.application.windowed_feature_engineering_service import (
     FixtureExpectedGoalsCalculator,
     FixtureFormDifferentialCalculator,
+    FixtureVenueStrengthCalculator,
     LineupContinuityCalculator,
     TransferActivityCalculator,
     baseball_fixture_form_differential_calculator,
@@ -193,6 +205,7 @@ from modules.predictions.application.windowed_feature_engineering_service import
     basketball_form_calculator,
     football_fixture_expected_goals_calculator,
     football_fixture_stat_differential_calculators,
+    football_fixture_venue_strength_calculator,
     football_form_calculator,
     football_lineup_continuity_calculators,
     football_transfer_activity_calculators,
@@ -500,7 +513,9 @@ def build_entity_reconciliation_service(session: AsyncSession) -> EntityReconcil
         },
         lineup_continuity_calculators={"football": build_football_lineup_continuity_calculators(session)},
         transfer_activity_calculators={"football": build_football_transfer_activity_calculators(session)},
+        venue_strength_calculators={"football": build_football_venue_strength_calculator(session)},
         news_market_impact_engines={"football": build_football_news_market_impact_engine(session)},
+        manager_change_calculators={"football": build_football_manager_change_context_calculator(session)},
         team_form_calculators=_build_team_form_calculators(session),
     )
 
@@ -664,6 +679,17 @@ def build_sync_orchestrator(session: AsyncSession) -> SyncOrchestrator:
     )
 
 
+def build_scheduled_team_statistics_sync_orchestrator(session: AsyncSession) -> ScheduledTeamStatisticsSyncOrchestrator:
+    return ScheduledTeamStatisticsSyncOrchestrator(
+        sync=build_sync_orchestrator(session),
+        sports=SqlAlchemySportRepository(session=session),
+        fixtures=SqlAlchemyFixtureRepository(session=session),
+        matches=SqlAlchemyMatchRepository(session=session),
+        team_statistics=SqlAlchemyTeamStatisticsRepository(session=session),
+        sport_plugins=get_sport_plugin_registry(),
+    )
+
+
 def build_monitoring_service(session: AsyncSession) -> MonitoringService:
     return MonitoringService(sync_runs=SqlAlchemySyncRunRepository(session=session))
 
@@ -770,13 +796,26 @@ def get_text_intelligence_provider(session: AsyncSession) -> TextIntelligencePro
     Provider Management System; `MockGeminiAdapter` otherwise — resolved per call by
     `TextIntelligenceRouter`, not once here, so a credential added/disabled after startup takes
     effect immediately (docs/decisions.md ADR-008 follow-up; previously hardcoded to the mock
-    adapter permanently, even once a working key existed)."""
+    adapter permanently, even once a working key existed).
+
+    News Intelligence audit (2026-08-27): `ClaudeAdapter` is wired as a `fallback_adapters` entry
+    — tried only when Gemini fails or isn't credentialed (see `TextIntelligenceRouter`'s own
+    docstring for why: a live-observed Gemini quota exhaustion this session). Harmless when no
+    "claude" provider/credential has been registered yet (the router's own usability check skips
+    an adapter with nothing usable) — see `scripts/import_claude_credential_from_env.py` for how
+    an operator activates it."""
     admin_service = build_provider_management_service(session)
     return TextIntelligenceRouter(
         admin_service=admin_service,
         real_adapter=GeminiAdapter(
             get_api_key=_make_api_key_getter(admin_service, GeminiAdapter.provider_key),
             metrics_recorder=get_intelligence_metrics_recorder(),
+        ),
+        fallback_adapters=(
+            ClaudeAdapter(
+                get_api_key=_make_api_key_getter(admin_service, ClaudeAdapter.provider_key),
+                metrics_recorder=get_intelligence_metrics_recorder(),
+            ),
         ),
         mock_adapter=MockGeminiAdapter(),
     )
@@ -968,7 +1007,16 @@ def build_model_registry_service(session: AsyncSession) -> ModelRegistryService:
     # Section 30 audit fix (2026-08-23): must be the same process-wide `get_model_loader_service()`
     # singleton every `PredictionEngine` is built with (below) — invalidating a *different*
     # `ModelLoaderService` instance's cache would silently do nothing for live inference.
-    return ModelRegistryService(models=SqlAlchemyModelRepository(session=session), model_loader=get_model_loader_service())
+    # Forensic audit §11/§12 (2026-08-25): `comparisons` wired here is what makes the
+    # comparison-requirement promotion gate real rather than merely available — every caller of
+    # this factory (the admin promote endpoint, and `build_automatic_model_selection_service`'s
+    # own `ModelRegistryService`, which is what the retraining orchestrator's bootstrap-promotion
+    # path actually calls) gets the identical, single enforced policy, never a separate copy.
+    return ModelRegistryService(
+        models=SqlAlchemyModelRepository(session=session),
+        model_loader=get_model_loader_service(),
+        comparisons=build_model_comparison_repo(session),
+    )
 
 
 def build_feature_market_mapping_service(session: AsyncSession) -> FeatureMarketMappingService:
@@ -1311,6 +1359,15 @@ def build_retraining_scheduler(session: AsyncSession) -> RetrainingScheduler:
     return RetrainingScheduler(dataset_registry=build_dataset_registry_service(session))
 
 
+def build_scheduled_prediction_generation_orchestrator(session: AsyncSession) -> ScheduledPredictionGenerationOrchestrator:
+    return ScheduledPredictionGenerationOrchestrator(
+        cache=build_prediction_cache_service(session),
+        markets=SqlAlchemyMarketRepository(session=session),
+        sports=SqlAlchemySportRepository(session=session),
+        fixtures=SqlAlchemyFixtureRepository(session=session),
+    )
+
+
 def build_scheduled_retraining_orchestrator(session: AsyncSession) -> ScheduledRetrainingOrchestrator:
     return ScheduledRetrainingOrchestrator(
         markets=SqlAlchemyMarketRepository(session=session),
@@ -1433,6 +1490,15 @@ def build_football_news_market_impact_engine(session: AsyncSession) -> NewsMarke
     )
 
 
+def build_football_manager_change_context_calculator(session: AsyncSession) -> ManagerChangeContextCalculator:
+    return football_manager_change_context_calculator(
+        build_feature_registration_service(session),
+        build_feature_store_service(session),
+        SqlAlchemyNewsEventRepository(session=session),
+        SqlAlchemyKGNodeRepository(session=session),
+    )
+
+
 def build_historical_feature_reconstruction_service(session: AsyncSession) -> HistoricalFeatureReconstructionService:
     """Milestone 14 — not wired into any live endpoint or Celery task; see
     docs/milestone14_verification_report.md's Known Limitations / Deferred Work. Milestone 15 wired
@@ -1456,6 +1522,14 @@ def build_football_expected_goals_calculator(session: AsyncSession) -> FixtureEx
     )
 
 
+def build_football_venue_strength_calculator(session: AsyncSession) -> FixtureVenueStrengthCalculator:
+    return football_fixture_venue_strength_calculator(
+        build_feature_registration_service(session),
+        build_feature_store_service(session),
+        SqlAlchemyFixtureRepository(session=session),
+    )
+
+
 def build_football_market_seeder(session: AsyncSession) -> FootballMarketSeeder:
     team_statistics = SqlAlchemyTeamStatisticsRepository(session=session)
     return FootballMarketSeeder(
@@ -1469,7 +1543,9 @@ def build_football_market_seeder(session: AsyncSession) -> FootballMarketSeeder:
         expected_goals_calculator=build_football_expected_goals_calculator(session),
         lineup_continuity_calculators=build_football_lineup_continuity_calculators(session),
         transfer_activity_calculators=build_football_transfer_activity_calculators(session),
+        venue_strength_calculator=build_football_venue_strength_calculator(session),
         news_market_impact_engine=build_football_news_market_impact_engine(session),
+        manager_change_calculator=build_football_manager_change_context_calculator(session),
     )
 
 

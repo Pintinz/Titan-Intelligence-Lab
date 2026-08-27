@@ -138,10 +138,30 @@ class ModelDefinition:
     calibration_report_ref: str | None = None  # opaque pointer to a persisted CalibrationReport (task #165)
     feature_importance_ref: str | None = None  # opaque pointer to persisted SHAP/importance artifacts (task #166)
     artifact_ref: str | None = None  # ModelArtifactStorePort ref for the serialized PredictionModelPort payload
+    # Forensic audit §15 "Model Artifact Integrity" — sha256 hex digest of the exact bytes saved to
+    # `artifact_ref` at training time (`ModelLoaderService.compute_artifact_checksum`). `None` for
+    # any model registered before this field existed, or by a path not yet updated to compute one
+    # — `ModelLoaderService.load()` only verifies when a checksum is actually present, it never
+    # treats "no checksum recorded" as itself a failure.
+    artifact_checksum: str | None = None
     deployment_mode: str | None = None  # "shadow" | "canary" | "live" | None — finer-grained than `status`
     trained_at: datetime | None = None  # when fit() actually ran, distinct from `created_at` (registration time)
-    # Milestone 4 provenance foundation — "PROVENANCE_VERIFIED" | "PROVENANCE_UNVERIFIED".
+    # Milestone 4 provenance foundation — "PROVENANCE_VERIFIED" | "PROVENANCE_UNVERIFIED" |
+    # "PROVENANCE_COMPROMISED". The third value is a forensic-audit addition (Critical Fix #1,
+    # §10 "Contaminated Model Policy"): written only by `scripts/assess_training_integrity.py`,
+    # never invented as a default, when at least one feature key this model's market actually
+    # consumes (per `FeatureMarketMapping`) has a confirmed point-in-time violation in the offline
+    # feature store (`scripts/scan_feature_leakage.py`) — i.e. a real, non-hypothetical reason to
+    # distrust this specific model's training data, not a blanket "everything old is suspect."
+    # `PROVENANCE_VERIFIED` still means what Milestone 4 defined: an explicitly human-reviewed,
+    # independently-traceable training lineage. `PROVENANCE_COMPROMISED` is a stronger, narrower
+    # claim than "unverified" — it says the training data was actively checked and found bad, not
+    # merely never checked — so `ModelRegistryService.promote_to_champion` refuses it outright
+    # (see `is_training_compromised`) rather than merely leaving it un-promoted by omission.
     provenance_status: str = "PROVENANCE_UNVERIFIED"
+
+    def is_training_compromised(self) -> bool:
+        return self.provenance_status == "PROVENANCE_COMPROMISED"
 
     def is_genuinely_trained(self) -> bool:
         """Milestone 4 status honesty (Rule 13): a handful of markets (e.g.
@@ -263,13 +283,43 @@ class Prediction:
     # `None` only for predictions generated before this field existed — never inferred after the
     # fact from `model_id` alone, since that's exactly the conflation this field exists to close.
     predictor_provenance: str | None = None
-    # Section 31 audit fix (2026-08-23): whether `self.probability` actually passed through a
-    # genuinely fitted `CalibratorPort.fit()` result, or the honest identity pass-through a
-    # never-fitted model returns. One of "calibrated" | "uncalibrated"; `None` only for predictions
-    # generated before this field existed. Same "never inferred after the fact" posture as
-    # `predictor_provenance` — the API must not call a raw pass-through "calibrated" just because
-    # a calibrator object was wired.
+    # Forensic audit §3/§13 — WHY `predictor_provenance` is "formula_fallback", when it is. One of
+    # "NO_ARTIFACT_REGISTERED" (a placeholder Champion — never trained at all), "ARTIFACT_LOAD_FAILURE"
+    # (missing/unreachable artifact store), "ARTIFACT_INTEGRITY_MISMATCH" (checksum mismatch — see
+    # `ArtifactIntegrityError`), "ARTIFACT_DESERIALIZE_FAILURE" (corrupt/incompatible payload), or
+    # "UNKNOWN_ARTIFACT_ERROR" for anything else. `None` whenever `predictor_provenance ==
+    # "trained_model"` (no fallback occurred) or for predictions generated before this field existed.
+    fallback_reason: str | None = None
+    # Section 31 audit fix (2026-08-23), extended by Phase 4 (Calibration Integrity, 2026-08-25):
+    # whether `self.probability` actually passed through a genuinely fitted, fresh calibration, or
+    # an identity/untrusted pass-through. One of "UNFITTED" (no calibration has ever been fitted
+    # for this model — identity pass-through), "FITTED" (a fresh fit was applied, or the Champion's
+    # own artifact already bakes in calibration via `ModelDefinition.calibration_ref`), "STALE" (a
+    # fit exists but is older than the configured staleness window — still applied, but flagged),
+    # or "INVALID" (a fit exists but produced a non-finite probability — discarded, identity used
+    # instead). `None` only for predictions generated before this field existed, or with the legacy
+    # "calibrated"/"uncalibrated" values from before this four-state vocabulary existed — never
+    # inferred after the fact for either. Same "never claim more than actually happened" posture as
+    # `predictor_provenance` — the API must not call a raw pass-through "calibrated" just because a
+    # calibrator object was wired.
     calibration_status: str | None = None
+    # Phase 4 (Calibration Integrity, 2026-08-25) — the predictor's pre-calibration probability for
+    # `value` (same "P(the published value)" semantic as `probability` above, computed the same
+    # way but with the identity/no-op calibration applied instead of whatever `calibration_status`
+    # describes). Lets a caller show "raw vs. calibrated" distinctly instead of only ever seeing
+    # the already-calibrated number. `None` only for predictions generated before this field
+    # existed.
+    raw_probability: float | None = None
+    # Phase 4 — how many real (raw_probability, actual_outcome) samples backed the calibration
+    # fit named by `calibration_status`, from `CalibratorPort.get_metadata()`. `None` when
+    # `calibration_status` is "UNFITTED", or for a model-baked calibration (`calibration_ref` on
+    # the model itself — its own training-time sample count isn't tracked as calibration metadata
+    # here), or for predictions generated before this field existed.
+    calibration_sample_count: int | None = None
+    # Phase 4 — when that calibration fit was produced. Same nullability posture as
+    # `calibration_sample_count` above; together they're what a caller needs to judge whether a
+    # "FITTED"/"STALE" status is still trustworthy.
+    calibration_fitted_at: datetime | None = None
 
     def is_published(self) -> bool:
         return self.status is PredictionStatus.PUBLISHED

@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
+from modules.predictions.domain.calibration import CalibrationMetadata
 from modules.predictions.domain.value_objects import ModelId
 
 _MIN_TEMPERATURE = 1e-3
@@ -39,6 +41,7 @@ class TemperatureScalingCalibrator:
     learning_rate: float = 0.05
     iterations: int = 300
     _temperatures: dict = field(default_factory=dict)  # ModelId -> float
+    _metadata: dict[ModelId, CalibrationMetadata] = field(default_factory=dict)
 
     async def calibrate(self, model_id: ModelId, raw_probability: float) -> float:
         temperature = self._temperatures.get(model_id, 1.0)
@@ -59,6 +62,10 @@ class TemperatureScalingCalibrator:
             temperature = max(temperature - self.learning_rate * dl_dt, _MIN_TEMPERATURE)
 
         self._temperatures[model_id] = temperature
+        self._metadata[model_id] = CalibrationMetadata(sample_count=n, fitted_at=datetime.now(timezone.utc))
 
     async def is_fitted(self, model_id: ModelId) -> bool:
         return model_id in self._temperatures
+
+    async def get_metadata(self, model_id: ModelId) -> CalibrationMetadata | None:
+        return self._metadata.get(model_id)

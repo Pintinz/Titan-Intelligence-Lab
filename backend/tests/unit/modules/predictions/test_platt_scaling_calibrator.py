@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from uuid import uuid4
 
 import pytest
@@ -194,3 +195,63 @@ async def test_is_fitted_false_with_repository_but_no_persisted_row(model_id, sq
     calibrator = PlattScalingCalibrator(repository=SqlAlchemyCalibrationParametersRepository(session=sqlite_session))
 
     assert await calibrator.is_fitted(model_id) is False
+
+
+# --- Phase 4 (Calibration Integrity): get_metadata() ------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_metadata_is_none_before_any_fit_in_memory(model_id):
+    calibrator = PlattScalingCalibrator()
+
+    assert await calibrator.get_metadata(model_id) is None
+
+
+@pytest.mark.asyncio
+async def test_get_metadata_reports_sample_count_and_fitted_at_after_a_real_fit(model_id):
+    calibrator = PlattScalingCalibrator()
+
+    await calibrator.fit(model_id, [(0.9, True), (0.9, False)] * 25)
+    metadata = await calibrator.get_metadata(model_id)
+
+    assert metadata is not None
+    assert metadata.sample_count == 50
+    assert metadata.fitted_at is not None
+
+
+@pytest.mark.asyncio
+async def test_get_metadata_reads_through_repository_across_processes(model_id, sqlite_session):
+    fitting_instance = PlattScalingCalibrator(repository=SqlAlchemyCalibrationParametersRepository(session=sqlite_session))
+    await fitting_instance.fit(model_id, [(0.9, True), (0.9, False)] * 25)
+    await sqlite_session.commit()
+
+    serving_instance = PlattScalingCalibrator(repository=SqlAlchemyCalibrationParametersRepository(session=sqlite_session))
+    metadata = await serving_instance.get_metadata(model_id)
+
+    assert metadata is not None
+    assert metadata.sample_count == 50
+
+
+@pytest.mark.asyncio
+async def test_get_metadata_is_none_with_repository_but_no_persisted_row(model_id, sqlite_session):
+    calibrator = PlattScalingCalibrator(repository=SqlAlchemyCalibrationParametersRepository(session=sqlite_session))
+
+    assert await calibrator.get_metadata(model_id) is None
+
+
+# --- Phase 4: fit() must never persist/cache a diverged (non-finite) result --------------------
+
+
+@pytest.mark.asyncio
+async def test_fit_on_degenerate_all_one_class_data_never_produces_non_finite_parameters(model_id):
+    """A sample set where every outcome is the same class is the classic logistic-regression
+    divergence case — gradient descent pushes toward +/-infinity chasing perfect separation.
+    Whatever `fit()` does here, `calibrate()` must never return NaN/Inf afterward (that would
+    poison every future prediction's published probability with an unusable number)."""
+    calibrator = PlattScalingCalibrator()
+    samples = [(0.5 + i * 1e-6, True) for i in range(30)]  # every outcome positive — degenerate
+
+    await calibrator.fit(model_id, samples)
+    calibrated = await calibrator.calibrate(model_id, 0.7)
+
+    assert math.isfinite(calibrated)

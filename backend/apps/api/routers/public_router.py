@@ -45,7 +45,8 @@ from apps.api.composition import (
 from apps.api.rate_limit import rate_limit_by_ip
 from modules.ingestion.domain.value_objects import SyncStatus
 from modules.knowledge_graph.domain.value_objects import EdgeType, NodeType
-from modules.predictions.domain.value_objects import PredictionStatus
+from modules.predictions.domain.value_objects import PredictionStatus, TargetType
+from modules.predictions.infrastructure.persistence.repositories import SqlAlchemyPredictionOutcomeRepository
 from modules.sports.domain.value_objects import (
     CompetitionId,
     CountryId,
@@ -214,6 +215,7 @@ async def featured_intelligence(limit: int = Query(default=3, ge=1, le=6), sessi
     teams_repo = SqlAlchemyTeamRepository(session=session)
     seasons_repo = SqlAlchemySeasonRepository(session=session)
     competitions_repo = SqlAlchemyCompetitionRepository(session=session)
+    outcomes_repo = SqlAlchemyPredictionOutcomeRepository(session=session)
 
     recent = await prediction_service.predictions.list_recent(limit=500)
     published = [p for p in recent if p.status is PredictionStatus.PUBLISHED]
@@ -247,20 +249,23 @@ async def featured_intelligence(limit: int = Query(default=3, ge=1, le=6), sessi
             best_per_market[market.market_key] = (prediction, market)
     picks = sorted(best_per_market.values(), key=lambda pm: pm[0].confidence.composite, reverse=True)
 
-    # A landing-page hero showcasing a prediction for a match that already finished last week reads
-    # as stale, not "sports intelligence in action" — resolve every diversified candidate's fixture
-    # up front and prefer LIVE, then a genuinely-upcoming SCHEDULED fixture, over anything else
-    # (completed/postponed/cancelled), confidence only breaking ties within the same tier. Never
-    # fabricates a live/upcoming match that doesn't exist: if no published prediction covers one,
-    # the ranking falls back to the real highest-confidence pick regardless of timing, same as
-    # before this change.
+    # A landing-page hero showcasing a prediction for a match that already finished reads as stale,
+    # not "sports intelligence in action" — and now that `verified-intelligence` exists as its own
+    # section for exactly that content, a completed fixture no longer belongs here at all (real UX
+    # ask: featured-intelligence should be forecast-only, never a completed-match fallback). Resolve
+    # every diversified candidate's fixture up front, drop anything completed outright, then prefer
+    # LIVE over a genuinely-upcoming SCHEDULED fixture, confidence only breaking ties within the
+    # same tier. If nothing live/upcoming/genuinely-pending is published, the response is honestly
+    # empty — never a completed match dressed up as current.
     #
     # A fixture's own `status` field is not fully trustworthy on its own — the sync job that
     # flips SCHEDULED -> COMPLETED after real kickoff can lag or gap (verified live: 9 of 380
     # locally-seeded "scheduled" fixtures already have a past `scheduled_at`, HUL vs MUN among
     # them, 2026-08-22 with "now" at 2026-08-23). A "scheduled" fixture whose kickoff has already
     # passed is trusted for neither tier — it might be live, finished, or genuinely delayed, and
-    # showing it as "upcoming" would misrepresent something that may already be over.
+    # showing it as "upcoming" would misrepresent something that may already be over — but it's
+    # also not confirmed completed, so (unlike a fixture actually marked completed) it still
+    # qualifies to appear, just ranked behind anything reliably upcoming.
     now = _now()
 
     def _is_reliably_upcoming(fixture) -> bool:
@@ -282,7 +287,7 @@ async def featured_intelligence(limit: int = Query(default=3, ge=1, le=6), sessi
             fixture = await fixtures_repo.get(FixtureId(uuid.UUID(prediction.subject_ref)))
         except ValueError:
             fixture = None
-        if fixture is None:
+        if fixture is None or fixture.status.value == "completed":
             continue
         with_fixtures.append((prediction, market, fixture))
     with_fixtures.sort(key=lambda pmf: (_timing_tier(pmf[2]), -pmf[0].confidence.composite))
@@ -291,34 +296,135 @@ async def featured_intelligence(limit: int = Query(default=3, ge=1, le=6), sessi
     for prediction, market, fixture in with_fixtures:
         if len(data) >= limit:
             break
-        home = await teams_repo.get(fixture.home_team_id)
-        away = await teams_repo.get(fixture.away_team_id)
-        season = await seasons_repo.get(fixture.season_id)
-        competition = await competitions_repo.get(season.competition_id) if season is not None else None
-
         data.append(
-            {
-                "prediction_id": str(prediction.id),
-                "fixture_id": str(fixture.id),
-                "sport_code": market.sport_code,
-                "competition_name": competition.name if competition else None,
-                "home_team": {"name": home.name, "short_name": home.short_name, "logo_url": home.logo_url} if home else None,
-                "away_team": {"name": away.name, "short_name": away.short_name, "logo_url": away.logo_url} if away else None,
-                "scheduled_at": fixture.scheduled_at.isoformat(),
-                "status": fixture.status.value,
-                "market_name": market.name,
-                "market_key": market.market_key,
-                "value": prediction.value,
-                "probability": prediction.probability,
-                "probability_distribution": dict(prediction.probability_distribution or {}),
-                "confidence_composite": prediction.confidence.composite,
-                "evidence_highlights": {
-                    "supporting": [name for name, _weight in prediction.explanation.top_positive_features[:2]],
-                    "contradicting": [name for name, _weight in prediction.explanation.top_negative_features[:1]],
-                },
-                "generated_at": prediction.generated_at.isoformat() if prediction.generated_at else None,
-            }
+            await _build_pick_dto(prediction, market, fixture, teams_repo, seasons_repo, competitions_repo, outcomes_repo)
         )
+
+    return envelope(_store(cache_key, data), meta={"count": len(data)})
+
+
+async def _build_pick_dto(prediction, market, fixture, teams_repo, seasons_repo, competitions_repo, outcomes_repo) -> dict:
+    """Resolves one (prediction, market, fixture) triple to the response shape both
+    `featured_intelligence` and `verified_intelligence` return — team names/crests, the real final
+    score, and (for a completed fixture) its resolved predicted-vs-actual outcome. Extracted once
+    both endpoints needed it (audit → reuse → extend, never rewrite duplicate query logic)."""
+    home = await teams_repo.get(fixture.home_team_id)
+    away = await teams_repo.get(fixture.away_team_id)
+    season = await seasons_repo.get(fixture.season_id)
+    competition = await competitions_repo.get(season.competition_id) if season is not None else None
+
+    # A completed fixture's own final score is always real, regardless of whether an outcome
+    # has been resolved for THIS prediction yet — surfaced unconditionally so the frontend can
+    # stop presenting an already-finished match as if it were still upcoming (real gap: the
+    # ranking below can fall back to a completed match's original prediction when no live/
+    # upcoming candidate exists, and the response previously carried no final score at all).
+    outcome_summary = None
+    if fixture.status.value == "completed":
+        outcome = await outcomes_repo.get_for_prediction(prediction.id)
+        if outcome is not None:
+            # "Correct/incorrect" only means 0.0/1.0 for a CLASSIFICATION market's own error
+            # convention (OutcomeResolutionService) — a REGRESSION market's error is a raw
+            # magnitude (Phase 6 fix), so verdict stays honestly unknown there rather than
+            # comparing a magnitude to 0.0 as if it were the same scale.
+            is_correct = (
+                outcome.error == 0.0
+                if market.target_type is TargetType.CLASSIFICATION and outcome.error is not None
+                else None
+            )
+            outcome_summary = {"actual_value": outcome.actual_value, "is_correct": is_correct}
+
+    return {
+        "prediction_id": str(prediction.id),
+        "fixture_id": str(fixture.id),
+        "sport_code": market.sport_code,
+        "competition_name": competition.name if competition else None,
+        "home_team": {"name": home.name, "short_name": home.short_name, "logo_url": home.logo_url} if home else None,
+        "away_team": {"name": away.name, "short_name": away.short_name, "logo_url": away.logo_url} if away else None,
+        "scheduled_at": fixture.scheduled_at.isoformat(),
+        "status": fixture.status.value,
+        "home_score": fixture.home_score,
+        "away_score": fixture.away_score,
+        "outcome": outcome_summary,
+        "market_name": market.name,
+        "market_key": market.market_key,
+        "value": prediction.value,
+        "probability": prediction.probability,
+        "probability_distribution": dict(prediction.probability_distribution or {}),
+        "confidence_composite": prediction.confidence.composite,
+        "evidence_highlights": {
+            "supporting": [name for name, _weight in prediction.explanation.top_positive_features[:2]],
+            "contradicting": [name for name, _weight in prediction.explanation.top_negative_features[:1]],
+        },
+        "generated_at": prediction.generated_at.isoformat() if prediction.generated_at else None,
+    }
+
+
+# -- Verified Intelligence --------------------------------------------------------------------------
+
+
+@router.get("/verified-intelligence")
+async def verified_intelligence(limit: int = Query(default=6, ge=1, le=12), session: AsyncSession = Depends(get_session)):
+    """Real completed fixtures with a resolved predicted-vs-actual outcome — proving predictions
+    against real final results, as opposed to `featured-intelligence`'s live/upcoming forecasts.
+    Only ever a fixture whose `OutcomeResolutionService` has actually recorded an outcome for this
+    exact prediction; a completed fixture whose outcome hasn't resolved yet is dropped rather than
+    padded with a fabricated verdict. One card per fixture (its highest-confidence published
+    market), most recently played first."""
+    cache_key = f"verified-intelligence:{limit}"
+    cached = _cached(cache_key)
+    if cached is not None:
+        return envelope(cached)
+
+    prediction_service = build_prediction_cache_service(session)
+    market_service = build_market_registry_service(session)
+    fixtures_repo = SqlAlchemyFixtureRepository(session=session)
+    teams_repo = SqlAlchemyTeamRepository(session=session)
+    seasons_repo = SqlAlchemySeasonRepository(session=session)
+    competitions_repo = SqlAlchemyCompetitionRepository(session=session)
+    outcomes_repo = SqlAlchemyPredictionOutcomeRepository(session=session)
+
+    recent = await prediction_service.predictions.list_recent(limit=500)
+    published = [p for p in recent if p.status is PredictionStatus.PUBLISHED]
+
+    market_cache: dict[str, object] = {}
+    candidates: list[tuple] = []
+    for prediction in published:
+        market_key = str(prediction.market_id)
+        if market_key not in market_cache:
+            market_cache[market_key] = await market_service.markets.get(prediction.market_id)
+        market = market_cache[market_key]
+        if market is None:
+            continue
+        try:
+            fixture = await fixtures_repo.get(FixtureId(uuid.UUID(prediction.subject_ref)))
+        except ValueError:
+            fixture = None
+        if fixture is None or fixture.status.value != "completed":
+            continue
+        candidates.append((prediction, market, fixture))
+
+    # One card per fixture, not one per (fixture, market) — a completed fixture often has several
+    # published markets (Match Winner, BTTS, Over/Under, ...), and this section is about proving
+    # the platform's track record across distinct real matches, not repeating the same match with
+    # a different market. Keep each fixture's highest-confidence published market.
+    best_per_fixture: dict[str, tuple] = {}
+    for prediction, market, fixture in candidates:
+        key = str(fixture.id)
+        existing = best_per_fixture.get(key)
+        if existing is None or prediction.confidence.composite > existing[0].confidence.composite:
+            best_per_fixture[key] = (prediction, market, fixture)
+
+    ordered = sorted(best_per_fixture.values(), key=lambda pmf: pmf[2].scheduled_at, reverse=True)[:limit]
+
+    data: list[dict] = []
+    for prediction, market, fixture in ordered:
+        dto = await _build_pick_dto(prediction, market, fixture, teams_repo, seasons_repo, competitions_repo, outcomes_repo)
+        # Genuinely completed but not yet resolved (OutcomeResolutionService hasn't run for this
+        # fixture yet) — a "Verified Intelligence" card with no verified outcome is a contradiction
+        # in terms, so it's dropped here rather than shown as an empty/pending card.
+        if dto["outcome"] is None:
+            continue
+        data.append(dto)
 
     return envelope(_store(cache_key, data), meta={"count": len(data)})
 

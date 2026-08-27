@@ -20,7 +20,20 @@ from datetime import timedelta
 HISTORICAL_IMPORT_INTERVAL_SECONDS = 6 * 3600
 STANDINGS_INTERVAL_SECONDS = 3600
 STATISTICS_INTERVAL_SECONDS = 1800
-LIVE_FIXTURES_INTERVAL_SECONDS = 30
+# Redis/Celery pipeline verification (2026-08-25) — was 30s, calibrated assuming a fast response.
+# Real runs against api-sports.io for a full-season basketball/baseball competition (hundreds of
+# in-progress/recent games) empirically took 197-300s wall-clock on the solo-pool worker. Because
+# `SyncOrchestrator.sync_live_fixtures` deliberately bypasses the checkpoint-based incremental
+# skip for SyncTrigger.LIVE (`_run_sync`'s own "always refresh" contract — see
+# `test_live_trigger_bypasses_incremental_skip`, which this change does not touch), a 30s Beat
+# interval enqueued a fresh duplicate for the same scope roughly every 30s while a single run was
+# still in flight; each queued duplicate then ran a fully redundant re-fetch once its turn came up
+# (confirmed live: a queue backlog of 5,797 tasks, 94% of them exactly this). 300s gives a normal
+# run enough headroom to finish before its own next Beat firing, so at most ~1 duplicate can ever
+# stack up per scope — still refreshes "live" data every 5 minutes, just without the runaway
+# re-fetch loop. Paired with sync_orchestrator.py's LIVE_FIXTURES_LOCK_TTL_SECONDS (600s), which
+# protects the (now much rarer) case of a run that still overruns this interval.
+LIVE_FIXTURES_INTERVAL_SECONDS = 300
 PROVIDER_HEALTH_CHECK_INTERVAL_SECONDS = 300
 PROVIDER_POLL_INTERVAL_SECONDS = 900
 # Retraining is a heavy, dataset-build-plus-multi-algorithm-training operation — a 6-hour cadence
@@ -37,6 +50,22 @@ SCHEDULED_CALIBRATION_CHECK_INTERVAL_SECONDS = 3600
 # SCHEDULED_RETRAINING_CHECK_INTERVAL_SECONDS's 6-hour cadence rather than the cheap Platt-only
 # fit's hourly one above.
 SCHEDULED_CALIBRATION_VALIDATION_CHECK_INTERVAL_SECONDS = 6 * 3600
+# Real gap found live (2026-08-26) — upcoming fixtures were already syncing on their own schedule,
+# but nothing ever generated predictions for them automatically, so featured-intelligence stayed
+# empty even with real upcoming matches in the database. Matches
+# SCHEDULED_CALIBRATION_CHECK_INTERVAL_SECONDS's hourly cadence: frequent enough that a freshly-
+# synced fixture gets a real prediction within the hour, generous headroom (4x) over
+# predictions/infrastructure/celery/tasks.py's own _PREDICTION_GENERATION_TASK_TIMEOUT_SECONDS
+# (900s) — see that constant's docstring for why this codebase now applies that lesson up front.
+SCHEDULED_PREDICTION_GENERATION_INTERVAL_SECONDS = 3600
+# Real gap found live (2026-08-26) — a completed fixture's "Match Statistics" panel stayed
+# honestly empty forever because nothing ever called `sync_team_statistics_for_fixture`
+# automatically (manual admin trigger only). Real box-score data is typically available within
+# minutes of a match ending, but this sweep itself scans every completed fixture in the lookback
+# window each run — hourly (matching prediction generation's own cadence) is frequent enough that
+# a freshly-completed match gets its stats within the hour, with 2x headroom over
+# ingestion/infrastructure/celery/tasks.py's own _TEAM_STATISTICS_SYNC_TASK_TIMEOUT_SECONDS (1800s).
+SCHEDULED_TEAM_STATISTICS_SYNC_INTERVAL_SECONDS = 3600
 # Milestone 5 (Verified Pre-Match Data Availability) — matches PROVIDER_POLL_INTERVAL_SECONDS's
 # free-tier-safe cadence (same 10 req/min budget every other football-data.org-class entry
 # respects). At 15 minutes, a fixture's LINEUP_PREMATCH_WINDOW_MINUTES (default 90) is checked
@@ -175,6 +204,20 @@ BEAT_SCHEDULE = {
     # up ADR-011 flagged as needing Celery beat rather than a new scheduler.
     "check-all-provider-health": {
         "task": "admin.check_all_provider_health", "schedule": timedelta(seconds=PROVIDER_HEALTH_CHECK_INTERVAL_SECONDS),
+    },
+    # Real gap found live (2026-08-26) — upcoming fixtures were already syncing, but nothing ever
+    # generated predictions for them automatically. See SCHEDULED_PREDICTION_GENERATION_INTERVAL_
+    # SECONDS's own comment above for the cadence/timeout-headroom reasoning.
+    "check-scheduled-prediction-generation": {
+        "task": "predictions.check_scheduled_prediction_generation",
+        "schedule": timedelta(seconds=SCHEDULED_PREDICTION_GENERATION_INTERVAL_SECONDS),
+    },
+    # Real gap found live (2026-08-26) — a completed fixture's "Match Statistics" panel stayed
+    # honestly empty forever because nothing ever called sync_team_statistics_for_fixture
+    # automatically. See SCHEDULED_TEAM_STATISTICS_SYNC_INTERVAL_SECONDS's own comment above.
+    "check-scheduled-team-statistics-sync": {
+        "task": "ingestion.check_scheduled_team_statistics_sync",
+        "schedule": timedelta(seconds=SCHEDULED_TEAM_STATISTICS_SYNC_INTERVAL_SECONDS),
     },
     # Audit fix (2026-08-02) — RetrainingScheduler/AutomaticModelSelectionService both already
     # existed but were only reachable via a manual Ops Center button; this is the automatic half.

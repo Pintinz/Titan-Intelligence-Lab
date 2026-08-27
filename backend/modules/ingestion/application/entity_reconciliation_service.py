@@ -70,10 +70,12 @@ from modules.sports.domain.value_objects import (
     VenueId,
 )
 from modules.watchlist.domain.value_objects import WatchlistEntityType
+from modules.predictions.application.manager_change_context_calculator import ManagerChangeContextCalculator
 from modules.predictions.application.news_market_impact_engine import NewsMarketImpactEngine
 from modules.predictions.application.outcome_resolution_service import OutcomeResolutionService
 from modules.predictions.application.windowed_feature_engineering_service import (
     FixtureFormDifferentialCalculator,
+    FixtureVenueStrengthCalculator,
     LineupContinuityCalculator,
     RollingTeamStatAverageCalculator,
     TransferActivityCalculator,
@@ -239,10 +241,20 @@ class EntityReconciliationService:
     # record has no fixture of its own to attach to, so the signal is derived per-fixture the
     # same way form_differential_calculators already is.
     transfer_activity_calculators: dict[str, tuple[TransferActivityCalculator, TransferActivityCalculator]] = field(default_factory=dict)
+    # Correct Score forensic audit (2026-08-26) — sport_code -> its FixtureVenueStrengthCalculator,
+    # same dict-by-sport-code shape as the fields above and for the same reason (only football has
+    # one today). Unlike FixtureExpectedGoalsCalculator (the venue-blind feature this replaces for
+    # football.correct_score), this one IS wired into reconcile_fixture — that calculator's own
+    # absence here was a real, live-confirmed freshness gap the audit flagged; not repeating it.
+    venue_strength_calculators: dict[str, FixtureVenueStrengthCalculator] = field(default_factory=dict)
     # Milestone 9 — sport_code -> one NewsMarketImpactEngine (unlike the home/away calculator
     # pairs above, one engine instance handles both sides — `compute_and_write` takes a `side`
     # parameter instead, since it needs to scan a full roster per call regardless of side).
     news_market_impact_engines: dict[str, NewsMarketImpactEngine] = field(default_factory=dict)
+    # News Intelligence audit (2026-08-27) — sport_code -> one ManagerChangeContextCalculator,
+    # same one-instance-handles-both-sides shape as news_market_impact_engines just above (this
+    # is also a team-level, not player-role-scoped, signal).
+    manager_change_calculators: dict[str, ManagerChangeContextCalculator] = field(default_factory=dict)
     # Premier League data-enrichment audit (2026-08-22) — sport_code -> its
     # RollingTeamStatAverageCalculator(s), same dict-by-sport-code shape as the fields above.
     # Unlike form_differential_calculators (pre-match, fixture-keyed), these are TEAM-keyed and
@@ -543,8 +555,23 @@ class EntityReconciliationService:
             await self._recompute_team_form(saved, sport_code, team_form_cutoff)
         await self._compute_form_differential(saved, sport_code, cutoff)
         await self._compute_transfer_activity(saved, sport_code, cutoff)
+        await self._compute_venue_strength(saved, sport_code, cutoff)
         await self._compute_news_market_impact(saved, sport_code, now)
+        await self._compute_manager_change_context(saved, sport_code, now)
         return saved, created
+
+    async def _compute_manager_change_context(self, fixture: Fixture, sport_code: str | None, now: datetime) -> None:
+        """News Intelligence audit (2026-08-27) — same "every reconciliation, not gated on
+        completion" reasoning as `_compute_news_market_impact` just above, and the same
+        fixture-specific kickoff cutoff guard."""
+        if sport_code is None:
+            return
+        calculator = self.manager_change_calculators.get(sport_code)
+        if calculator is None:
+            return
+        fixture_id = str(fixture.id.value)
+        await calculator.compute_and_write(fixture_id, fixture.home_team_id, "home", now, kickoff=fixture.scheduled_at)
+        await calculator.compute_and_write(fixture_id, fixture.away_team_id, "away", now, kickoff=fixture.scheduled_at)
 
     async def _compute_news_market_impact(self, fixture: Fixture, sport_code: str | None, now: datetime) -> None:
         """Milestone 9 — same "every reconciliation, not gated on completion" reasoning as
@@ -595,6 +622,27 @@ class EntityReconciliationService:
         calculators = self.form_differential_calculators.get(sport_code, ())
         for calculator in calculators:
             await calculator.compute_and_write(str(fixture.id.value), fixture.home_team_id, fixture.away_team_id, as_of)
+
+    async def _compute_venue_strength(self, fixture: Fixture, sport_code: str | None, as_of: datetime) -> None:
+        """Correct Score forensic audit (2026-08-26) — the venue-aware attack/defence strength
+        features, computed on every reconciliation exactly like `_compute_form_differential`
+        above (pre-match team strength is what a prediction needs before kickoff). Silently
+        skipped for a sport with no calculator registered, when the caller didn't pass
+        sport_code, or when the sport hasn't been reconciled yet (`get_by_code` returns None) —
+        the same honest-skip posture every other calculator here already takes, never a raised
+        error for a legitimately-not-yet-ready sport."""
+        if sport_code is None:
+            return
+        calculator = self.venue_strength_calculators.get(sport_code)
+        if calculator is None:
+            return
+        sport = await self.sports.get_by_code(SportCode(sport_code))
+        if sport is None:
+            return
+        await calculator.compute_and_write(
+            str(fixture.id.value), fixture.home_team_id, fixture.away_team_id,
+            sport.id, fixture.season_id, as_of,
+        )
 
     async def _recompute_team_form(self, fixture: Fixture, sport_code: str | None, as_of: datetime) -> None:
         """Premier League data-enrichment audit (2026-08-22) — a team's own rolling last-N form

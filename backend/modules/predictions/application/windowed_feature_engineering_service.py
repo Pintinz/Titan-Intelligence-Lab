@@ -37,7 +37,7 @@ from modules.features.application.feature_store_service import FeatureStoreServi
 from modules.features.domain.entities import FeatureValue
 from modules.features.domain.value_objects import EntityType, FeatureCategory, FeatureDataType, FeatureKey
 from modules.sports.domain.entities import Lineup, Transfer
-from modules.sports.domain.value_objects import FixtureStatus, TeamId
+from modules.sports.domain.value_objects import FixtureStatus, SeasonId, SportId, TeamId
 from modules.sports.ports.repositories import (
     FixtureRepositoryPort,
     LineupRepositoryPort,
@@ -265,6 +265,167 @@ class FixtureExpectedGoalsCalculator:
 
 
 @dataclass
+class FixtureVenueStrengthCalculator:
+    """Venue-aware attack/defence strength (Correct Score forensic audit, 2026-08-26) — the
+    classic football-Poisson formulation (attack_strength × defence_strength against a league
+    home/away baseline), fixing a real, live-confirmed defect in `FixtureExpectedGoalsCalculator`:
+    its goals-scored rate is computed "regardless of venue" and carries no home-field signal at
+    all, which live evidence showed collapsing six different real fixtures onto the exact same
+    predicted scoreline (1-1) — the model had nothing left to differentiate them with.
+
+    Four independent features, not a differential (matching `FixtureExpectedGoalsCalculator`'s own
+    shape, for the same reason: a Poisson λ model needs each side's own rate, not a signed margin):
+
+    - `home_attack_strength`  = home team's OWN home-venue goals-scored rate ÷ the league's own
+      home-venue scoring average (same season, same competition, strictly before kickoff).
+    - `home_defence_strength` = home team's OWN home-venue goals-conceded rate ÷ the league's own
+      *away*-venue scoring average (a team's home concession rate is, league-wide, its opponents'
+      away-scoring rate).
+    - `away_attack_strength`  = away team's OWN away-venue goals-scored rate ÷ the league's own
+      away-venue scoring average.
+    - `away_defence_strength` = away team's OWN away-venue goals-conceded rate ÷ the league's own
+      home-venue scoring average.
+
+    A ratio of 1.0 means "exactly league-average at this venue"; above 1.0 means stronger than
+    average. Home advantage is captured empirically through the two different league baselines
+    (home-venue scoring is, real-world, almost always higher than away-venue scoring across a
+    real league) rather than as a hand-picked constant multiplier — the same reasoning
+    `compute_adaptive_interval`-style "measured, not assumed" defaults already use elsewhere in
+    this codebase.
+
+    Critically: each team's own rate is drawn ONLY from its matches at that specific venue — a
+    team's home fixtures feed `home_attack`/`home_defence`, its away fixtures feed
+    `away_attack`/`away_defence`, never mixed. This is the venue split `FixtureExpectedGoalsCalculator`
+    was missing; that calculator is unchanged (other markets still use it) but `football.correct_score`
+    now uses this one instead (market_seeding.py).
+
+    Honestly unavailable, never fabricated: if the league doesn't yet have `min_league_sample`
+    completed matches this season before `now`, or a team has no completed matches at the
+    relevant venue yet, the corresponding feature is not written at all — never a fabricated 1.0
+    "league average" placeholder standing in for real history that doesn't exist yet.
+    """
+
+    registration: FeatureRegistrationService
+    store: FeatureStoreService
+    fixtures: FixtureRepositoryPort
+    sport_code: str
+    home_attack_feature_key: str
+    home_defence_feature_key: str
+    away_attack_feature_key: str
+    away_defence_feature_key: str
+    window: int = 10
+    min_league_sample: int = 10
+
+    async def ensure_registered(self, now: datetime) -> None:
+        """Idempotent — registers and approves all four features if they don't already exist."""
+        specs = (
+            (self.home_attack_feature_key, "Home Attack Strength", "goals scored at home, vs. the league's own home-scoring average"),
+            (self.home_defence_feature_key, "Home Defence Strength", "goals conceded at home, vs. the league's own away-scoring average"),
+            (self.away_attack_feature_key, "Away Attack Strength", "goals scored away, vs. the league's own away-scoring average"),
+            (self.away_defence_feature_key, "Away Defence Strength", "goals conceded away, vs. the league's own home-scoring average"),
+        )
+        for feature_key, label, description in specs:
+            existing = await self.registration.definitions.get(FeatureKey(feature_key))
+            if existing is not None:
+                continue
+            try:
+                await self.registration.register(
+                    feature_key,
+                    f"{self.sport_code.replace('_', ' ').title()} {label} (last {self.window}, venue-specific)",
+                    f"This team's own rate of {description}, each side restricted to its own "
+                    f"matches at that venue over its last {self.window} such matches, strictly "
+                    "before this fixture's kickoff.",
+                    self.sport_code,
+                    FeatureCategory.ENGINEERED,
+                    formula=f"team_venue_rate / league_venue_baseline (last {self.window} team matches, same season)",
+                    data_type=FeatureDataType.FLOAT,
+                    owner=SYSTEM_REVIEWER,
+                    entity_type=EntityType.FIXTURE,
+                    online_ttl_seconds=ENGINEERED_FEATURE_TTL_SECONDS,
+                )
+            except FeatureAlreadyRegisteredError:
+                continue
+            await self.registration.submit_for_review(feature_key)
+            await self.registration.approve(feature_key, SYSTEM_REVIEWER, now)
+
+    async def _league_venue_baseline(self, sport_id: SportId, season_id: SeasonId, now: datetime) -> tuple[float, float] | None:
+        """(league_avg_home_goals, league_avg_away_goals) across every completed fixture in this
+        exact season, kickoff strictly before `now` — the same season-scoped, point-in-time pool
+        a real analyst would use for this competition's home/away scoring baseline. Returns None
+        (honestly unavailable) below `min_league_sample`, never a baseline built from too thin a
+        sample to mean anything."""
+        completed = await self.fixtures.list_by_sport(sport_id, season_id=season_id, status="completed")
+        home_goals: list[int] = []
+        away_goals: list[int] = []
+        for fixture in completed:
+            scheduled_at = _ensure_aware(fixture.scheduled_at, now)
+            if scheduled_at >= now:
+                continue
+            if fixture.home_score is None or fixture.away_score is None:
+                continue
+            home_goals.append(fixture.home_score)
+            away_goals.append(fixture.away_score)
+        if len(home_goals) < self.min_league_sample:
+            return None
+        return sum(home_goals) / len(home_goals), sum(away_goals) / len(away_goals)
+
+    async def _team_venue_rate(self, team_id: TeamId, now: datetime, *, home_venue: bool, scored: bool) -> float | None:
+        """This team's own average goals scored/conceded, restricted to its matches AT the given
+        venue only (home fixtures only, or away fixtures only) — never mixed across venues,
+        unlike `FixtureExpectedGoalsCalculator`'s venue-blind average."""
+        recent = await self.fixtures.list_recent_by_team(team_id, before=now, limit=self.window * 4)
+        values: list[int] = []
+        for fixture in recent:
+            if fixture.status is not FixtureStatus.COMPLETED:
+                continue
+            if fixture.home_score is None or fixture.away_score is None:
+                continue
+            is_home_fixture = fixture.home_team_id == team_id
+            if is_home_fixture != home_venue:
+                continue
+            if scored:
+                values.append(fixture.home_score if is_home_fixture else fixture.away_score)
+            else:
+                values.append(fixture.away_score if is_home_fixture else fixture.home_score)
+            if len(values) >= self.window:
+                break
+        if not values:
+            return None
+        return sum(values) / len(values)
+
+    async def compute_and_write(
+        self, fixture_id: str, home_team_id: TeamId, away_team_id: TeamId,
+        sport_id: SportId, season_id: SeasonId, now: datetime,
+    ) -> tuple[FeatureValue | None, FeatureValue | None, FeatureValue | None, FeatureValue | None]:
+        baseline = await self._league_venue_baseline(sport_id, season_id, now)
+        if baseline is None:
+            return None, None, None, None
+        league_home_avg, league_away_avg = baseline
+
+        home_scored = await self._team_venue_rate(home_team_id, now, home_venue=True, scored=True)
+        home_conceded = await self._team_venue_rate(home_team_id, now, home_venue=True, scored=False)
+        away_scored = await self._team_venue_rate(away_team_id, now, home_venue=False, scored=True)
+        away_conceded = await self._team_venue_rate(away_team_id, now, home_venue=False, scored=False)
+
+        home_attack = home_scored / league_home_avg if home_scored is not None and league_home_avg > 0 else None
+        home_defence = home_conceded / league_away_avg if home_conceded is not None and league_away_avg > 0 else None
+        away_attack = away_scored / league_away_avg if away_scored is not None and league_away_avg > 0 else None
+        away_defence = away_conceded / league_home_avg if away_conceded is not None and league_home_avg > 0 else None
+
+        async def _maybe_write(feature_key: str, value: float | None) -> FeatureValue | None:
+            if value is None:
+                return None
+            return await self.store.write(feature_key, EntityType.FIXTURE, fixture_id, value, now)
+
+        return (
+            await _maybe_write(self.home_attack_feature_key, home_attack),
+            await _maybe_write(self.home_defence_feature_key, home_defence),
+            await _maybe_write(self.away_attack_feature_key, away_attack),
+            await _maybe_write(self.away_defence_feature_key, away_defence),
+        )
+
+
+@dataclass
 class LineupContinuityCalculator:
     """Milestone 6 — the first real structured-intelligence feature to consume Milestone 5's
     point-in-time-safe `Lineup.availability_classification`. A pure ratio (no hand-picked weight,
@@ -380,6 +541,25 @@ def football_fixture_expected_goals_calculator(
         sport_code="football",
         home_feature_key="football.fixture.expected_home_goals",
         away_feature_key="football.fixture.expected_away_goals",
+        window=window,
+    )
+
+
+def football_fixture_venue_strength_calculator(
+    registration: FeatureRegistrationService,
+    store: FeatureStoreService,
+    fixtures: FixtureRepositoryPort,
+    window: int = 10,
+) -> FixtureVenueStrengthCalculator:
+    return FixtureVenueStrengthCalculator(
+        registration=registration,
+        store=store,
+        fixtures=fixtures,
+        sport_code="football",
+        home_attack_feature_key="football.fixture.home_attack_strength",
+        home_defence_feature_key="football.fixture.home_defence_strength",
+        away_attack_feature_key="football.fixture.away_attack_strength",
+        away_defence_feature_key="football.fixture.away_defence_strength",
         window=window,
     )
 

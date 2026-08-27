@@ -336,6 +336,7 @@ async def news_analytics(session: AsyncSession = Depends(get_session), _user: Us
             "news_duplicate_rate": snapshot.news_duplicate_rate,
             "avg_processing_seconds": snapshot.avg_processing_seconds,
             "gemini_call_count": snapshot.gemini_call_count,
+            "claude_call_count": snapshot.claude_call_count,
             "extraction_accuracy": snapshot.extraction_accuracy,
             "average_source_reliability": snapshot.average_source_reliability,
             "community_post_count": snapshot.community_post_count,

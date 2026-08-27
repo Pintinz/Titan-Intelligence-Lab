@@ -35,6 +35,7 @@ from modules.predictions.domain.value_objects import MarketId, TargetType
 from modules.predictions.infrastructure.ml.catboost_adapter import CatBoostAdapter
 from modules.predictions.infrastructure.ml.football_goals_poisson_adapter import FootballGoalsPoissonAdapter
 from modules.predictions.infrastructure.ml.lightgbm_adapter import LightGBMAdapter
+from modules.predictions.infrastructure.ml.model_loader import compute_artifact_checksum
 from modules.predictions.infrastructure.ml.sklearn_adapter import SklearnAdapter
 from modules.predictions.infrastructure.ml.xgboost_adapter import XGBoostAdapter
 from modules.predictions.ports.ml_model import (
@@ -238,9 +239,11 @@ class AutomaticModelSelectionService:
         selection = await self.select(dataset, target_type, candidates=candidates, split_strategy=split_strategy, **split_kwargs)
 
         model_key = f"{model_key_prefix}.{selection.winning_candidate.algorithm.value}"
-        artifact_ref = await self.artifact_store.save(
-            f"{model_key}/v{next_version}.bin", selection.winning_model.serialize()
-        )
+        artifact_payload = selection.winning_model.serialize()
+        artifact_ref = await self.artifact_store.save(f"{model_key}/v{next_version}.bin", artifact_payload)
+        # Forensic audit §15 — hashed from the exact same bytes just handed to `artifact_store`,
+        # so a later load's re-hash can only diverge if the stored artifact itself changed.
+        artifact_checksum = compute_artifact_checksum(artifact_payload)
 
         feature_versions = await self._resolve_feature_versions(dataset.lineage.feature_keys)
 
@@ -262,6 +265,7 @@ class AutomaticModelSelectionService:
             now=now,
             artifact_ref=artifact_ref,
             training_run_ref=str(run_id.value) if run_id is not None else None,
+            artifact_checksum=artifact_checksum,
         )
         challenger = await self.model_registry.promote_to_challenger(model_def.id)
 

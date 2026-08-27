@@ -16,6 +16,7 @@ from modules.identity.infrastructure.persistence.models import Base as IdentityB
 from modules.identity.infrastructure.persistence.repositories import SqlAlchemyUserRepository
 from modules.identity.infrastructure.security import MockJWTValidator
 from modules.ingestion.infrastructure.persistence.models import Base as IngestionBase
+from modules.intelligence.infrastructure.persistence.models import Base as IntelligenceBase
 from modules.knowledge_graph.infrastructure.persistence.models import Base as KGBase
 from modules.sports.infrastructure.persistence.models import Base as SportsBase
 from modules.watchlist.infrastructure.persistence.models import Base as WatchlistBase
@@ -29,7 +30,7 @@ def db_session_factory():
         execution_options={
             "schema_translate_map": {
                 "admin": None, "features": None, "sports": None, "ingestion": None, "knowledge_graph": None,
-                "identity": None, "watchlist": None, "alerts": None,
+                "identity": None, "watchlist": None, "alerts": None, "intelligence": None,
             }
         },
     )
@@ -44,6 +45,13 @@ def db_session_factory():
             await conn.run_sync(IdentityBase.metadata.create_all)
             await conn.run_sync(WatchlistBase.metadata.create_all)
             await conn.run_sync(AlertsBase.metadata.create_all)
+            # News Intelligence audit (2026-08-27) — ManagerChangeContextCalculator (wired into
+            # every EntityReconciliationService this test's full composition graph builds) reads
+            # `intelligence.news_events`; this schema was missing from this fixture even though
+            # NewsMarketImpactEngine already depended on it too (never surfaced before because
+            # that engine's own roster scan is empty — and therefore never reaches the query — for
+            # every fixture this test reconciles, which has no players synced).
+            await conn.run_sync(IntelligenceBase.metadata.create_all)
 
     asyncio.run(_setup())
 

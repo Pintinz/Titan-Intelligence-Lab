@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from modules.predictions.domain.model_comparison import ChallengerEvaluation
-from modules.predictions.domain.value_objects import MarketId
+from modules.predictions.domain.value_objects import MarketId, ModelId
 
 
 @dataclass
@@ -31,3 +31,11 @@ class InMemoryModelComparisonRepository:
             (e for e in self._store if e.market_id == market_id), key=lambda e: e.evaluated_at, reverse=True
         )
         return matches[:limit]
+
+    async def get_for_challenger(self, market_id: MarketId, challenger_model_id: ModelId) -> ChallengerEvaluation | None:
+        matches = [
+            e for e in self._store if e.market_id == market_id and e.challenger_model_id == challenger_model_id
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda e: e.evaluated_at)

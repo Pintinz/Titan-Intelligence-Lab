@@ -256,6 +256,15 @@ class SqlAlchemyPredictionOutcomeRepository:
         await self.session.flush()
         return mappers.prediction_outcome_to_domain(model)
 
+    async def update(self, outcome: PredictionOutcome) -> PredictionOutcome:
+        result = await self.session.execute(
+            select(PredictionOutcomeModel).where(PredictionOutcomeModel.prediction_id == outcome.prediction_id.value)
+        )
+        model = result.scalar_one()  # caller's responsibility to only update an outcome that exists
+        mappers.prediction_outcome_to_model(outcome, model)
+        await self.session.flush()
+        return mappers.prediction_outcome_to_domain(model)
+
     async def get_for_prediction(self, prediction_id: PredictionId) -> PredictionOutcome | None:
         result = await self.session.execute(
             select(PredictionOutcomeModel).where(PredictionOutcomeModel.prediction_id == prediction_id.value)
@@ -437,6 +446,21 @@ class SqlAlchemyModelComparisonRepository:
         )
         result = await self.session.execute(stmt)
         return [mappers.challenger_evaluation_to_domain(row) for row in result.scalars().all()]
+
+    async def get_for_challenger(
+        self, market_id: MarketId, challenger_model_id: ModelId
+    ) -> ChallengerEvaluation | None:
+        stmt = (
+            select(ChallengerEvaluationModel)
+            .where(
+                ChallengerEvaluationModel.market_id == market_id.value,
+                ChallengerEvaluationModel.challenger_model_id == challenger_model_id.value,
+            )
+            .order_by(ChallengerEvaluationModel.evaluated_at.desc())
+            .limit(1)
+        )
+        model = (await self.session.execute(stmt)).scalar_one_or_none()
+        return mappers.challenger_evaluation_to_domain(model) if model else None
 
 
 @dataclass

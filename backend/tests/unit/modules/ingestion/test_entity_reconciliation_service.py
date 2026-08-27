@@ -208,6 +208,90 @@ def service_with_form_differential(session):
     ), calculator
 
 
+class _RecordingVenueStrengthCalculator:
+    """Stub standing in for `FixtureVenueStrengthCalculator` — verifies only the *wiring* (called
+    with the right args, for the right sport), not its own attack/defence-strength computation,
+    which `test_fixture_venue_strength_calculator.py` already covers directly."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def compute_and_write(self, fixture_id, home_team_id, away_team_id, sport_id, season_id, now):
+        self.calls.append((fixture_id, home_team_id, away_team_id, sport_id, season_id, now))
+        return None, None, None, None
+
+
+@pytest.fixture
+def service_with_venue_strength(session):
+    kg = KnowledgeGraphPopulationService(
+        nodes=SqlAlchemyKGNodeRepository(session=session), edges=SqlAlchemyKGEdgeRepository(session=session)
+    )
+    calculator = _RecordingVenueStrengthCalculator()
+    return EntityReconciliationService(
+        sports=SqlAlchemySportRepository(session=session),
+        countries=SqlAlchemyCountryRepository(session=session),
+        competitions=SqlAlchemyCompetitionRepository(session=session),
+        seasons=SqlAlchemySeasonRepository(session=session),
+        venues=SqlAlchemyVenueRepository(session=session),
+        teams=SqlAlchemyTeamRepository(session=session),
+        players=SqlAlchemyPlayerRepository(session=session),
+        fixtures=SqlAlchemyFixtureRepository(session=session),
+        matches=SqlAlchemyMatchRepository(session=session),
+        team_statistics=SqlAlchemyTeamStatisticsRepository(session=session),
+        lineups=SqlAlchemyLineupRepository(session=session),
+        standings=SqlAlchemyStandingRepository(session=session),
+        injuries=SqlAlchemyInjuryRepository(session=session),
+        transfers=SqlAlchemyTransferRepository(session=session),
+        coaching_staff=SqlAlchemyCoachingStaffRepository(session=session),
+        ref_index=SqlAlchemyProviderRefIndexRepository(session=session),
+        kg=kg,
+        timeline=SqlAlchemyTimelineEventRepository(session=session),
+        venue_strength_calculators={"football": calculator},
+    ), calculator
+
+
+class _RecordingManagerChangeCalculator:
+    """Stub standing in for `ManagerChangeContextCalculator` — verifies only the *wiring* (called
+    once per side, with the right args), not its own elapsed-time computation, which
+    `test_manager_change_context_calculator.py` already covers directly."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def compute_and_write(self, fixture_id, team_id, side, now, kickoff=None):
+        self.calls.append((fixture_id, team_id, side, now, kickoff))
+        return None
+
+
+@pytest.fixture
+def service_with_manager_change(session):
+    kg = KnowledgeGraphPopulationService(
+        nodes=SqlAlchemyKGNodeRepository(session=session), edges=SqlAlchemyKGEdgeRepository(session=session)
+    )
+    calculator = _RecordingManagerChangeCalculator()
+    return EntityReconciliationService(
+        sports=SqlAlchemySportRepository(session=session),
+        countries=SqlAlchemyCountryRepository(session=session),
+        competitions=SqlAlchemyCompetitionRepository(session=session),
+        seasons=SqlAlchemySeasonRepository(session=session),
+        venues=SqlAlchemyVenueRepository(session=session),
+        teams=SqlAlchemyTeamRepository(session=session),
+        players=SqlAlchemyPlayerRepository(session=session),
+        fixtures=SqlAlchemyFixtureRepository(session=session),
+        matches=SqlAlchemyMatchRepository(session=session),
+        team_statistics=SqlAlchemyTeamStatisticsRepository(session=session),
+        lineups=SqlAlchemyLineupRepository(session=session),
+        standings=SqlAlchemyStandingRepository(session=session),
+        injuries=SqlAlchemyInjuryRepository(session=session),
+        transfers=SqlAlchemyTransferRepository(session=session),
+        coaching_staff=SqlAlchemyCoachingStaffRepository(session=session),
+        ref_index=SqlAlchemyProviderRefIndexRepository(session=session),
+        kg=kg,
+        timeline=SqlAlchemyTimelineEventRepository(session=session),
+        manager_change_calculators={"football": calculator},
+    ), calculator
+
+
 class _RecordingTeamFormCalculator:
     """Stub standing in for `RollingTeamStatAverageCalculator` — verifies only the *wiring*
     (called for both teams, only on completion with a real score), not its own rolling-average
@@ -1416,6 +1500,185 @@ async def test_reconcile_fixture_skips_form_differential_for_unregistered_sport(
 
     fixture_record = ProviderFixtureRecord(
         external_ref=ProviderRef(provider="mock_football", external_id="fx-other-sport"),
+        home_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        away_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
+        scheduled_at=T0, competition_ref="39", season_label="2026",
+    )
+    await service.reconcile_fixture(fixture_record, season.id, T0, sport_code="basketball")
+    await session.commit()
+
+    assert calculator.calls == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_fixture_computes_venue_strength_when_sport_code_matches_a_calculator(
+    service_with_venue_strength, session,
+):
+    """Correct Score forensic audit (2026-08-26): `FixtureVenueStrengthCalculator` must run on
+    every reconciliation exactly like `_compute_form_differential` — pre-match venue-relative
+    attack/defence strength is what a prediction needs before kickoff, not after."""
+    service, calculator = service_with_venue_strength
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    competition, _ = await service.reconcile_competition("39", "mock_football", sport.id, T0)
+    season, _ = await service.reconcile_season("39", "2026", "mock_football", competition.id, T0)
+    home, _ = await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+    away, _ = await service.reconcile_team(_team_record("t2", "Chelsea"), sport.id, T0)
+    await session.commit()
+
+    fixture_record = ProviderFixtureRecord(
+        external_ref=ProviderRef(provider="mock_football", external_id="fx-venue"),
+        home_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        away_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
+        scheduled_at=T0, competition_ref="39", season_label="2026",
+    )
+    fixture, _ = await service.reconcile_fixture(fixture_record, season.id, T0, sport_code="football")
+    await session.commit()
+
+    assert len(calculator.calls) == 1
+    fixture_id, home_team_id, away_team_id, sport_id, season_id, now = calculator.calls[0]
+    assert fixture_id == str(fixture.id.value)
+    assert home_team_id == home.id
+    assert away_team_id == away.id
+    assert sport_id == sport.id
+    assert season_id == season.id
+    assert now == T0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_fixture_skips_venue_strength_without_sport_code(
+    service_with_venue_strength, session,
+):
+    """A caller that doesn't pass sport_code (e.g. an older call site) must not crash — it just
+    silently opts out of the venue-strength computation."""
+    service, calculator = service_with_venue_strength
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    competition, _ = await service.reconcile_competition("39", "mock_football", sport.id, T0)
+    season, _ = await service.reconcile_season("39", "2026", "mock_football", competition.id, T0)
+    await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+    await service.reconcile_team(_team_record("t2", "Chelsea"), sport.id, T0)
+    await session.commit()
+
+    fixture_record = ProviderFixtureRecord(
+        external_ref=ProviderRef(provider="mock_football", external_id="fx-venue-no-sport"),
+        home_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        away_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
+        scheduled_at=T0, competition_ref="39", season_label="2026",
+    )
+    await service.reconcile_fixture(fixture_record, season.id, T0)
+    await session.commit()
+
+    assert calculator.calls == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_fixture_skips_venue_strength_for_unregistered_sport(
+    service_with_venue_strength, session,
+):
+    """A sport with no registered calculator (e.g. basketball, before it gets one) must not
+    raise — reconciliation for that sport keeps working exactly as before this feature existed."""
+    service, calculator = service_with_venue_strength
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    competition, _ = await service.reconcile_competition("39", "mock_football", sport.id, T0)
+    season, _ = await service.reconcile_season("39", "2026", "mock_football", competition.id, T0)
+    await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+    await service.reconcile_team(_team_record("t2", "Chelsea"), sport.id, T0)
+    await session.commit()
+
+    fixture_record = ProviderFixtureRecord(
+        external_ref=ProviderRef(provider="mock_football", external_id="fx-venue-other-sport"),
+        home_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        away_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
+        scheduled_at=T0, competition_ref="39", season_label="2026",
+    )
+    await service.reconcile_fixture(fixture_record, season.id, T0, sport_code="basketball")
+    await session.commit()
+
+    assert calculator.calls == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_fixture_computes_manager_change_context_for_both_teams(
+    service_with_manager_change, session,
+):
+    """News Intelligence audit (2026-08-27): `ManagerChangeContextCalculator` must run on every
+    reconciliation, once per side, exactly like `_compute_venue_strength`/`_compute_news_market_
+    impact` above — pre-match context is what a prediction needs before kickoff."""
+    service, calculator = service_with_manager_change
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    competition, _ = await service.reconcile_competition("39", "mock_football", sport.id, T0)
+    season, _ = await service.reconcile_season("39", "2026", "mock_football", competition.id, T0)
+    home, _ = await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+    away, _ = await service.reconcile_team(_team_record("t2", "Chelsea"), sport.id, T0)
+    await session.commit()
+
+    fixture_record = ProviderFixtureRecord(
+        external_ref=ProviderRef(provider="mock_football", external_id="fx-manager-change"),
+        home_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        away_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
+        scheduled_at=T0, competition_ref="39", season_label="2026",
+    )
+    fixture, _ = await service.reconcile_fixture(fixture_record, season.id, T0, sport_code="football")
+    await session.commit()
+
+    assert len(calculator.calls) == 2
+    sides = {call[2] for call in calculator.calls}
+    assert sides == {"home", "away"}
+    team_ids = {call[1] for call in calculator.calls}
+    assert team_ids == {home.id, away.id}
+    for fixture_id, _team_id, _side, now, kickoff in calculator.calls:
+        assert fixture_id == str(fixture.id.value)
+        assert now == T0
+        assert kickoff == fixture.scheduled_at
+
+
+@pytest.mark.asyncio
+async def test_reconcile_fixture_skips_manager_change_context_without_sport_code(
+    service_with_manager_change, session,
+):
+    """A caller that doesn't pass sport_code (e.g. an older call site) must not crash — it just
+    silently opts out of the manager-change context computation."""
+    service, calculator = service_with_manager_change
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    competition, _ = await service.reconcile_competition("39", "mock_football", sport.id, T0)
+    season, _ = await service.reconcile_season("39", "2026", "mock_football", competition.id, T0)
+    await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+    await service.reconcile_team(_team_record("t2", "Chelsea"), sport.id, T0)
+    await session.commit()
+
+    fixture_record = ProviderFixtureRecord(
+        external_ref=ProviderRef(provider="mock_football", external_id="fx-manager-change-no-sport"),
+        home_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        away_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
+        scheduled_at=T0, competition_ref="39", season_label="2026",
+    )
+    await service.reconcile_fixture(fixture_record, season.id, T0)
+    await session.commit()
+
+    assert calculator.calls == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_fixture_skips_manager_change_context_for_unregistered_sport(
+    service_with_manager_change, session,
+):
+    """A sport with no registered calculator must not raise — reconciliation for that sport keeps
+    working exactly as before this feature existed."""
+    service, calculator = service_with_manager_change
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    competition, _ = await service.reconcile_competition("39", "mock_football", sport.id, T0)
+    season, _ = await service.reconcile_season("39", "2026", "mock_football", competition.id, T0)
+    await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+    await service.reconcile_team(_team_record("t2", "Chelsea"), sport.id, T0)
+    await session.commit()
+
+    fixture_record = ProviderFixtureRecord(
+        external_ref=ProviderRef(provider="mock_football", external_id="fx-manager-change-other-sport"),
         home_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
         away_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
         scheduled_at=T0, competition_ref="39", season_label="2026",

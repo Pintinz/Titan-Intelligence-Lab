@@ -46,6 +46,21 @@ from modules.sports.ports.repositories import SportRepositoryPort
 DEFAULT_MIN_SYNC_INTERVAL_SECONDS = 300  # "never reload complete datasets unnecessarily"
 LIVE_MIN_SYNC_INTERVAL_SECONDS = 30  # live fixtures poll far more often — adaptive scheduling
 DEFAULT_LOCK_TTL_SECONDS = 120
+# Redis/Celery pipeline verification (2026-08-25) — real defect, empirically reproduced: a
+# solo-pool worker's live-fixtures sync for a large competition (basketball/baseball, hundreds of
+# in-progress games) genuinely took 277-300s wall-clock against real api-sports.io responses,
+# while Beat re-fires this same scope's task every LIVE_MIN_SYNC_INTERVAL_SECONDS (30s).
+# DEFAULT_LOCK_TTL_SECONDS (120s) is shorter than that real runtime, so `_run_sync`'s own
+# overlap-guard lock silently expired mid-run — every duplicate message Beat had queued in the
+# meantime then found the lock "free" once popped, and re-ran the *entire* fetch+reconcile
+# against the provider all over again (confirmed live: 5,797 queued tasks, 94% redundant
+# sync_live_fixtures re-fires, each a full redundant provider call, not a cheap skip). Since
+# `sync_live_fixtures` also bypasses the checkpoint-based `_should_skip` (trigger=LIVE at line
+# ~138 below), the lock is the *only* overlap guard this path has — its TTL must outlast the
+# realistic worst-case run, not just the common case. 600s gives ~2x headroom over the largest
+# observed run without weakening the lock for any other (fast, checkpoint-gated) sync path, which
+# still uses DEFAULT_LOCK_TTL_SECONDS unchanged.
+LIVE_FIXTURES_LOCK_TTL_SECONDS = 600
 
 
 def _ensure_aware(dt: datetime, reference: datetime) -> datetime:
@@ -258,6 +273,7 @@ class SyncOrchestrator:
         self, sport_code: str, competition_ref: str, season_label: str, season_id, now: datetime, *,
         trigger=SyncTrigger.SCHEDULED, low_priority: bool = False, force: bool = False,
         min_interval_seconds: int = DEFAULT_MIN_SYNC_INTERVAL_SECONDS,
+        lock_ttl_seconds: int = DEFAULT_LOCK_TTL_SECONDS,
     ) -> SyncRun | None:
         async def fetch():
             return await self.router.fetch_fixtures(sport_code, competition_ref, season_label, now, low_priority=low_priority)
@@ -278,6 +294,7 @@ class SyncOrchestrator:
         return await self._run_sync(
             sport_code, EntityKind.FIXTURE, f"{competition_ref}:{season_label}", trigger, now,
             fetch=fetch, process_one=process_one, min_interval_seconds=min_interval_seconds, force=force,
+            lock_ttl_seconds=lock_ttl_seconds,
         )
 
     async def sync_upcoming_fixtures(
@@ -392,10 +409,16 @@ class SyncOrchestrator:
     async def sync_live_fixtures(self, sport_code: str, competition_ref: str, season_label: str, season_id, now: datetime) -> SyncRun | None:
         """Same as sync_fixtures but tagged LIVE and polled far more often — the "intelligent
         scheduling to minimize API usage" the roadmap asks for is this different interval, not
-        a different code path (docs/roadmap.md Milestone 5 "Live Data Synchronization")."""
+        a different code path (docs/roadmap.md Milestone 5 "Live Data Synchronization").
+
+        Passes LIVE_FIXTURES_LOCK_TTL_SECONDS rather than the default lock TTL: this path also
+        bypasses the checkpoint-based min-interval skip (trigger=LIVE, see `_run_sync`), so the
+        overlap lock is the only thing standing between a legitimately slow run and Beat's next
+        30s re-fire re-running the same fetch from scratch (see that constant's own docstring)."""
         return await self.sync_fixtures(
             sport_code, competition_ref, season_label, season_id, now,
             trigger=SyncTrigger.LIVE, low_priority=False, min_interval_seconds=LIVE_MIN_SYNC_INTERVAL_SECONDS,
+            lock_ttl_seconds=LIVE_FIXTURES_LOCK_TTL_SECONDS,
         )
 
     async def sync_standings(

@@ -23,6 +23,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from uuid import UUID
 
+from modules.ingestion.application.scheduled_team_statistics_sync_orchestrator import ScheduledTeamStatisticsSyncOrchestrator
 from modules.ingestion.application.sync_orchestrator import SyncOrchestrator
 from modules.ingestion.infrastructure.celery.celery_app import celery_app
 from modules.sports.domain.value_objects import ProviderRef, SeasonId
@@ -91,6 +92,37 @@ async def _get_orchestrator() -> AsyncIterator[SyncOrchestrator]:
         await asyncio.sleep(0)
 
 
+_team_statistics_sync_orchestrator_factory: Callable[[], Awaitable[ScheduledTeamStatisticsSyncOrchestrator]] | None = None
+
+
+def set_team_statistics_sync_orchestrator_factory(
+    factory: Callable[[], Awaitable[ScheduledTeamStatisticsSyncOrchestrator]],
+) -> None:
+    global _team_statistics_sync_orchestrator_factory
+    _team_statistics_sync_orchestrator_factory = factory
+
+
+@asynccontextmanager
+async def _get_team_statistics_sync_orchestrator() -> AsyncIterator[ScheduledTeamStatisticsSyncOrchestrator]:
+    """Milestone 24 §3/1(b): same session-closing rationale as `_get_orchestrator` above."""
+    if _team_statistics_sync_orchestrator_factory is None:
+        raise RuntimeError(
+            "team statistics sync orchestrator factory not configured — call "
+            "set_team_statistics_sync_orchestrator_factory() at worker startup"
+        )
+    orchestrator = await _team_statistics_sync_orchestrator_factory()
+    try:
+        yield orchestrator
+    finally:
+        session = getattr(orchestrator, "_worker_session", None)
+        if session is not None:
+            await session.close()
+        redis_client = getattr(orchestrator, "_worker_redis_client", None)
+        if redis_client is not None:
+            await redis_client.aclose()
+        await asyncio.sleep(0)
+
+
 def _run_summary(run) -> dict | None:
     if run is None:
         return None
@@ -110,6 +142,15 @@ def _resolve_now(now_iso: str | None) -> datetime:
     defaults it to the real time of *this* firing when the caller omits it (Beat-triggered calls),
     while still accepting an explicit value for tests/manual invocation."""
     return datetime.fromisoformat(now_iso) if now_iso else datetime.now(timezone.utc)
+
+
+# Redis/Celery pipeline verification (2026-08-26) — same "Beat interval must outlast the task's own
+# worst-case runtime" lesson already applied once this session (see
+# ingestion/beat_schedule.py's LIVE_FIXTURES_LOCK_TTL_SECONDS docstring for the original incident).
+# This sweep calls a real per-fixture provider fetch for every completed fixture still missing team
+# statistics, across every sport — generous headroom over the realistic worst case, with
+# `SCHEDULED_TEAM_STATISTICS_SYNC_INTERVAL_SECONDS` (beat_schedule.py) giving 2x margin over it.
+_TEAM_STATISTICS_SYNC_TASK_TIMEOUT_SECONDS = 1800
 
 
 @celery_app.task(name="ingestion.sync_countries", bind=True, **_RETRY_KWARGS)
@@ -260,6 +301,36 @@ def sync_players_for_competition_task(
 
     runs = asyncio.run(_do())
     return [_run_summary(r) for r in runs]
+
+
+@celery_app.task(name="ingestion.check_scheduled_team_statistics_sync", bind=True, **_RETRY_KWARGS)
+@_logged("ingestion.check_scheduled_team_statistics_sync")
+def check_scheduled_team_statistics_sync_task(self, now_iso: str | None = None) -> dict:
+    """Real gap found live (2026-08-26) — `SyncOrchestrator.sync_team_statistics_for_fixture`
+    (fetch/validate/reconcile all real since the 2026-08-02 audit fix) was reachable only via a
+    manual admin endpoint, so a completed fixture's "Match Statistics" panel stayed honestly empty
+    forever unless an admin manually triggered a sync. Sweeps every completed fixture still missing
+    team statistics (across every sport) and syncs it — the automatic half, manual/admin triggering
+    being the other half (same shape as prediction generation)."""
+
+    async def _do() -> dict:
+        async with _get_team_statistics_sync_orchestrator() as orchestrator:
+            now = _resolve_now(now_iso)
+            outcomes = await asyncio.wait_for(orchestrator.run(now), timeout=_TEAM_STATISTICS_SYNC_TASK_TIMEOUT_SECONDS)
+            return {
+                "fixtures_checked": len(outcomes),
+                "synced": sum(1 for o in outcomes if o.status == "synced"),
+                "already_present": sum(1 for o in outcomes if o.status == "already_present"),
+                "no_data_from_provider": sum(1 for o in outcomes if o.status == "no_data_from_provider"),
+                "skipped": sum(1 for o in outcomes if o.status == "skipped"),
+                "results": [
+                    {"fixture_id": o.fixture_id, "status": o.status, "reason": o.reason}
+                    for o in outcomes
+                    if o.status != "already_present"
+                ],
+            }
+
+    return asyncio.run(_do())
 
 
 @celery_app.task(name="ingestion.sync_upcoming_structured_intelligence", bind=True, **_RETRY_KWARGS)

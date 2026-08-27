@@ -63,6 +63,8 @@ from modules.predictions.infrastructure.persistence.repositories import (
     SqlAlchemyPredictionOutcomeRepository,
     SqlAlchemyPredictionRepository,
 )
+from modules.features.domain.value_objects import EntityType, FeatureKey
+from modules.features.infrastructure.persistence.repositories import SqlAlchemyFeatureValueRepository
 
 _INERT_CONFIDENCE = ConfidenceBreakdown(
     feature_quality=0.0, feature_freshness=0.0, historical_accuracy=0.0, knowledge_graph_completeness=0.0,
@@ -167,17 +169,14 @@ def _match_result_for(sport: str, home_score: int, away_score: int, period_score
     return MatchResult(home_score, away_score)
 
 
-async def _latest_feature_value(session, feature_key: str, dashed: str) -> float | None:
-    row = (
-        await session.execute(
-            text(
-                "SELECT value FROM feature_values_offline WHERE feature_key = :fk AND entity_id = :eid "
-                "ORDER BY as_of DESC LIMIT 1"
-            ),
-            {"fk": feature_key, "eid": dashed},
-        )
-    ).fetchone()
-    return None if row is None else json.loads(row[0])["v"]
+async def _feature_value_as_of(session, feature_key: str, dashed: str, cutoff: datetime) -> float | None:
+    """Point-in-time read — see `backfill_match_winner_training_data.py`'s identical helper for the
+    full rationale (including why this goes through the ORM repository, not a raw-SQL bound
+    parameter). A feature recomputed after `cutoff` must stay invisible here."""
+    value = await SqlAlchemyFeatureValueRepository(session=session).get_as_of(
+        FeatureKey(feature_key), EntityType.FIXTURE, dashed, cutoff
+    )
+    return None if value is None else value.value
 
 
 async def main() -> None:
@@ -225,10 +224,16 @@ async def main() -> None:
                     skipped_existing += 1
                     continue
 
+                # The cutoff for every feature this fixture's snapshot may see — its own kickoff,
+                # never the batch's wall-clock `now`. Computed once, before any feature read.
+                cutoff = (
+                    datetime.fromisoformat(scheduled_at) if isinstance(scheduled_at, str) else scheduled_at
+                ) or now
+
                 feature_snapshot: dict[str, float] = {}
                 missing_required = False
                 for key in spec["required_features"]:
-                    value = await _latest_feature_value(session, key, dashed)
+                    value = await _feature_value_as_of(session, key, dashed, cutoff)
                     if value is None:
                         missing_required = True
                         break
@@ -238,9 +243,7 @@ async def main() -> None:
                     continue
 
                 result = _match_result_for(sport, home_score, away_score, period_scores_raw)
-                evaluated_at = (
-                    datetime.fromisoformat(scheduled_at) if isinstance(scheduled_at, str) else scheduled_at
-                ) or now
+                evaluated_at = cutoff
 
                 if spec["kind"] == "binary":
                     resolver = MARKET_OUTCOME_RESOLVERS[market_key]

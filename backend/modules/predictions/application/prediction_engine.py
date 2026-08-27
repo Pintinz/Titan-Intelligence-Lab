@@ -48,8 +48,9 @@ configurable expected-fact baseline; news/community reliability are the mean
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 logger = logging.getLogger("titaniq.predictions")
@@ -65,10 +66,14 @@ from modules.predictions.application.outcome_label_mapper import (
 )
 from modules.predictions.application.prediction_context_builder import PredictionContext, PredictionContextBuilder
 from modules.predictions.application.predictor_registry import PredictorRegistry
-from modules.predictions.domain.entities import Prediction
+from modules.predictions.domain.entities import Prediction, PredictionOutcome
 from modules.predictions.domain.value_objects import MarketId, ModelId, PredictionId, PredictionStatus, TargetType
 from modules.predictions.ports.predictor import PredictorOutput
-from modules.predictions.infrastructure.ml.model_loader import ModelLoaderService
+from modules.predictions.infrastructure.ml.model_loader import (
+    ArtifactIntegrityError,
+    ModelLoaderService,
+    UnknownModelFrameworkError,
+)
 from modules.predictions.infrastructure.predictors.ml_predictor import TrainedModelPredictor
 from modules.predictions.ports.calibrator import CalibratorPort
 from modules.predictions.ports.predictor import PredictorPort
@@ -81,6 +86,33 @@ from modules.predictions.ports.repositories import (
 
 def _clamp(value: float) -> float:
     return min(max(value, 0.0), 1.0)
+
+
+def _regression_relative_error(outcome: PredictionOutcome) -> float:
+    """`_historical_accuracy`'s regression-market normalization (Phase 6, 2026-08-25) — see that
+    method's own inline comment for why this can't just reuse the raw `outcome.error`. Divides by
+    the real observed magnitude (`actual_value`) rather than a fabricated/hardcoded per-market
+    scale; `_regression_uncertainty` is untouched and still reads `outcome.error` directly, in the
+    market's own real units, which is what a confidence interval needs."""
+    if outcome.error is None:
+        return 0.0
+    try:
+        actual = float(outcome.actual_value)
+    except (TypeError, ValueError):
+        return 0.0
+    if actual == 0:
+        return outcome.error
+    return abs(outcome.error / actual)
+
+
+def _ensure_aware(dt: datetime, reference: datetime) -> datetime:
+    """ADR-007: SQLite/aiosqlite drops tzinfo on read-back — a `CalibrationMetadata.fitted_at`
+    round-tripped through the SQL-backed `CalibrationParametersRepositoryPort` can arrive naive
+    even though it was written aware. Duplicated per-module by this codebase's own convention
+    (see `model_registry_service.py`'s own copy) rather than imported from one shared place."""
+    if dt.tzinfo is not None:
+        return dt
+    return dt.replace(tzinfo=reference.tzinfo)
 
 
 def _calibrate_distribution(
@@ -129,13 +161,18 @@ class PredictionEngine:
     model_loader: ModelLoaderService | None = None
     expected_kg_facts: int = 10
     stability_window: int = 5
+    # Phase 4 (Calibration Integrity) — a fit older than this is still applied (better than a raw
+    # pass-through) but reported as "STALE" rather than "FITTED", so a caller can distinguish a
+    # calibration that's still being kept fresh by `CalibrationFittingService`'s periodic sweep
+    # from one that's drifted out of sync with recent outcome history.
+    calibration_staleness: timedelta = timedelta(days=30)
 
     async def generate(
         self, market_key: str, entity_type: EntityType, entity_id: str, subject_ref: str, now: datetime
     ) -> Prediction:
         context = await self.context_builder.build(market_key, entity_type, entity_id, now)
 
-        predictor, predictor_provenance = await self._resolve_predictor(context)
+        predictor, predictor_provenance, fallback_reason = await self._resolve_predictor(context)
         predictor_output = await predictor.predict(
             context.market.market_kind, context.resolved_features, context.mapping_weights
         )
@@ -146,21 +183,18 @@ class PredictionEngine:
         # `basketball.player_points_prop`) — `Prediction.probability` stays a required field every
         # other consumer already reads — but a REGRESSION market's frontend surface reads
         # `confidence_interval`/`expected_error` instead, never this value.
-        calibrated_probability = await self.calibrator.calibrate(context.model.id, predictor_output.probability)
-        # Section 31 audit fix (2026-08-23): `calibrate()`'s identity pass-through for a
-        # never-fitted model is a legitimate return value, not an error — but the API must not
-        # then describe that raw pass-through as "calibrated probability" (spec: "Do not display
-        # calibrated probability unless the calibration pipeline has actually fitted parameters").
-        calibration_status = "calibrated" if await self.calibrator.is_fitted(context.model.id) else "uncalibrated"
-        value, probability, probability_distribution, confidence_interval, expected_error = await self._shape_outcome(
-            context, predictor_output, calibrated_probability
+        calibrated_probability, calibration_status, calibration_sample_count, calibration_fitted_at = (
+            await self._calibrate(context, predictor_output.probability, now)
         )
+        (
+            value, probability, probability_distribution, confidence_interval, expected_error, raw_probability,
+        ) = await self._shape_outcome(context, predictor_output, calibrated_probability)
 
         documents = await self.retrieval.retrieve_all(subject_ref)
         confidence = self.confidence_engine.compute(
             ConfidenceInputs(
                 features=context.feature_confidence_inputs,
-                historical_accuracy=await self._historical_accuracy(context.market.id),
+                historical_accuracy=await self._historical_accuracy(context.market.id, context.market.target_type),
                 knowledge_graph_completeness=self._kg_completeness(documents),
                 news_reliability=self._average_confidence(documents, "news"),
                 community_reliability=self._average_confidence(documents, "community"),
@@ -193,11 +227,51 @@ class PredictionEngine:
             expected_error=expected_error,
             predictor_provenance=predictor_provenance,
             calibration_status=calibration_status,
+            fallback_reason=fallback_reason,
+            raw_probability=raw_probability,
+            calibration_sample_count=calibration_sample_count,
+            calibration_fitted_at=calibration_fitted_at,
         )
+
+    async def _calibrate(
+        self, context: PredictionContext, raw_probability: float, now: datetime
+    ) -> tuple[float, str, int | None, datetime | None]:
+        """Phase 4 (Calibration Integrity) — decides whether/how to calibrate
+        ``raw_probability`` and what state to honestly report it under. Returns
+        ``(calibrated_probability, calibration_status, sample_count, fitted_at)``.
+
+        Deliberately does NOT call `self.calibrator.calibrate()` at all when the Champion's own
+        artifact already bakes in calibration (`ModelDefinition.calibration_ref` set by
+        `CalibrationValidationService._register_calibrated_challenger`) — that predictor's raw
+        output is already a calibrated probability. Calling the separate post-hoc
+        `PlattScalingCalibrator` layer on top of it would double-calibrate every such prediction
+        (a real correctness gap this codebase's two independent calibration mechanisms had never
+        been reconciled against each other before Phase 4)."""
+        if context.model.calibration_ref is not None:
+            return raw_probability, "FITTED", None, None
+
+        metadata = await self.calibrator.get_metadata(context.model.id)
+        if metadata is None:
+            return raw_probability, "UNFITTED", None, None
+
+        calibrated = await self.calibrator.calibrate(context.model.id, raw_probability)
+        if not math.isfinite(calibrated):
+            # A corrupt/degenerate persisted fit (see `PlattScalingCalibrator.fit()`'s own
+            # finite-value guard — this is the defensive read-time counterpart, for any fit
+            # persisted before that guard existed) must never poison a published probability.
+            logger.error(
+                "prediction_engine.calibration_produced_non_finite_result",
+                extra={"model_id": str(context.model.id.value), "market_key": context.market.market_key},
+            )
+            return raw_probability, "INVALID", metadata.sample_count, metadata.fitted_at
+
+        fitted_at = _ensure_aware(metadata.fitted_at, now)
+        status = "STALE" if (now - fitted_at) > self.calibration_staleness else "FITTED"
+        return calibrated, status, metadata.sample_count, metadata.fitted_at
 
     async def _shape_outcome(
         self, context: PredictionContext, predictor_output: PredictorOutput, calibrated_probability: float
-    ) -> tuple[str, float, dict[str, float], tuple[float, float] | None, float | None]:
+    ) -> tuple[str, float, dict[str, float], tuple[float, float] | None, float | None, float]:
         """Splits `Prediction`'s CLASSIFICATION-vs-REGRESSION field groups (Universal Probability
         Engine) by the market's own `TargetType` — the one place that decision gets made, so every
         `MarketKind` predictor stays agnostic to it and just reports its raw estimate. Returns
@@ -218,12 +292,21 @@ class PredictionEngine:
         The returned ``probability`` — what gets published as `Prediction.probability` and shown
         as the AI Verdict's headline confidence — is deliberately read back OUT of the calibrated
         distribution at ``value``'s own key, so it always means "confidence in the outcome actually
-        published," never "confidence in the positive side" regardless of which side won."""
+        published," never "confidence in the positive side" regardless of which side won.
+
+        Returns ``(value, probability, probability_distribution, confidence_interval,
+        expected_error, raw_probability)`` — ``raw_probability`` (Phase 4, Calibration Integrity)
+        is computed the same way as ``probability`` but reading back out of the *uncalibrated*
+        distribution, so it carries the same "confidence in the outcome actually published"
+        semantic rather than ``predictor_output.probability``'s raw "P(positive)" one."""
         if context.market.target_type is TargetType.REGRESSION:
             expected_error, confidence_interval = await self._regression_uncertainty(
                 context.market.id, predictor_output.raw_score
             )
-            return f"{predictor_output.raw_score:.4f}", calibrated_probability, {}, confidence_interval, expected_error
+            return (
+                f"{predictor_output.raw_score:.4f}", calibrated_probability, {}, confidence_interval, expected_error,
+                predictor_output.probability,
+            )
 
         mapped_value = map_generic_value_to_real_label(context.market.market_key, predictor_output.value)
         mapped_distribution = map_generic_distribution_to_real_labels(
@@ -237,8 +320,17 @@ class PredictionEngine:
         probability_distribution = _calibrate_distribution(
             mapped_distribution, mapped_calibration_key, predictor_output.probability, calibrated_probability
         )
+        # No-op "calibration" (raw == calibrated) reuses the same redistribution function so the
+        # two distributions are directly comparable — same relative shape, only the one calibrated
+        # key differs.
+        raw_distribution = _calibrate_distribution(
+            mapped_distribution, mapped_calibration_key, predictor_output.probability, predictor_output.probability
+        )
         verdict_probability = probability_distribution.get(mapped_value, calibrated_probability)
-        return mapped_value, verdict_probability, probability_distribution, None, None
+        raw_verdict_probability = raw_distribution.get(mapped_value, predictor_output.probability)
+        return (
+            mapped_value, verdict_probability, probability_distribution, None, None, raw_verdict_probability,
+        )
 
     async def _regression_uncertainty(
         self, market_id: MarketId, predicted_value: float
@@ -255,50 +347,81 @@ class PredictionEngine:
         expected_error = sum(errors) / len(errors)
         return expected_error, (predicted_value - expected_error, predicted_value + expected_error)
 
-    async def _resolve_predictor(self, context: PredictionContext) -> tuple[PredictorPort, str]:
+    async def _resolve_predictor(self, context: PredictionContext) -> tuple[PredictorPort, str, str | None]:
         """Prefers the market's real CHAMPION model when one has actually been trained (a real
         `artifact_ref` exists) — loaded via `ModelLoaderService` and served through
         `TrainedModelPredictor`. Falls back to the generic formula-predictor registry for a
-        placeholder Champion (no artifact), an unrecognized/corrupt artifact, or when
+        placeholder Champion (no artifact), an unrecognized/corrupt/tampered artifact, or when
         `model_loader` was never wired — a trained-model problem must never break generation.
 
-        Returns the predictor alongside which one actually served — "trained_model" or
-        "formula_fallback" — so the caller can persist genuine provenance on `Prediction` instead
-        of the API inferring "trained model" from `model_id` alone, which stays the Champion's id
-        either way and would misattribute a fallback-served prediction as ML-computed (real prod
-        incident, audited 2026-08-23)."""
-        if self.model_loader is not None and context.model.artifact_ref:
-            try:
-                model = await self.model_loader.load(
-                    context.model.id,
-                    context.model.framework or "",
-                    context.model.algorithm,
-                    context.market.target_type,
-                    context.model.artifact_ref,
-                )
-                return TrainedModelPredictor(market_kind=context.market.market_kind, model=model), "trained_model"
-            except Exception:  # noqa: BLE001 — any artifact-loading failure falls back, never breaks generation
-                # Falling back is deliberate (a broken artifact must never break generation when a
-                # safe formula-based path exists), but it must never be *silent* — this is the
-                # Champion model failing to serve its own market, which operators need to see and
-                # act on (a corrupt/missing artifact is a real incident, not routine behavior).
-                logger.error(
-                    "prediction_engine.champion_artifact_load_failed",
-                    extra={
-                        "market_key": context.market.market_key,
-                        "model_id": str(context.model.id.value),
-                        "artifact_ref": context.model.artifact_ref,
-                        "framework": context.model.framework,
-                    },
-                    exc_info=True,
-                )
-        return self.predictors.get(context.market.market_kind, context.market.market_key), "formula_fallback"
+        Returns ``(predictor, predictor_provenance, fallback_reason)`` — "trained_model" or
+        "formula_fallback", plus (only for the latter) a specific reason code — so the caller can
+        persist genuine provenance on `Prediction` instead of the API inferring "trained model"
+        from `model_id` alone, which stays the Champion's id either way and would misattribute a
+        fallback-served prediction as ML-computed (real prod incident, audited 2026-08-23)."""
+        if self.model_loader is None:
+            return self.predictors.get(context.market.market_kind, context.market.market_key), "formula_fallback", "MODEL_LOADER_NOT_WIRED"
+        if not context.model.artifact_ref:
+            return self.predictors.get(context.market.market_kind, context.market.market_key), "formula_fallback", "NO_ARTIFACT_REGISTERED"
 
-    async def _historical_accuracy(self, market_id: MarketId) -> float:
+        try:
+            model = await self.model_loader.load(
+                context.model.id,
+                context.model.framework or "",
+                context.model.algorithm,
+                context.market.target_type,
+                context.model.artifact_ref,
+                context.model.artifact_checksum,
+            )
+            return TrainedModelPredictor(market_kind=context.market.market_kind, model=model), "trained_model", None
+        except Exception as exc:  # noqa: BLE001 — any artifact-loading failure falls back, classified below
+            # Falling back is deliberate (a broken/tampered artifact must never break generation
+            # when a safe formula-based path exists), but it must never be *silent* — this is the
+            # Champion model failing to serve its own market, which operators need to see and act
+            # on (a corrupt/missing/tampered artifact is a real incident, not routine behavior).
+            # Reason classification is coarse by design (§3 forensic-audit taxonomy) — this codebase
+            # runs multiple artifact-store backends and cannot reliably distinguish "the store
+            # couldn't fetch the payload" from "the payload fetched but failed to deserialize" for
+            # every one of them without brittle, backend-specific exception sniffing; a checksum
+            # mismatch and an unrecognized framework string are the two cases precise enough to name.
+            if isinstance(exc, ArtifactIntegrityError):
+                reason = "ARTIFACT_INTEGRITY_MISMATCH"
+            elif isinstance(exc, UnknownModelFrameworkError):
+                reason = "ARTIFACT_DESERIALIZE_FAILURE"
+            else:
+                reason = "ARTIFACT_LOAD_FAILURE"
+            logger.error(
+                "prediction_engine.champion_artifact_load_failed",
+                extra={
+                    "market_key": context.market.market_key,
+                    "model_id": str(context.model.id.value),
+                    "artifact_ref": context.model.artifact_ref,
+                    "framework": context.model.framework,
+                    "fallback_reason": reason,
+                },
+                exc_info=True,
+            )
+            return self.predictors.get(context.market.market_kind, context.market.market_key), "formula_fallback", reason
+
+    async def _historical_accuracy(self, market_id: MarketId, target_type: TargetType) -> float:
         outcomes = await self.outcomes.list_by_market(market_id, limit=200)
         if not outcomes:
             return 0.5
-        correctness = [1.0 - _clamp(outcome.error if outcome.error is not None else 0.0) for outcome in outcomes]
+        if target_type is TargetType.REGRESSION:
+            # A regression outcome's `error` is the market's own raw magnitude
+            # (`abs(predicted - actual)`, `outcome_resolution_service.py`) — never bounded to
+            # [0, 1] the way a classification outcome's already is (0.0 or 1.0), because
+            # `_regression_uncertainty` below needs that raw magnitude, in the market's own units,
+            # to build a meaningful confidence interval. Feeding it straight into `1 - _clamp(...)`
+            # here would score a 10-point miss on a ~220-point total identically to a 10-point
+            # miss on a ~2-point one — both always clamp to the worst possible score, silently
+            # reporting ~0% historical accuracy for every regression market regardless of actual
+            # quality (real bug, found and fixed in Phase 6). Dividing by the real observed
+            # magnitude turns it into a relative error instead, comparable across markets without
+            # a fabricated per-market scale.
+            correctness = [1.0 - _clamp(_regression_relative_error(outcome)) for outcome in outcomes]
+        else:
+            correctness = [1.0 - _clamp(outcome.error if outcome.error is not None else 0.0) for outcome in outcomes]
         return sum(correctness) / len(correctness)
 
     async def _model_reliability(self, model_id: ModelId) -> float:

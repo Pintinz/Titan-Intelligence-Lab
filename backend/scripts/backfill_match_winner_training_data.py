@@ -33,7 +33,6 @@ Usage: TITANIQ_DB_URL=sqlite+aiosqlite:///./dev.db python scripts/backfill_match
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -51,6 +50,8 @@ from modules.predictions.infrastructure.persistence.repositories import (
     SqlAlchemyPredictionOutcomeRepository,
     SqlAlchemyPredictionRepository,
 )
+from modules.features.domain.value_objects import EntityType, FeatureKey
+from modules.features.infrastructure.persistence.repositories import SqlAlchemyFeatureValueRepository
 
 MARKET_KEY = "football.match_winner"
 REQUIRED_FEATURES = (
@@ -76,19 +77,20 @@ def _dashed(fixture_id_hex: str) -> str:
     return f"{fixture_id_hex[0:8]}-{fixture_id_hex[8:12]}-{fixture_id_hex[12:16]}-{fixture_id_hex[16:20]}-{fixture_id_hex[20:32]}"
 
 
-async def _latest_feature_value(session, feature_key: str, dashed: str) -> float | None:
-    row = (
-        await session.execute(
-            text(
-                "SELECT value FROM feature_values_offline WHERE feature_key = :fk AND entity_id = :eid "
-                "ORDER BY as_of DESC LIMIT 1"
-            ),
-            {"fk": feature_key, "eid": dashed},
-        )
-    ).fetchone()
-    if row is None:
-        return None
-    return json.loads(row[0])["v"]
+async def _feature_value_as_of(session, feature_key: str, dashed: str, cutoff: datetime) -> float | None:
+    """Point-in-time read, not "latest ever written" — a feature recomputed after `cutoff` (e.g.
+    by a later live re-sync touching this same historical fixture) must stay invisible here.
+
+    Goes through `SqlAlchemyFeatureValueRepository.get_as_of` — the same repository method the
+    live serve path already uses — rather than a raw-SQL `as_of <= :cutoff` bound: a first attempt
+    at the latter compared a tz-aware Python `datetime` bound parameter against
+    `DateTime(timezone=True)`-typed rows as raw SQLite TEXT, and the two didn't serialize to the
+    same string format, silently matching nothing (caught by this fix's own regression tests).
+    The ORM comparison is spared that entirely."""
+    value = await SqlAlchemyFeatureValueRepository(session=session).get_as_of(
+        FeatureKey(feature_key), EntityType.FIXTURE, dashed, cutoff
+    )
+    return None if value is None else value.value
 
 
 async def main() -> None:
@@ -143,11 +145,14 @@ async def main() -> None:
                 )
             ).one()
             home_score, away_score, scheduled_at = row
+            # The cutoff for every feature this fixture's snapshot may see — its own kickoff, never
+            # the batch's wall-clock `now`. Computed once, before any feature read.
+            cutoff = (datetime.fromisoformat(scheduled_at) if isinstance(scheduled_at, str) else scheduled_at) or now
 
             feature_snapshot: dict[str, float] = {}
             missing_required = False
             for key in REQUIRED_FEATURES:
-                value = await _latest_feature_value(session, key, dashed)
+                value = await _feature_value_as_of(session, key, dashed, cutoff)
                 if value is None:
                     missing_required = True
                     break
@@ -156,14 +161,12 @@ async def main() -> None:
                 skipped_missing_required += 1
                 continue
             for key in OPTIONAL_FEATURES:
-                value = await _latest_feature_value(session, key, dashed)
+                value = await _feature_value_as_of(session, key, dashed, cutoff)
                 if value is not None:
                     feature_snapshot[key] = value
 
             actual_value = resolver(MatchResult(home_score, away_score))
-            evaluated_at = (
-                datetime.fromisoformat(scheduled_at) if isinstance(scheduled_at, str) else scheduled_at
-            ) or now
+            evaluated_at = cutoff
 
             prediction = await predictions.record(
                 Prediction(

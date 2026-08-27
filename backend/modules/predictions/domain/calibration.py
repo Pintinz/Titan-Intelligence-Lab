@@ -51,6 +51,17 @@ class CalibrationReport:
 
 
 @dataclass(frozen=True)
+class CalibrationMetadata:
+    """What `CalibratorPort.get_metadata()` reports about a model's currently-active fitted
+    calibration — Phase 4 (Calibration Integrity): the minimum a caller needs to decide whether
+    that fit is still trustworthy (``fitted_at`` vs. a staleness policy) and how much evidence
+    backed it (``sample_count``), without exposing the calibrator's internal parameters."""
+
+    sample_count: int
+    fitted_at: datetime
+
+
+@dataclass(frozen=True)
 class PlattCalibrationParameters:
     """The durable form of `PlattScalingCalibrator`'s fitted `(a, b)` — persisted so a `fit()`
     call in one process (e.g. a Celery worker) reaches `calibrate()` in every other process

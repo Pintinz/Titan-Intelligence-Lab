@@ -6,7 +6,12 @@ import pytest
 
 from modules.predictions.domain.value_objects import ModelId, TargetType
 from modules.predictions.infrastructure.ml.local_artifact_store import LocalFilesystemArtifactStore
-from modules.predictions.infrastructure.ml.model_loader import ModelLoaderService, UnknownModelFrameworkError
+from modules.predictions.infrastructure.ml.model_loader import (
+    ArtifactIntegrityError,
+    ModelLoaderService,
+    UnknownModelFrameworkError,
+    compute_artifact_checksum,
+)
 from modules.predictions.infrastructure.ml.sklearn_adapter import SklearnAdapter
 from modules.predictions.domain.ml_value_objects import MLAlgorithm
 from modules.predictions.ports.ml_model import TrainingSample
@@ -77,3 +82,50 @@ class TestModelLoaderService:
         loaded = await loader.load(ModelId(uuid4()), "lightgbm", "lightgbm_gbm", TargetType.CLASSIFICATION, ref)
 
         assert loaded.is_fitted()
+
+    # --- Forensic audit §15 "Model Artifact Integrity" ------------------------------------------
+
+    async def test_matching_checksum_loads_normally(self, loader, artifact_store):
+        model = SklearnAdapter(algorithm=MLAlgorithm.RANDOM_FOREST, target_type=TargetType.CLASSIFICATION)
+        await model.fit(_classification_samples())
+        payload = model.serialize()
+        ref = await artifact_store.save("football/match_result/v1.bin", payload)
+        checksum = compute_artifact_checksum(payload)
+
+        loaded = await loader.load(
+            ModelId(uuid4()), "sklearn", "random_forest", TargetType.CLASSIFICATION, ref, checksum,
+        )
+
+        assert loaded.is_fitted()
+
+    async def test_mismatched_checksum_raises_artifact_integrity_error(self, loader, artifact_store):
+        """The exact scenario §15 exists to catch: the artifact at `artifact_ref` no longer hashes
+        to what was recorded when this model version was registered — corrupted, overwritten, or
+        swapped out-of-band since training."""
+        model = SklearnAdapter(algorithm=MLAlgorithm.RANDOM_FOREST, target_type=TargetType.CLASSIFICATION)
+        await model.fit(_classification_samples())
+        ref = await artifact_store.save("football/match_result/v1.bin", model.serialize())
+
+        with pytest.raises(ArtifactIntegrityError):
+            await loader.load(
+                ModelId(uuid4()), "sklearn", "random_forest", TargetType.CLASSIFICATION, ref,
+                "0" * 64,  # a checksum that cannot possibly match the real artifact
+            )
+
+    async def test_no_checksum_recorded_skips_verification(self, loader, artifact_store):
+        """A model registered before this field existed (or by a training path that hasn't been
+        updated to compute one) must load exactly as before — `None` is "never checked", not
+        itself a failure."""
+        model = SklearnAdapter(algorithm=MLAlgorithm.RANDOM_FOREST, target_type=TargetType.CLASSIFICATION)
+        await model.fit(_classification_samples())
+        ref = await artifact_store.save("football/match_result/v1.bin", model.serialize())
+
+        loaded = await loader.load(
+            ModelId(uuid4()), "sklearn", "random_forest", TargetType.CLASSIFICATION, ref, None,
+        )
+
+        assert loaded.is_fitted()
+
+    def test_compute_artifact_checksum_is_deterministic_and_content_sensitive(self):
+        assert compute_artifact_checksum(b"abc") == compute_artifact_checksum(b"abc")
+        assert compute_artifact_checksum(b"abc") != compute_artifact_checksum(b"abd")

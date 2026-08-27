@@ -21,6 +21,9 @@ from datetime import datetime, timezone
 from modules.ingestion.infrastructure.celery.celery_app import celery_app
 from modules.predictions.application.calibration_fitting_service import CalibrationFittingService
 from modules.predictions.application.calibration_validation_service import CalibrationValidationService
+from modules.predictions.application.scheduled_prediction_generation_orchestrator import (
+    ScheduledPredictionGenerationOrchestrator,
+)
 from modules.predictions.application.scheduled_retraining_orchestrator import ScheduledRetrainingOrchestrator
 
 logger = logging.getLogger("titaniq.predictions.tasks")
@@ -113,6 +116,36 @@ async def _get_calibration_service() -> AsyncIterator[CalibrationFittingService]
         await asyncio.sleep(0)
 
 
+_PredictionGenerationOrchestratorFactory = Callable[[], Awaitable[ScheduledPredictionGenerationOrchestrator]]
+_prediction_generation_orchestrator_factory: _PredictionGenerationOrchestratorFactory | None = None
+
+
+def set_prediction_generation_orchestrator_factory(factory: _PredictionGenerationOrchestratorFactory) -> None:
+    global _prediction_generation_orchestrator_factory
+    _prediction_generation_orchestrator_factory = factory
+
+
+@asynccontextmanager
+async def _get_prediction_generation_orchestrator() -> AsyncIterator[ScheduledPredictionGenerationOrchestrator]:
+    """Milestone 24 §3/1(b): same session-closing rationale as `_get_retraining_orchestrator` above."""
+    if _prediction_generation_orchestrator_factory is None:
+        raise RuntimeError(
+            "prediction generation orchestrator factory not configured — call "
+            "set_prediction_generation_orchestrator_factory() at worker startup"
+        )
+    orchestrator = await _prediction_generation_orchestrator_factory()
+    try:
+        yield orchestrator
+    finally:
+        session = getattr(orchestrator, "_worker_session", None)
+        if session is not None:
+            await session.close()
+        redis_client = getattr(orchestrator, "_worker_redis_client", None)
+        if redis_client is not None:
+            await redis_client.aclose()
+        await asyncio.sleep(0)
+
+
 _CalibrationValidationServiceFactory = Callable[[], Awaitable[CalibrationValidationService]]
 _calibration_validation_service_factory: _CalibrationValidationServiceFactory | None = None
 
@@ -147,6 +180,74 @@ async def _get_calibration_validation_service() -> AsyncIterator[CalibrationVali
 
 _RETRY_KWARGS = {"autoretry_for": (Exception,), "retry_backoff": True, "retry_backoff_max": 300, "max_retries": 3}
 
+# Phase 5 (Celery Worker+Beat verification, 2026-08-25) — production runs `titaniq-worker` with
+# `--pool=solo` (fixed a real prefork-pool OOM: forking duplicates the already-loaded
+# sklearn/shap/xgboost import weight per child). Celery's own `task_time_limit`/`soft_time_limit`
+# (`celery_app.py`'s `task_time_limit=600`) are silently NOT ENFORCED under the solo pool —
+# confirmed against the installed celery 5.6.3's `celery.concurrency.solo.TaskPool._get_info()`,
+# whose `'timeouts': ()` is exactly the field Celery's own worker code checks before ever applying
+# either limit. A hung task under solo blocks every other scheduled task indefinitely (single-
+# threaded, non-preemptive) with no automatic recovery — worse for these three tasks than for the
+# cheap, fast ingestion ones, since they're the heaviest work this worker does (dataset build,
+# multi-algorithm training, sklearn `CalibratedClassifierCV` comparison).
+#
+# `asyncio.wait_for()` below is an application-level bound that works regardless of pool type —
+# but it can only ever preempt at an `await` suspension point. It reliably bounds an I/O-bound
+# hang (a stuck DB query, a provider API call that never returns) but CANNOT interrupt a single
+# long-running *synchronous* call within one un-awaited stretch (e.g. one sklearn `.fit()` call,
+# which is synchronous CPU-bound code with no async API) — an honest, documented limitation, not a
+# complete guarantee, same "real but partial mitigation, not fabricated as total" posture this
+# codebase already uses elsewhere (e.g. `calibration_fitting_service.py`'s own v1 scope note).
+# Values are generous relative to each task's own 6-hour (retraining/validation) or 1-hour
+# (calibration fitting) Beat cadence — see `beat_schedule.py` — so a legitimately slow-but-healthy
+# run is never mistaken for a hang, while a genuinely stuck run still recovers well before the
+# next scheduled tick.
+_RETRAINING_TASK_TIMEOUT_SECONDS = 1800  # heavy: dataset build + multi-algorithm training
+_CALIBRATION_FITTING_TASK_TIMEOUT_SECONDS = 300  # cheap: reads outcome history, fits one logistic regression
+_CALIBRATION_VALIDATION_TASK_TIMEOUT_SECONDS = 1800  # heavy: comparably costly to a retrain
+# Redis/Celery pipeline verification (2026-08-26) — real defect already fixed once in this exact
+# codebase (see ingestion/beat_schedule.py's LIVE_FIXTURES_LOCK_TTL_SECONDS docstring for the full
+# incident): a Beat interval shorter than a task's own worst-case runtime causes queued duplicates
+# to pile up and redundantly re-run. Applying that lesson up front here rather than rediscovering
+# it live — 900s comfortably bounds a sweep over a week's worth of upcoming fixtures × PRODUCTION
+# markets (each generation is a feature lookup + inference, not a network-bound provider call, so
+# this is generously long relative to the real expected cost), and `beat_schedule.py`'s own
+# SCHEDULED_PREDICTION_GENERATION_INTERVAL_SECONDS (1 hour) leaves 4x headroom over it.
+_PREDICTION_GENERATION_TASK_TIMEOUT_SECONDS = 900
+
+
+@celery_app.task(name="predictions.check_scheduled_prediction_generation", bind=True, **_RETRY_KWARGS)
+@_logged("predictions.check_scheduled_prediction_generation")
+def check_scheduled_prediction_generation_task(self, now_iso: str | None = None) -> dict:
+    """Real gap found live (2026-08-26) — `ingestion.sync_upcoming_fixtures` already syncs real
+    upcoming fixtures on its own schedule, but nothing ever generated predictions for them
+    automatically; every prediction that ever existed was manually/admin-triggered. Generates (or
+    refreshes) a prediction, for every PRODUCTION market, for every fixture of that market's sport
+    due within the orchestrator's lookahead window — the automatic half of prediction generation,
+    manual/admin triggering being the other half (same shape as retraining above)."""
+
+    async def _do() -> dict:
+        async with _get_prediction_generation_orchestrator() as orchestrator:
+            now = datetime.fromisoformat(now_iso) if now_iso else datetime.now(timezone.utc)
+            outcomes = await asyncio.wait_for(
+                orchestrator.run(now), timeout=_PREDICTION_GENERATION_TASK_TIMEOUT_SECONDS
+            )
+            return {
+                "pairs_checked": len(outcomes),
+                "published": sum(1 for o in outcomes if o.status == "published"),
+                "draft": sum(1 for o in outcomes if o.status == "draft"),
+                "skipped": sum(1 for o in outcomes if o.status == "skipped"),
+                "results": [
+                    {
+                        "fixture_id": o.fixture_id, "market_key": o.market_key, "status": o.status,
+                        "reason": o.reason,
+                    }
+                    for o in outcomes
+                ],
+            }
+
+    return asyncio.run(_do())
+
 
 @celery_app.task(name="predictions.check_scheduled_retraining", bind=True, **_RETRY_KWARGS)
 @_logged("predictions.check_scheduled_retraining")
@@ -158,7 +259,7 @@ def check_scheduled_retraining_task(self, now_iso: str | None = None) -> dict:
     async def _do() -> dict:
         async with _get_retraining_orchestrator() as orchestrator:
             now = datetime.fromisoformat(now_iso) if now_iso else datetime.now(timezone.utc)
-            outcomes = await orchestrator.run(now)
+            outcomes = await asyncio.wait_for(orchestrator.run(now), timeout=_RETRAINING_TASK_TIMEOUT_SECONDS)
             return {
                 "markets_checked": len(outcomes),
                 "retrained": sum(1 for o in outcomes if o.challenger is not None),
@@ -190,7 +291,9 @@ def check_scheduled_calibration_task(self, now_iso: str | None = None) -> dict:
     async def _do() -> dict:
         async with _get_calibration_service() as service:
             now = datetime.fromisoformat(now_iso) if now_iso else datetime.now(timezone.utc)
-            outcomes = await service.fit_all_production_markets(now)
+            outcomes = await asyncio.wait_for(
+                service.fit_all_production_markets(now), timeout=_CALIBRATION_FITTING_TASK_TIMEOUT_SECONDS
+            )
             return {
                 "markets_checked": len(outcomes),
                 "fitted": sum(1 for o in outcomes if o.fitted),
@@ -223,7 +326,9 @@ def check_scheduled_calibration_validation_task(self, now_iso: str | None = None
     async def _do() -> dict:
         async with _get_calibration_validation_service() as service:
             now = datetime.fromisoformat(now_iso) if now_iso else datetime.now(timezone.utc)
-            outcomes = await service.validate_all_production_markets(now)
+            outcomes = await asyncio.wait_for(
+                service.validate_all_production_markets(now), timeout=_CALIBRATION_VALIDATION_TASK_TIMEOUT_SECONDS
+            )
             return {
                 "markets_checked": len(outcomes),
                 "validated": sum(1 for o in outcomes if o.validated),

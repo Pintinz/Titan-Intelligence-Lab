@@ -20,6 +20,14 @@ from dataclasses import dataclass
 from typing import Protocol
 
 
+class TextIntelligenceRequestError(RuntimeError):
+    """Shared base every real `TextIntelligenceProviderPort` adapter's own request-error
+    subclasses (`GeminiRequestError`, `ClaudeRequestError`) inherit from — lets
+    `TextIntelligenceRouter` catch "this real provider's call failed" generically across a
+    fallback chain of multiple real adapters, without needing to know which specific provider
+    (or how many) it's routing between."""
+
+
 @dataclass(frozen=True)
 class ExtractedEvent:
     """A structured event pulled from unstructured text (docs/titaniq.md news pipeline) —

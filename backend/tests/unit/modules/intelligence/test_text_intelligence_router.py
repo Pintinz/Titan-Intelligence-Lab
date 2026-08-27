@@ -79,8 +79,24 @@ class _FailingRealAdapter:
 
         raise GeminiRequestError("simulated 401 Unauthorized")
 
+    async def assess_prediction_context(self, payload: dict) -> tuple[str, str]:
+        from modules.intelligence.infrastructure.gemini_adapter import GeminiRequestError
 
-def _build_router(real_adapter=None):
+        raise GeminiRequestError("simulated 429 rate limited")
+
+
+@dataclass
+class _RecordingClaudeAdapter:
+    provider_key: str = "claude"
+
+    async def explain(self, context: dict) -> str:
+        return "claude explanation"
+
+    async def assess_prediction_context(self, payload: dict) -> tuple[str, str]:
+        return '{"prediction_review": {"status": "SUPPORTED"}}', "claude"
+
+
+def _build_router(real_adapter=None, fallback_adapters=()):
     provider_repo = _InMemoryProviderRepo()
     credential_repo = _InMemoryCredentialRepo()
     admin_service = ProviderManagementService(providers=provider_repo, credentials=credential_repo, vault=_NoopVault())
@@ -88,8 +104,21 @@ def _build_router(real_adapter=None):
         admin_service=admin_service,
         real_adapter=real_adapter or _RecordingRealAdapter(),
         mock_adapter=MockGeminiAdapter(),
+        fallback_adapters=fallback_adapters,
     )
     return router, provider_repo, credential_repo
+
+
+async def _register_provider(provider_repo, credential_repo, key: str, name: str):
+    provider = ProviderDefinition(
+        id=ProviderId(uuid.uuid4()), key=key, name=name,
+        category=ProviderCategory.AI, status=ProviderStatus.ACTIVE,
+    )
+    await provider_repo.upsert(provider)
+    await credential_repo.upsert(
+        ProviderCredential(id=CredentialId(uuid.uuid4()), provider_id=provider.id, label="primary", encrypted_value="k")
+    )
+    return provider
 
 
 @dataclass
@@ -213,3 +242,87 @@ async def test_assess_prediction_context_uses_real_adapter_when_credentialed():
 
     assert raw == '{"prediction_review": {"status": "SUPPORTED"}}'
     assert source == "gemini"
+
+
+class TestFallbackChain:
+    """News Intelligence audit (2026-08-27) — `fallback_adapters`: a chain of further real
+    providers tried in order after `real_adapter`, before finally falling to `mock_adapter`."""
+
+    async def test_falls_through_to_a_credentialed_fallback_when_primary_has_no_credential(self):
+        """Gemini registered but with no usable credential yet — Claude, which IS credentialed,
+        must be used instead of jumping straight to mock."""
+        router, provider_repo, credential_repo = _build_router(fallback_adapters=(_RecordingClaudeAdapter(),))
+        await provider_repo.upsert(
+            ProviderDefinition(id=ProviderId(uuid.uuid4()), key="gemini", name="Gemini API", category=ProviderCategory.AI, status=ProviderStatus.ACTIVE)
+        )
+        await _register_provider(provider_repo, credential_repo, "claude", "Claude (Anthropic)")
+
+        result = await router.explain({})
+
+        assert result == "claude explanation"
+
+    async def test_falls_through_to_fallback_when_primary_raises(self):
+        """The scenario that motivated this feature: Gemini quota-exhausted (raises on every
+        call) but Claude is credentialed and working — the chain must reach it rather than
+        degrading straight to the mock explanation."""
+        router, provider_repo, credential_repo = _build_router(
+            real_adapter=_FailingRealAdapter(), fallback_adapters=(_RecordingClaudeAdapter(),),
+        )
+        await _register_provider(provider_repo, credential_repo, "gemini", "Gemini API")
+        await _register_provider(provider_repo, credential_repo, "claude", "Claude (Anthropic)")
+
+        result = await router.explain({})
+
+        assert result == "claude explanation"
+
+    async def test_falls_back_to_mock_when_every_adapter_in_the_chain_fails(self):
+        failing_claude = _FailingRealAdapter(provider_key="claude")
+        router, provider_repo, credential_repo = _build_router(
+            real_adapter=_FailingRealAdapter(), fallback_adapters=(failing_claude,),
+        )
+        await _register_provider(provider_repo, credential_repo, "gemini", "Gemini API")
+        await _register_provider(provider_repo, credential_repo, "claude", "Claude (Anthropic)")
+
+        result = await router.explain({})
+
+        assert result == "This verdict is grounded in the match's available data — no single factor dominates it."
+
+    async def test_falls_back_to_mock_when_no_adapter_in_the_chain_is_credentialed(self):
+        router, _provider_repo, _credential_repo = _build_router(fallback_adapters=(_RecordingClaudeAdapter(),))
+
+        result = await router.explain({})
+
+        assert result == "This verdict is grounded in the match's available data — no single factor dominates it."
+
+    async def test_primary_is_preferred_over_fallback_when_both_are_usable(self):
+        """Gemini stays primary — Claude is only ever tried when Gemini genuinely fails or isn't
+        credentialed, never used just because it's also available."""
+        router, provider_repo, credential_repo = _build_router(fallback_adapters=(_RecordingClaudeAdapter(),))
+        await _register_provider(provider_repo, credential_repo, "gemini", "Gemini API")
+        await _register_provider(provider_repo, credential_repo, "claude", "Claude (Anthropic)")
+
+        result = await router.explain({})
+
+        assert result == "real explanation"
+
+    async def test_assess_prediction_context_reports_the_real_source_that_actually_answered(self):
+        router, provider_repo, credential_repo = _build_router(
+            real_adapter=_FailingRealAdapter(), fallback_adapters=(_RecordingClaudeAdapter(),),
+        )
+        await _register_provider(provider_repo, credential_repo, "gemini", "Gemini API")
+        await _register_provider(provider_repo, credential_repo, "claude", "Claude (Anthropic)")
+
+        raw, source = await router.assess_prediction_context({"context": {}})
+
+        assert raw == '{"prediction_review": {"status": "SUPPORTED"}}'
+        assert source == "claude"
+
+    async def test_no_fallback_adapters_behaves_exactly_like_the_single_adapter_router(self):
+        """Default `fallback_adapters=()` — every existing caller/test that only ever passed
+        `real_adapter` is completely unaffected by this feature."""
+        router, provider_repo, credential_repo = _build_router(real_adapter=_FailingRealAdapter())
+        await _register_provider(provider_repo, credential_repo, "gemini", "Gemini API")
+
+        result = await router.explain({})
+
+        assert result == "This verdict is grounded in the match's available data — no single factor dominates it."

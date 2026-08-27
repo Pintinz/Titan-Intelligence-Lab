@@ -35,7 +35,7 @@ from modules.identity.infrastructure.security import MockJWTValidator
 from modules.ingestion.infrastructure.persistence.models import Base as IngestionBase
 from modules.intelligence.infrastructure.persistence.models import Base as IntelligenceBase
 from modules.knowledge_graph.infrastructure.persistence.models import Base as KnowledgeGraphBase
-from modules.predictions.domain.entities import FeatureMarketMapping, MarketDefinition, ModelDefinition
+from modules.predictions.domain.entities import FeatureMarketMapping, MarketDefinition, ModelDefinition, PredictionOutcome
 from modules.predictions.domain.value_objects import (
     FeatureMarketMappingId,
     MarketId,
@@ -43,6 +43,8 @@ from modules.predictions.domain.value_objects import (
     MarketStatus,
     ModelId,
     ModelStatus,
+    PredictionId,
+    PredictionOutcomeId,
     TargetType,
 )
 from modules.predictions.infrastructure.persistence.models import Base as PredictionsBase
@@ -50,6 +52,7 @@ from modules.predictions.infrastructure.persistence.repositories import (
     SqlAlchemyFeatureMarketMappingRepository,
     SqlAlchemyMarketRepository,
     SqlAlchemyModelRepository,
+    SqlAlchemyPredictionOutcomeRepository,
 )
 from modules.sports.domain.entities import Competition, Fixture, Season, Sport, Team
 from modules.sports.domain.value_objects import (
@@ -276,7 +279,13 @@ async def seeded_fixture(db_session_factory):
 
 @pytest.mark.parametrize(
     "path",
-    ["/api/v1/public/platform-summary", "/api/v1/public/featured-intelligence", "/api/v1/public/news-intelligence", "/api/v1/public/knowledge-graph-preview"],
+    [
+        "/api/v1/public/platform-summary",
+        "/api/v1/public/featured-intelligence",
+        "/api/v1/public/verified-intelligence",
+        "/api/v1/public/news-intelligence",
+        "/api/v1/public/knowledge-graph-preview",
+    ],
 )
 def test_public_endpoints_return_200_without_auth(client, path):
     response = client.get(path)
@@ -309,6 +318,11 @@ def test_featured_and_news_intelligence_empty_lists(client):
 
     assert featured.json()["data"] == []
     assert news.json()["data"] == []
+
+
+def test_verified_intelligence_empty_list(client):
+    response = client.get("/api/v1/public/verified-intelligence")
+    assert response.json()["data"] == []
 
 
 def test_knowledge_graph_preview_empty_state(client):
@@ -400,14 +414,10 @@ def test_featured_intelligence_caps_one_pick_per_market(client, db_session_facto
     assert set(market_keys) == {"football.diversity_market_a", "football.diversity_market_b"}
 
 
-def test_featured_intelligence_prefers_live_and_upcoming_over_completed(client, db_session_factory, seeded_fixture):
-    """A landing-page hero showing a prediction for a match that already finished reads as stale.
-    Uses real wall-clock time, not the fixture suite's fixed T0 (T0 + a few days is itself already
-    in the past relative to "now" — exactly the staleness this endpoint now has to defend against,
-    confirmed live: 9 of 380 locally-seeded "scheduled" fixtures already had a past `scheduled_at`)
-    — a genuinely future-dated SCHEDULED fixture must still rank first, proving status+timing beats
-    raw confidence in the ordering, over a COMPLETED fixture seeded with the same pattern (so
-    confidence is at least as good, never engineered lower)."""
+def test_featured_intelligence_prefers_live_and_upcoming_over_a_stale_pending_fixture(client, db_session_factory, seeded_fixture):
+    """A genuinely future-dated SCHEDULED fixture must rank first over one whose scheduled_at has
+    already passed but isn't yet marked completed (the sync-lag scenario `_is_reliably_upcoming`
+    guards against) — status+timing beats raw confidence in the ordering."""
     headers = _auth_headers(client)
     real_now = datetime.now(timezone.utc)
 
@@ -425,24 +435,57 @@ def test_featured_intelligence_prefers_live_and_upcoming_over_completed(client, 
             return str(fixture.id)
 
     subject_ref_scheduled = asyncio.run(_fixture(FixtureStatus.SCHEDULED, real_now + timedelta(days=3)))
-    subject_ref_completed = asyncio.run(_fixture(FixtureStatus.COMPLETED, real_now - timedelta(days=4)))
+    subject_ref_pending = asyncio.run(_fixture(FixtureStatus.SCHEDULED, real_now - timedelta(hours=6)))
 
     asyncio.run(
         _seed_production_market(db_session_factory, "football.timing_market_scheduled", "football.timing_feature_scheduled", subject_ref_scheduled)
     )
     asyncio.run(
-        _seed_production_market(db_session_factory, "football.timing_market_completed", "football.timing_feature_completed", subject_ref_completed)
+        _seed_production_market(db_session_factory, "football.timing_market_pending", "football.timing_feature_pending", subject_ref_pending)
     )
     _generate(client, headers, "football.timing_market_scheduled", subject_ref_scheduled)
-    _generate(client, headers, "football.timing_market_completed", subject_ref_completed)
+    _generate(client, headers, "football.timing_market_pending", subject_ref_pending)
 
     response = client.get("/api/v1/public/featured-intelligence", params={"limit": 6})
     assert response.status_code == 200
     data = response.json()["data"]
 
     fixture_ids = [pick["fixture_id"] for pick in data]
-    assert fixture_ids.index(subject_ref_scheduled) < fixture_ids.index(subject_ref_completed)
+    assert fixture_ids.index(subject_ref_scheduled) < fixture_ids.index(subject_ref_pending)
     assert data[0]["status"] == "scheduled"
+
+
+def test_featured_intelligence_excludes_completed_fixtures_entirely(client, db_session_factory, seeded_fixture):
+    """Real UX ask (2026-08-26): now that `verified-intelligence` exists as its own section for
+    completed matches, featured-intelligence must never fall back to one — even when it's the only
+    published prediction available, the honest answer is an empty list, not a stale match dressed
+    up as current."""
+    headers = _auth_headers(client)
+    real_now = datetime.now(timezone.utc)
+
+    async def _completed_fixture():
+        async with db_session_factory() as session:
+            season = seeded_fixture["season"]
+            home, away = seeded_fixture["home"], seeded_fixture["away"]
+            fixture = await SqlAlchemyFixtureRepository(session=session).upsert(
+                Fixture(
+                    id=FixtureId(uuid.uuid4()), season_id=season.id, home_team_id=home.id, away_team_id=away.id,
+                    venue_id=None, scheduled_at=real_now - timedelta(days=2), status=FixtureStatus.COMPLETED,
+                    home_score=2, away_score=0,
+                )
+            )
+            await session.commit()
+            return str(fixture.id)
+
+    subject_ref = asyncio.run(_completed_fixture())
+    asyncio.run(
+        _seed_production_market(db_session_factory, "football.excluded_completed_market", "football.excluded_completed_feature", subject_ref)
+    )
+    _generate(client, headers, "football.excluded_completed_market", subject_ref)
+
+    response = client.get("/api/v1/public/featured-intelligence", params={"limit": 6})
+    assert response.status_code == 200
+    assert response.json()["data"] == []
 
 
 def test_featured_intelligence_does_not_trust_a_stale_scheduled_status(client, db_session_factory, seeded_fixture):
@@ -513,6 +556,205 @@ def test_featured_intelligence_excludes_correct_score(client, db_session_factory
     market_keys = [pick["market_key"] for pick in data]
     assert "football.correct_score" not in market_keys
     assert "football.match_winner" in market_keys
+
+
+def test_verified_intelligence_returns_a_completed_resolved_fixture(client, db_session_factory, seeded_fixture):
+    """Positive path: a completed fixture with a real recorded outcome shows up with its predicted
+    value, real final score, and resolved verdict — the section's whole reason to exist."""
+    headers = _auth_headers(client)
+    real_now = datetime.now(timezone.utc)
+
+    async def _completed_fixture():
+        async with db_session_factory() as session:
+            season = seeded_fixture["season"]
+            home, away = seeded_fixture["home"], seeded_fixture["away"]
+            fixture = await SqlAlchemyFixtureRepository(session=session).upsert(
+                Fixture(
+                    id=FixtureId(uuid.uuid4()), season_id=season.id, home_team_id=home.id, away_team_id=away.id,
+                    venue_id=None, scheduled_at=real_now - timedelta(days=2), status=FixtureStatus.COMPLETED,
+                    home_score=2, away_score=0,
+                )
+            )
+            await session.commit()
+            return str(fixture.id)
+
+    subject_ref = asyncio.run(_completed_fixture())
+    asyncio.run(
+        _seed_production_market(db_session_factory, "football.verified_market", "football.verified_feature", subject_ref)
+    )
+    prediction = _generate(client, headers, "football.verified_market", subject_ref)
+
+    async def _record_outcome():
+        async with db_session_factory() as session:
+            await SqlAlchemyPredictionOutcomeRepository(session=session).record(
+                PredictionOutcome(
+                    id=PredictionOutcomeId(uuid4()), prediction_id=PredictionId(uuid.UUID(prediction["id"])),
+                    actual_value=prediction["value"], error=0.0, evaluated_at=real_now,
+                )
+            )
+            await session.commit()
+
+    asyncio.run(_record_outcome())
+
+    response = client.get("/api/v1/public/verified-intelligence")
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert len(data) == 1
+    pick = data[0]
+    assert pick["fixture_id"] == subject_ref
+    assert pick["status"] == "completed"
+    assert pick["home_score"] == 2
+    assert pick["away_score"] == 0
+    assert pick["outcome"] == {"actual_value": prediction["value"], "is_correct": True}
+
+
+def test_verified_intelligence_excludes_a_completed_fixture_with_no_resolved_outcome(client, db_session_factory, seeded_fixture):
+    """A completed fixture OutcomeResolutionService hasn't processed yet must not appear — a
+    'Verified Intelligence' card with nothing verified is a contradiction, not an honest empty
+    state to pad the list with."""
+    headers = _auth_headers(client)
+    real_now = datetime.now(timezone.utc)
+
+    async def _completed_fixture():
+        async with db_session_factory() as session:
+            season = seeded_fixture["season"]
+            home, away = seeded_fixture["home"], seeded_fixture["away"]
+            fixture = await SqlAlchemyFixtureRepository(session=session).upsert(
+                Fixture(
+                    id=FixtureId(uuid.uuid4()), season_id=season.id, home_team_id=home.id, away_team_id=away.id,
+                    venue_id=None, scheduled_at=real_now - timedelta(days=1), status=FixtureStatus.COMPLETED,
+                    home_score=1, away_score=1,
+                )
+            )
+            await session.commit()
+            return str(fixture.id)
+
+    subject_ref = asyncio.run(_completed_fixture())
+    asyncio.run(
+        _seed_production_market(db_session_factory, "football.unresolved_verified_market", "football.unresolved_verified_feature", subject_ref)
+    )
+    _generate(client, headers, "football.unresolved_verified_market", subject_ref)
+
+    response = client.get("/api/v1/public/verified-intelligence")
+    assert response.status_code == 200
+    assert response.json()["data"] == []
+
+
+def test_verified_intelligence_excludes_scheduled_fixtures(client, db_session_factory, seeded_fixture):
+    """An upcoming (not yet played) fixture belongs in featured-intelligence, never here — nothing
+    to verify yet."""
+    headers = _auth_headers(client)
+    subject_ref = str(seeded_fixture["fixture"].id)  # seeded_fixture is SCHEDULED
+    asyncio.run(
+        _seed_production_market(db_session_factory, "football.upcoming_not_verified_market", "football.upcoming_not_verified_feature", subject_ref)
+    )
+    _generate(client, headers, "football.upcoming_not_verified_market", subject_ref)
+
+    response = client.get("/api/v1/public/verified-intelligence")
+    assert response.status_code == 200
+    assert response.json()["data"] == []
+
+
+def test_verified_intelligence_caps_one_pick_per_fixture(client, db_session_factory, seeded_fixture):
+    """A completed fixture with two published markets (both resolved) must appear once, not
+    twice — one card per real match, not per market."""
+    headers = _auth_headers(client)
+    real_now = datetime.now(timezone.utc)
+
+    async def _completed_fixture():
+        async with db_session_factory() as session:
+            season = seeded_fixture["season"]
+            home, away = seeded_fixture["home"], seeded_fixture["away"]
+            fixture = await SqlAlchemyFixtureRepository(session=session).upsert(
+                Fixture(
+                    id=FixtureId(uuid.uuid4()), season_id=season.id, home_team_id=home.id, away_team_id=away.id,
+                    venue_id=None, scheduled_at=real_now - timedelta(days=1), status=FixtureStatus.COMPLETED,
+                    home_score=3, away_score=1,
+                )
+            )
+            await session.commit()
+            return str(fixture.id)
+
+    subject_ref = asyncio.run(_completed_fixture())
+    asyncio.run(
+        _seed_production_market(db_session_factory, "football.multi_market_a", "football.multi_market_feature_a", subject_ref)
+    )
+    asyncio.run(
+        _seed_production_market(db_session_factory, "football.multi_market_b", "football.multi_market_feature_b", subject_ref)
+    )
+    prediction_a = _generate(client, headers, "football.multi_market_a", subject_ref)
+    prediction_b = _generate(client, headers, "football.multi_market_b", subject_ref)
+
+    async def _record_outcomes():
+        async with db_session_factory() as session:
+            repo = SqlAlchemyPredictionOutcomeRepository(session=session)
+            for prediction in (prediction_a, prediction_b):
+                await repo.record(
+                    PredictionOutcome(
+                        id=PredictionOutcomeId(uuid4()), prediction_id=PredictionId(uuid.UUID(prediction["id"])),
+                        actual_value=prediction["value"], error=0.0, evaluated_at=real_now,
+                    )
+                )
+            await session.commit()
+
+    asyncio.run(_record_outcomes())
+
+    response = client.get("/api/v1/public/verified-intelligence")
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert len(data) == 1
+    assert data[0]["fixture_id"] == subject_ref
+
+
+def test_verified_intelligence_orders_most_recently_played_first(client, db_session_factory, seeded_fixture):
+    headers = _auth_headers(client)
+    real_now = datetime.now(timezone.utc)
+
+    async def _completed_fixture(scheduled_at):
+        async with db_session_factory() as session:
+            season = seeded_fixture["season"]
+            home, away = seeded_fixture["home"], seeded_fixture["away"]
+            fixture = await SqlAlchemyFixtureRepository(session=session).upsert(
+                Fixture(
+                    id=FixtureId(uuid.uuid4()), season_id=season.id, home_team_id=home.id, away_team_id=away.id,
+                    venue_id=None, scheduled_at=scheduled_at, status=FixtureStatus.COMPLETED,
+                    home_score=1, away_score=0,
+                )
+            )
+            await session.commit()
+            return str(fixture.id)
+
+    subject_ref_older = asyncio.run(_completed_fixture(real_now - timedelta(days=10)))
+    subject_ref_recent = asyncio.run(_completed_fixture(real_now - timedelta(days=1)))
+
+    asyncio.run(
+        _seed_production_market(db_session_factory, "football.recency_market_older", "football.recency_feature_older", subject_ref_older)
+    )
+    asyncio.run(
+        _seed_production_market(db_session_factory, "football.recency_market_recent", "football.recency_feature_recent", subject_ref_recent)
+    )
+    prediction_older = _generate(client, headers, "football.recency_market_older", subject_ref_older)
+    prediction_recent = _generate(client, headers, "football.recency_market_recent", subject_ref_recent)
+
+    async def _record_outcomes():
+        async with db_session_factory() as session:
+            repo = SqlAlchemyPredictionOutcomeRepository(session=session)
+            for prediction in (prediction_older, prediction_recent):
+                await repo.record(
+                    PredictionOutcome(
+                        id=PredictionOutcomeId(uuid4()), prediction_id=PredictionId(uuid.UUID(prediction["id"])),
+                        actual_value=prediction["value"], error=0.0, evaluated_at=real_now,
+                    )
+                )
+            await session.commit()
+
+    asyncio.run(_record_outcomes())
+
+    response = client.get("/api/v1/public/verified-intelligence")
+    assert response.status_code == 200
+    data = response.json()["data"]
+    fixture_ids = [pick["fixture_id"] for pick in data]
+    assert fixture_ids.index(subject_ref_recent) < fixture_ids.index(subject_ref_older)
 
 
 def test_platform_summary_reflects_seeded_competition(client, seeded_fixture):

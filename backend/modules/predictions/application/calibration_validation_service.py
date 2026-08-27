@@ -50,7 +50,11 @@ from modules.predictions.domain.calibration import CalibrationMethod, Calibratio
 from modules.predictions.domain.ml_value_objects import MLAlgorithm
 from modules.predictions.domain.entities import MarketDefinition
 from modules.predictions.domain.value_objects import MarketId, MarketStatus, ModelId, TargetType
-from modules.predictions.infrastructure.ml.model_loader import ModelLoaderService
+from modules.predictions.infrastructure.ml.football_goals_poisson_adapter import (
+    FootballGoalsPoissonAdapter,
+    PoissonGridClassifierView,
+)
+from modules.predictions.infrastructure.ml.model_loader import ModelLoaderService, compute_artifact_checksum
 from modules.predictions.infrastructure.ml.sklearn_adapter import SklearnAdapter
 from modules.predictions.ports.ml_model import ModelArtifactStorePort
 from modules.predictions.ports.repositories import CalibrationReportRepositoryPort, MarketRepositoryPort, ModelRepositoryPort
@@ -169,6 +173,21 @@ class CalibrationValidationService:
         adapter = await self.model_loader.load(
             champion.id, champion.framework, champion.algorithm, TargetType.CLASSIFICATION, champion.artifact_ref
         )
+        # The `TargetType.CLASSIFICATION` passed above is only a constructor placeholder for the
+        # empty adapter `model_loader.load()` builds before `deserialize()` restores its real,
+        # originally-trained `target_type` from the artifact payload — this whole method (Platt/
+        # isotonic recalibration, log-loss/ECE comparison) is a classification-only concept with
+        # no regression equivalent anywhere in this codebase. Confirmed live:
+        # basketball.game_total_points_prediction is a real REGRESSION-target PRODUCTION market
+        # (CatBoostRegressor Champion) with zero guard here before this fix, which crashed with
+        # `AttributeError: 'CatBoostRegressor' object has no attribute 'decision_function'` and,
+        # same as the Poisson/LightGBM defects above, aborted `validate_all_production_markets`'s
+        # sweep for every other PRODUCTION market too.
+        if adapter.target_type is not TargetType.CLASSIFICATION:
+            raise CalibrationBlockedError(
+                f"{market_key}: target_type={adapter.target_type.value} — calibration validation "
+                "is a classification-only concept, not applicable to a regression-shaped market"
+            )
         estimator = adapter.underlying_estimator()
         if estimator is None:
             raise CalibrationBlockedError(f"{market_key}: champion artifact has no usable estimator")
@@ -176,6 +195,15 @@ class CalibrationValidationService:
         feature_order = adapter.feature_order
         class_labels = adapter.class_labels
         is_multiclass = bool(class_labels)
+        if isinstance(adapter, FootballGoalsPoissonAdapter):
+            # `underlying_estimator()` returns the raw `(home_model, away_model)` GLM pair for
+            # this adapter — neither has `predict_proba`/`decision_function`, which crashed this
+            # method with `AttributeError: 'tuple' object has no attribute 'decision_function'`
+            # (confirmed live against football.correct_score's real PRODUCTION Champion). Wrap it
+            # in the real scikit-learn-classifier-shaped view instead — see
+            # `PoissonGridClassifierView`'s own docstring.
+            classes = np.arange(len(class_labels)) if is_multiclass else np.array([0, 1])
+            estimator = PoissonGridClassifierView(adapter=adapter, classes_=classes)
         if is_multiclass:
             # The frozen base estimator's own `classes_` was set during its original `fit()` on
             # float-typed labels (see the label-dtype note below) — sklearn's internal calibration
@@ -185,7 +213,19 @@ class CalibrationValidationService:
             # must target the pipeline's final step, same unwrap `SklearnAdapter` itself uses.
             target = estimator.named_steps["model"] if isinstance(estimator, Pipeline) else estimator
             if hasattr(target, "classes_"):
-                target.classes_ = np.asarray(target.classes_).astype(int)
+                try:
+                    target.classes_ = np.asarray(target.classes_).astype(int)
+                except AttributeError:
+                    # Confirmed live: LightGBM/XGBoost/CatBoost's sklearn wrapper classes expose
+                    # `classes_` as a read-only computed property with no setter (unlike sklearn's
+                    # own native classifiers, where it's a plain settable instance attribute) —
+                    # crashed the whole PRODUCTION sweep on the first LightGBM multiclass Champion
+                    # encountered. Every one of those wrappers already derives `classes_` from
+                    # `np.unique(y)` internally during its own `fit()`, which is already a real
+                    # integer dtype for these libraries regardless of the float-labeled `y` this
+                    # codebase trains on — so there is nothing to honestly fix here, just nothing
+                    # this call needs to (or can) do.
+                    pass
 
         X_calib = _vectorize(calibration_samples, feature_order)
         X_test = _vectorize(test_samples, feature_order)
@@ -308,6 +348,7 @@ class CalibrationValidationService:
         next_version = max(existing_versions, default=champion.version) + 1
         artifact_key = f"{champion.model_key}.{champion.algorithm}/v{next_version}_calibrated_{sk_method}.bin"
         artifact_ref = await self.artifact_store.save(artifact_key, payload)
+        artifact_checksum = compute_artifact_checksum(payload)
 
         registered = await self.model_registry.register(
             market_id=market_id,
@@ -321,6 +362,7 @@ class CalibrationValidationService:
             feature_versions=champion.feature_versions,
             artifact_ref=artifact_ref,
             trained_at=now,
+            artifact_checksum=artifact_checksum,
         )
         return await self.model_registry.promote_to_challenger(registered.id)
 

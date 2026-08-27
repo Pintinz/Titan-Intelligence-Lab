@@ -80,6 +80,16 @@ class PredictionRepositoryPort(Protocol):
 
 class PredictionOutcomeRepositoryPort(Protocol):
     async def record(self, outcome: PredictionOutcome) -> PredictionOutcome: ...
+
+    async def update(self, outcome: PredictionOutcome) -> PredictionOutcome:
+        """Corrects an already-resolved outcome in place — real gap found live (2026-08-25): a
+        provider can correct a fixture's score after `OutcomeResolutionService` already resolved
+        it against the earlier (live/provisional) score, and the service's idempotency guard
+        previously skipped re-resolution unconditionally once any outcome existed, permanently
+        freezing the wrong `actual_value`/`error` for that prediction. Updates the existing row
+        (by `outcome.prediction_id`, a UNIQUE column) rather than inserting a second one."""
+        ...
+
     async def get_for_prediction(self, prediction_id: PredictionId) -> PredictionOutcome | None: ...
     async def list_by_market(self, market_id: MarketId, limit: int = 500) -> list[PredictionOutcome]: ...
     async def count_by_market(self, market_id: MarketId) -> int: ...
@@ -149,3 +159,15 @@ class ModelComparisonRepositoryPort(Protocol):
     async def record(self, evaluation: ChallengerEvaluation) -> ChallengerEvaluation: ...
     async def get_latest(self, market_id: MarketId) -> ChallengerEvaluation | None: ...
     async def list_by_market(self, market_id: MarketId, limit: int = 50) -> list[ChallengerEvaluation]: ...
+
+    async def get_for_challenger(
+        self, market_id: MarketId, challenger_model_id: ModelId
+    ) -> ChallengerEvaluation | None:
+        """Phase 7 audit fix (2026-08-25): the promotion gate (`ModelRegistryService.
+        _require_favorable_comparison`) needs THIS candidate's own comparison, not just "the
+        market's most recent N" — `list_by_market(limit=50)` + a client-side filter by
+        `challenger_model_id` silently produces a false `COMPARISON_MISSING` once 50+ *other*
+        comparisons have been recorded for the same market since this candidate's own (a real risk
+        for a market with a fast retraining cadence and a delayed human promotion decision). A
+        direct, unbounded lookup by `(market_id, challenger_model_id)` has no such window."""
+        ...

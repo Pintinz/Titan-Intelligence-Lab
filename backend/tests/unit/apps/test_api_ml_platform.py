@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -18,6 +18,7 @@ from modules.identity.infrastructure.security import MockJWTValidator
 from modules.intelligence.infrastructure.persistence.models import Base as IntelligenceBase
 from modules.knowledge_graph.infrastructure.persistence.models import Base as KnowledgeGraphBase
 from modules.features.infrastructure.persistence.models import Base as FeaturesBase
+from modules.predictions.application.model_registry_service import ModelRegistryService
 from modules.predictions.domain.entities import ModelDefinition
 from modules.predictions.domain.value_objects import MarketId, MarketKind, MarketStatus, ModelId, ModelStatus, TargetType
 from modules.predictions.infrastructure.persistence.models import Base as PredictionsBase
@@ -111,6 +112,19 @@ async def _seed_market(db_session_factory, market_key: str, with_champion: bool 
 
         await session.commit()
         return market.id
+
+
+async def _register_challenger(db_session_factory, market_id: MarketId, model_key: str) -> str:
+    """A second, real CHALLENGER for a market that already has a CHAMPION (from `_seed_market`) —
+    registers straight through the domain service (CANDIDATE -> CHALLENGER), the same real
+    lifecycle transitions a genuine retraining run would produce, just without a real artifact.
+    Returns the model id as a string, ready to embed in a promote URL."""
+    async with db_session_factory() as session:
+        registry = ModelRegistryService(models=SqlAlchemyModelRepository(session=session))
+        model = await registry.register(market_id=market_id, model_key=model_key, version=2, algorithm="logistic_regression", now=T0)
+        challenger = await registry.promote_to_challenger(model.id)
+        await session.commit()
+        return str(challenger.id.value)
 
 
 class TestRoleGating:
@@ -303,6 +317,58 @@ class TestChampion:
         response = client.post(f"/api/v1/admin/ml/champion/{model_id}/promote", json={"approved_by": "cto"}, headers=headers)
 
         assert response.status_code == 409  # already CHAMPION, not CHALLENGER
+
+    def test_promote_champion_without_a_comparison_returns_409_comparison_missing(self, client, db_session_factory):
+        """Forensic audit §11/§12, exercised through the real HTTP + SQL stack (not the in-memory
+        repo the unit tests use) — a market that already has a live Champion must refuse to
+        promote a second Challenger with no comparison recorded against it; `status ==
+        CHALLENGER` is no longer sufficient evidence on its own."""
+        headers = _admin_headers(client, db_session_factory)
+        market_id = asyncio.run(_seed_market(db_session_factory, "football.ml_promote_gate_market"))
+        challenger_id = asyncio.run(_register_challenger(db_session_factory, market_id, "football.ml_promote_gate_market.v2"))
+
+        response = client.post(
+            f"/api/v1/admin/ml/champion/{challenger_id}/promote", json={"approved_by": "cto"}, headers=headers,
+        )
+
+        assert response.status_code == 409
+        assert response.json()["detail"]["reason_code"] == "COMPARISON_MISSING"
+
+    def test_promote_champion_with_a_favorable_fresh_comparison_succeeds(self, client, db_session_factory):
+        from modules.predictions.domain.model_comparison import ChallengerEvaluation, ComparisonMetrics, ComparisonVerdict
+        from modules.predictions.domain.value_objects import ChallengerEvaluationId
+        from modules.predictions.infrastructure.persistence.repositories import SqlAlchemyModelComparisonRepository
+
+        headers = _admin_headers(client, db_session_factory)
+        market_id = asyncio.run(_seed_market(db_session_factory, "football.ml_promote_gate_market2"))
+        champion_id = client.get(
+            "/api/v1/admin/ml/models/football.ml_promote_gate_market2", headers=headers
+        ).json()["data"][0]["id"]
+        challenger_id = asyncio.run(
+            _register_challenger(db_session_factory, market_id, "football.ml_promote_gate_market2.v2")
+        )
+
+        evaluation = ChallengerEvaluation(
+            id=ChallengerEvaluationId(uuid4()), market_id=market_id,
+            challenger_model_id=ModelId(UUID(challenger_id)), champion_model_id=ModelId(UUID(champion_id)),
+            challenger_metrics=ComparisonMetrics(log_loss=0.3), champion_metrics=ComparisonMetrics(log_loss=0.5),
+            verdict=ComparisonVerdict.CHALLENGER_BETTER, decisive_metric="log_loss",
+            holdout_sample_count=200, evaluated_at=datetime.now(timezone.utc),
+        )
+
+        async def _record():
+            async with db_session_factory() as session:
+                await SqlAlchemyModelComparisonRepository(session=session).record(evaluation)
+                await session.commit()
+
+        asyncio.run(_record())
+
+        response = client.post(
+            f"/api/v1/admin/ml/champion/{challenger_id}/promote", json={"approved_by": "cto"}, headers=headers,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["data"]["status"] == "champion"
 
 
 class TestFeatureImportance:

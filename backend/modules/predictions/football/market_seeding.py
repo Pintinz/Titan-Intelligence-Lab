@@ -52,10 +52,12 @@ from modules.predictions.application.feature_market_mapping_service import (
     MappingAlreadyExistsError,
 )
 from modules.predictions.application.market_registry_service import MarketAlreadyRegisteredError, MarketRegistryService
+from modules.predictions.application.manager_change_context_calculator import ManagerChangeContextCalculator
 from modules.predictions.application.news_market_impact_engine import NewsMarketImpactEngine
 from modules.predictions.application.windowed_feature_engineering_service import (
     FixtureExpectedGoalsCalculator,
     FixtureFormDifferentialCalculator,
+    FixtureVenueStrengthCalculator,
     LineupContinuityCalculator,
     RollingTeamStatAverageCalculator,
     TransferActivityCalculator,
@@ -138,6 +140,22 @@ NEW_STAT_FEATURE_WEIGHTS: dict[str, float] = {
 _EXPECTED_GOALS_FEATURES: tuple[str, ...] = (
     "football.fixture.expected_home_goals",
     "football.fixture.expected_away_goals",
+)
+
+# Correct Score forensic audit (2026-08-26): the venue-blind expected-goals pair above fed the
+# Poisson model an identical home/away scoring-rate signal regardless of which team was actually
+# at home, which the audit tied directly to a live-observed defect — six real fixtures in a row all
+# predicted "1-1" because the model had no home-advantage signal to separate them on. These four
+# features are FIXTURE-keyed, venue-restricted, and league-baseline-relative (a team's own recent
+# home-scoring rate divided by the league's average home-scoring rate, not a raw count) — see
+# `FixtureVenueStrengthCalculator` (windowed_feature_engineering_service.py). Scoped to
+# `football.correct_score` only; `_EXPECTED_GOALS_FEATURES` and every other market that shares it
+# (BTTS, Over/Under variants, Team Total Goals, Clean Sheets, Win to Nil) are untouched.
+_VENUE_STRENGTH_FEATURES: tuple[str, ...] = (
+    "football.fixture.home_attack_strength",
+    "football.fixture.home_defence_strength",
+    "football.fixture.away_attack_strength",
+    "football.fixture.away_defence_strength",
 )
 
 # Milestone 6 (Verified Pre-Match Data Availability -> first real structured-intelligence feature):
@@ -226,6 +244,19 @@ _NEWS_BTTS_IMPACT_FEATURES: tuple[str, ...] = (
     "news.football.away_btts_impact",
 )
 
+# News Intelligence audit (2026-08-27) — ManagerChangeContextCalculator's elapsed-time signal
+# (manager_change_context_calculator.py). Unlike the three market-specific news-impact dimensions
+# just above, this is a generic team-context signal with no particular market it's "about" — the
+# same posture Milestones 6/7's lineup-continuity/transfer-activity already established, so it's
+# wired into every one of the same markets those two are, always optional (never required): this
+# event type only started resolving real entities with the 2026-08-27 KG-alias fix, so real
+# non-null values are still sparse in practice — the same "optional until proven populated"
+# caution `_NEWS_GOAL_IMPACT_FEATURES` already applies.
+_MANAGER_CHANGE_FEATURES: tuple[str, ...] = (
+    "news.football.home_days_since_manager_change",
+    "news.football.away_days_since_manager_change",
+)
+
 MARKETS: tuple[dict, ...] = (
     dict(
         market_key="football.both_teams_to_score",
@@ -246,7 +277,7 @@ MARKETS: tuple[dict, ...] = (
         # training_inference_feature_parity preflight and live inference, even though a real
         # Champion existed. Demoted to optional here, same pattern Milestone 8 already established
         # for the 4 heuristic markets — never deleted, still wired the moment real coverage exists.
-        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_BTTS_IMPACT_FEATURES),
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_MANAGER_CHANGE_FEATURES, *_NEWS_BTTS_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.total_goals_over_under",
@@ -259,7 +290,7 @@ MARKETS: tuple[dict, ...] = (
             *_NEWS_GOAL_IMPACT_FEATURES,
         ),
         # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
-        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_GOAL_IMPACT_FEATURES),
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_MANAGER_CHANGE_FEATURES, *_NEWS_GOAL_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.home_team_total_goals",
@@ -272,7 +303,7 @@ MARKETS: tuple[dict, ...] = (
             *_NEWS_GOAL_IMPACT_FEATURES,
         ),
         # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
-        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_GOAL_IMPACT_FEATURES),
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_MANAGER_CHANGE_FEATURES, *_NEWS_GOAL_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.correct_score",
@@ -281,7 +312,7 @@ MARKETS: tuple[dict, ...] = (
         market_kind=MarketKind.CORRECT_SCORE,
         target_type=TargetType.CLASSIFICATION,
         required_features=(
-            "football.fixture.expected_home_goals", "football.fixture.expected_away_goals",
+            *_VENUE_STRENGTH_FEATURES,
             *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
         ),
         # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above. The DB also
@@ -291,8 +322,15 @@ MARKETS: tuple[dict, ...] = (
         # touches them) — both are the same confirmed-unpopulated features documented in
         # docs/feature_coverage_report.md (football's own team_form/odds families), so demoted here
         # too rather than left as a silent, undeclared block on this market's real Champion.
+        #
+        # Correct Score forensic audit (2026-08-26): the old venue-blind
+        # `expected_home_goals`/`expected_away_goals` pair (still shared by other markets as
+        # `_EXPECTED_GOALS_FEATURES`) is replaced above by `_VENUE_STRENGTH_FEATURES` — see that
+        # constant's comment. Kept as optional here (not dropped outright) since a future model
+        # variant may still find the raw expected-goals pair a useful secondary signal alongside
+        # the venue-aware features.
         optional_features=(
-            *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
+            *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_MANAGER_CHANGE_FEATURES, *_EXPECTED_GOALS_FEATURES,
             "football.fixture.form_shots_on_target_diff_last5", "football.market.implied_probability_home",
         ),
     ),
@@ -317,7 +355,7 @@ MARKETS: tuple[dict, ...] = (
         # served live by a formula predictor, not a trained model, so an absent required feature
         # would raise MissingRequiredFeatureError on every prediction today (0 fixtures have a
         # non-null value for either feature yet). See STRUCTURED_INTEL_OPTIONAL_WEIGHTS's comment.
-        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES),
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_MANAGER_CHANGE_FEATURES),
     ),
     # Milestone 9.2 Phase 3 — the genuine 3-way market `WeightedOrdinalPredictor` serves. Distinct
     # from every market above (all MarketKind.BINARY/TOTAL/TEAM_TOTAL/CORRECT_SCORE/SEGMENT_WINNER):
@@ -335,7 +373,7 @@ MARKETS: tuple[dict, ...] = (
             *_NEW_STAT_DIFFERENTIAL_FEATURES, *_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES,
         ),
         # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
-        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES),
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_MANAGER_CHANGE_FEATURES),
     ),
     # 2026-08-02 football market catalog expansion — twelve more real markets, all backed by the
     # same already-registered features every market above uses (no new feature work required),
@@ -354,7 +392,7 @@ MARKETS: tuple[dict, ...] = (
             *_NEWS_GOAL_IMPACT_FEATURES,
         ),
         # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
-        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_GOAL_IMPACT_FEATURES),
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_MANAGER_CHANGE_FEATURES, *_NEWS_GOAL_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.total_goals_over_under_1_5",
@@ -367,7 +405,7 @@ MARKETS: tuple[dict, ...] = (
             *_NEWS_GOAL_IMPACT_FEATURES,
         ),
         # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
-        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_GOAL_IMPACT_FEATURES),
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_MANAGER_CHANGE_FEATURES, *_NEWS_GOAL_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.total_goals_over_under_3_5",
@@ -380,7 +418,7 @@ MARKETS: tuple[dict, ...] = (
             *_NEWS_GOAL_IMPACT_FEATURES,
         ),
         # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
-        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_GOAL_IMPACT_FEATURES),
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_MANAGER_CHANGE_FEATURES, *_NEWS_GOAL_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.total_goals_over_under_4_5",
@@ -393,7 +431,7 @@ MARKETS: tuple[dict, ...] = (
             *_NEWS_GOAL_IMPACT_FEATURES,
         ),
         # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
-        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_GOAL_IMPACT_FEATURES),
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_MANAGER_CHANGE_FEATURES, *_NEWS_GOAL_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.away_team_total_goals",
@@ -406,7 +444,7 @@ MARKETS: tuple[dict, ...] = (
             *_NEWS_GOAL_IMPACT_FEATURES,
         ),
         # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
-        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_GOAL_IMPACT_FEATURES),
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_MANAGER_CHANGE_FEATURES, *_NEWS_GOAL_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.home_clean_sheet",
@@ -419,7 +457,7 @@ MARKETS: tuple[dict, ...] = (
             *_NEWS_CLEAN_SHEET_IMPACT_FEATURES,
         ),
         # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
-        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_CLEAN_SHEET_IMPACT_FEATURES),
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_MANAGER_CHANGE_FEATURES, *_NEWS_CLEAN_SHEET_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.away_clean_sheet",
@@ -432,7 +470,7 @@ MARKETS: tuple[dict, ...] = (
             *_NEWS_CLEAN_SHEET_IMPACT_FEATURES,
         ),
         # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
-        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_CLEAN_SHEET_IMPACT_FEATURES),
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_MANAGER_CHANGE_FEATURES, *_NEWS_CLEAN_SHEET_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.home_win_to_nil",
@@ -445,7 +483,7 @@ MARKETS: tuple[dict, ...] = (
             *_NEWS_CLEAN_SHEET_IMPACT_FEATURES,
         ),
         # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
-        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_CLEAN_SHEET_IMPACT_FEATURES),
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_MANAGER_CHANGE_FEATURES, *_NEWS_CLEAN_SHEET_IMPACT_FEATURES),
     ),
     dict(
         market_key="football.away_win_to_nil",
@@ -458,7 +496,7 @@ MARKETS: tuple[dict, ...] = (
             *_NEWS_CLEAN_SHEET_IMPACT_FEATURES,
         ),
         # Post-M24 Phase 17 audit — see football.both_teams_to_score's comment above.
-        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_NEWS_CLEAN_SHEET_IMPACT_FEATURES),
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_MANAGER_CHANGE_FEATURES, *_NEWS_CLEAN_SHEET_IMPACT_FEATURES),
     ),
     dict(
         # Same audit fix as football.first_half_winner above — a second half can end drawn too.
@@ -475,7 +513,7 @@ MARKETS: tuple[dict, ...] = (
         # served live by a formula predictor, not a trained model, so an absent required feature
         # would raise MissingRequiredFeatureError on every prediction today (0 fixtures have a
         # non-null value for either feature yet). See STRUCTURED_INTEL_OPTIONAL_WEIGHTS's comment.
-        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES),
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_MANAGER_CHANGE_FEATURES),
     ),
     dict(
         market_key="football.first_half_goals",
@@ -491,7 +529,7 @@ MARKETS: tuple[dict, ...] = (
         # served live by a formula predictor, not a trained model, so an absent required feature
         # would raise MissingRequiredFeatureError on every prediction today (0 fixtures have a
         # non-null value for either feature yet). See STRUCTURED_INTEL_OPTIONAL_WEIGHTS's comment.
-        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES),
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_MANAGER_CHANGE_FEATURES),
     ),
     dict(
         market_key="football.first_half_both_teams_to_score",
@@ -507,7 +545,7 @@ MARKETS: tuple[dict, ...] = (
         # served live by a formula predictor, not a trained model, so an absent required feature
         # would raise MissingRequiredFeatureError on every prediction today (0 fixtures have a
         # non-null value for either feature yet). See STRUCTURED_INTEL_OPTIONAL_WEIGHTS's comment.
-        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES),
+        optional_features=(*_LINEUP_CONTINUITY_FEATURES, *_TRANSFER_ACTIVITY_FEATURES, *_MANAGER_CHANGE_FEATURES),
     ),
 )
 
@@ -522,7 +560,9 @@ class FootballMarketSeeder:
     expected_goals_calculator: FixtureExpectedGoalsCalculator
     lineup_continuity_calculators: tuple[LineupContinuityCalculator, LineupContinuityCalculator]
     transfer_activity_calculators: tuple[TransferActivityCalculator, TransferActivityCalculator]
+    venue_strength_calculator: FixtureVenueStrengthCalculator
     news_market_impact_engine: NewsMarketImpactEngine
+    manager_change_calculator: ManagerChangeContextCalculator
 
     async def seed(self, now: datetime) -> None:
         await self._ensure_single_record_features_registered(now)
@@ -530,11 +570,13 @@ class FootballMarketSeeder:
         for calculator in self.differential_calculators:
             await calculator.ensure_registered(now)
         await self.expected_goals_calculator.ensure_registered(now)
+        await self.venue_strength_calculator.ensure_registered(now)
         for calculator in self.lineup_continuity_calculators:
             await calculator.ensure_registered(now)
         for calculator in self.transfer_activity_calculators:
             await calculator.ensure_registered(now)
         await self.news_market_impact_engine.ensure_registered(now)
+        await self.manager_change_calculator.ensure_registered(now)
 
         for spec in MARKETS:
             await self._seed_market(spec, now)

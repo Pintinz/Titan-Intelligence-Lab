@@ -128,6 +128,75 @@ async def test_populate_standing_stores_rank_and_points_on_edge(service):
     assert edges[0].attributes == {"rank": 2, "points": 45.0}
 
 
+class TestPopulateWritesAliases:
+    """Entity-resolution audit fix (2026-08-27): every `populate_*` wrapper that accepts a real
+    `name` used to write it into `attributes["name"]` but never into `aliases` — the field
+    `EntityResolutionService.find_by_alias` exclusively searches when resolving a free-text news
+    mention against the graph. Confirmed live: every real TEAM/PLAYER node in dev.db had
+    `aliases == []` despite a correct `attributes["name"]`, so a completely accurate news mention
+    like "Manchester City" could never resolve. These tests pin the fix at the write path."""
+
+    async def test_populate_team_writes_name_into_aliases(self, service):
+        team_node = await service.populate_team("team-1", "football", T0, name="Arsenal")
+        assert team_node.aliases == ["Arsenal"]
+
+    async def test_populate_player_writes_name_into_aliases(self, service):
+        player_node = await service.populate_player("player-1", "football", T0, name="Alex Carter")
+        assert player_node.aliases == ["Alex Carter"]
+
+    async def test_populate_venue_writes_name_into_aliases(self, service):
+        venue_node = await service.populate_venue("venue-1", T0, name="Emirates Stadium")
+        assert venue_node.aliases == ["Emirates Stadium"]
+
+    async def test_populate_competition_writes_name_into_aliases(self, service):
+        competition_node = await service.populate_competition("comp-1", "football", T0, name="Premier League")
+        assert competition_node.aliases == ["Premier League"]
+
+    async def test_populate_organization_writes_name_into_aliases(self, service):
+        org_node = await service.populate_organization("org-1", T0, name="Nike")
+        assert org_node.aliases == ["Nike"]
+
+    async def test_populate_country_writes_name_into_aliases(self, service):
+        country_node = await service.populate_country("GB", T0, code="GB", name="United Kingdom")
+        assert country_node.aliases == ["United Kingdom"]
+
+    async def test_populate_sport_writes_name_into_aliases(self, service):
+        sport_node = await service.populate_sport("football", T0, name="Football")
+        assert sport_node.aliases == ["Football"]
+
+    async def test_populate_team_without_name_leaves_aliases_empty(self, service):
+        """No fabricated alias when no real name was ever supplied."""
+        team_node = await service.populate_team("team-1", "football", T0)
+        assert team_node.aliases == []
+
+    async def test_repeated_calls_with_the_same_name_do_not_duplicate_the_alias(self, service):
+        await service.populate_team("team-1", "football", T0, name="Arsenal")
+        second = await service.populate_team("team-1", "football", T0, name="Arsenal")
+        assert second.aliases == ["Arsenal"]
+
+    async def test_a_renamed_entity_accumulates_both_names_as_aliases(self, service):
+        """A team's canonical name changing (e.g. a provider correction) must not lose the old
+        alias — a news article published under the old name should still resolve."""
+        await service.populate_team("team-1", "football", T0, name="Arsenal")
+        second = await service.populate_team("team-1", "football", T0, name="Arsenal FC")
+        assert second.aliases == ["Arsenal", "Arsenal FC"]
+
+    async def test_backfilled_alias_makes_a_real_news_mention_resolvable(self, service, sqlite_session):
+        """End-to-end proof, not just an isolated field assertion: after `populate_team` writes
+        the alias, `EntityResolutionService.find_by_alias` — the exact lookup
+        `EntityExtractionService.extract_and_link` uses to resolve a free-text news mention like
+        "Manchester City" — actually finds the node. This is the concrete defect that made every
+        genuinely Gemini-extracted `NewsEvent` in dev.db resolve zero entities before this fix."""
+        from modules.knowledge_graph.application.entity_resolution_service import EntityResolutionService
+
+        team_node = await service.populate_team("team-1", "football", T0, name="Manchester City")
+
+        resolver = EntityResolutionService(nodes=service.nodes, edges=service.edges, population=service)
+        matches = await resolver.find_by_alias(NodeType.TEAM, "Manchester City")
+
+        assert [m.id for m in matches] == [team_node.id]
+
+
 @pytest.mark.asyncio
 async def test_populate_venue_links_country(service):
     venue_node = await service.populate_venue("venue-1", T0, name="Anfield", country_id="GB")

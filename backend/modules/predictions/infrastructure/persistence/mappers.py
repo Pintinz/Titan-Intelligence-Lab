@@ -179,6 +179,7 @@ def model_definition_to_domain(model: ModelDefinitionModel) -> ModelDefinition:
         deployment_mode=model.deployment_mode,
         trained_at=model.trained_at,
         provenance_status=model.provenance_status,
+        artifact_checksum=model.artifact_checksum,
     )
 
 
@@ -208,6 +209,7 @@ def model_definition_to_model(
     model.deployment_mode = entity.deployment_mode
     model.trained_at = entity.trained_at
     model.provenance_status = entity.provenance_status
+    model.artifact_checksum = entity.artifact_checksum
     return model
 
 
@@ -288,6 +290,10 @@ def prediction_to_domain(model: PredictionModel) -> Prediction:
         expected_error=model.expected_error,
         predictor_provenance=model.predictor_provenance,
         calibration_status=model.calibration_status,
+        fallback_reason=model.fallback_reason,
+        raw_probability=model.raw_probability,
+        calibration_sample_count=model.calibration_sample_count,
+        calibration_fitted_at=model.calibration_fitted_at,
     )
 
 
@@ -312,6 +318,10 @@ def prediction_to_model(entity: Prediction, model: PredictionModel | None = None
     model.expected_error = entity.expected_error
     model.predictor_provenance = entity.predictor_provenance
     model.calibration_status = entity.calibration_status
+    model.fallback_reason = entity.fallback_reason
+    model.raw_probability = entity.raw_probability
+    model.calibration_sample_count = entity.calibration_sample_count
+    model.calibration_fitted_at = entity.calibration_fitted_at
     return model
 
 

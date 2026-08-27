@@ -172,7 +172,7 @@ async def main() -> None:
         rows = (
             await session.execute(
                 text(
-                    "SELECT id, home_team_id, away_team_id FROM fixtures WHERE id IN ({})".format(
+                    "SELECT id, home_team_id, away_team_id, scheduled_at FROM fixtures WHERE id IN ({})".format(
                         ",".join(f"'{fid.replace('-', '')}'" for fid in repointed_fixture_ids)
                     )
                 )
@@ -185,14 +185,21 @@ async def main() -> None:
         odds_writer = build_football_odds_feature_writer(session)
         validator = DataValidationEngine()
 
-        for i, (raw_fixture_id, home_team_id, away_team_id) in enumerate(rows, start=1):
+        for i, (raw_fixture_id, home_team_id, away_team_id, scheduled_at) in enumerate(rows, start=1):
             fixture_id = str(uuid.UUID(raw_fixture_id))
+            # Point-in-time leakage fix: each fixture's own kickoff is the cutoff for its rolling
+            # form/expected-goals recomputation, never this script's shared start-of-run `now` —
+            # same bug class `feature_as_of` closed in `reconcile_fixture` (commit db844e2), which
+            # this script's direct calculator calls bypass entirely.
+            cutoff = (
+                datetime.fromisoformat(scheduled_at) if isinstance(scheduled_at, str) else scheduled_at
+            ) or now
             for calculator in differential_calculators:
                 await calculator.compute_and_write(
-                    fixture_id, TeamId(uuid.UUID(home_team_id)), TeamId(uuid.UUID(away_team_id)), now
+                    fixture_id, TeamId(uuid.UUID(home_team_id)), TeamId(uuid.UUID(away_team_id)), cutoff
                 )
             await expected_goals_calculator.compute_and_write(
-                fixture_id, TeamId(uuid.UUID(home_team_id)), TeamId(uuid.UUID(away_team_id)), now
+                fixture_id, TeamId(uuid.UUID(home_team_id)), TeamId(uuid.UUID(away_team_id)), cutoff
             )
             odds_ref = (
                 await session.execute(

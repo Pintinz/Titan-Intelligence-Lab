@@ -48,7 +48,9 @@ from apps.api.composition import (
     build_health_intelligence_engine,
     build_provider_management_service,
     build_scheduled_news_sync_service,
+    build_scheduled_prediction_generation_orchestrator,
     build_scheduled_retraining_orchestrator,
+    build_scheduled_team_statistics_sync_orchestrator,
     build_sync_orchestrator,
     get_redis_client,
     get_redis_lock,
@@ -114,7 +116,7 @@ def _fresh_registry() -> dict[str, FactoryRecord]:
                 "ingestion.sync_live_fixtures", "ingestion.sync_standings", "ingestion.sync_upcoming_fixtures",
                 "ingestion.sync_completed_fixtures", "ingestion.sync_standings_alt",
                 "ingestion.sync_upcoming_structured_intelligence", "ingestion.sync_odds",
-                "ingestion.sync_team_statistics",
+                "ingestion.sync_team_statistics", "ingestion.sync_players_for_competition",
             ),
         ),
         "admin_context": FactoryRecord(
@@ -125,6 +127,16 @@ def _fresh_registry() -> dict[str, FactoryRecord]:
         "retraining_orchestrator": FactoryRecord(
             name="retraining_orchestrator", module="modules.predictions.infrastructure.celery.tasks",
             service="ScheduledRetrainingOrchestrator", task_names=("predictions.check_scheduled_retraining",),
+        ),
+        "prediction_generation_orchestrator": FactoryRecord(
+            name="prediction_generation_orchestrator", module="modules.predictions.infrastructure.celery.tasks",
+            service="ScheduledPredictionGenerationOrchestrator",
+            task_names=("predictions.check_scheduled_prediction_generation",),
+        ),
+        "team_statistics_sync_orchestrator": FactoryRecord(
+            name="team_statistics_sync_orchestrator", module="modules.ingestion.infrastructure.celery.tasks",
+            service="ScheduledTeamStatisticsSyncOrchestrator",
+            task_names=("ingestion.check_scheduled_team_statistics_sync",),
         ),
         "calibration_service": FactoryRecord(
             name="calibration_service", module="modules.predictions.infrastructure.celery.tasks",
@@ -219,11 +231,15 @@ def register_factories(session_factory: async_sessionmaker[AsyncSession]) -> Non
     session per task invocation (never a shared mutable session, never the FastAPI request-scoped
     one), built via the existing `apps.api.composition` builders. No task-module code changes."""
     from modules.admin.infrastructure.celery.tasks import set_admin_context_factory
-    from modules.ingestion.infrastructure.celery.tasks import set_orchestrator_factory
+    from modules.ingestion.infrastructure.celery.tasks import (
+        set_orchestrator_factory,
+        set_team_statistics_sync_orchestrator_factory,
+    )
     from modules.intelligence.infrastructure.celery.tasks import set_scheduled_news_sync_service_factory
     from modules.predictions.infrastructure.celery.tasks import (
         set_calibration_service_factory,
         set_calibration_validation_service_factory,
+        set_prediction_generation_orchestrator_factory,
         set_retraining_orchestrator_factory,
     )
 
@@ -262,6 +278,22 @@ def register_factories(session_factory: async_sessionmaker[AsyncSession]) -> Non
         orchestrator._worker_redis_client = redis_client
         return orchestrator
 
+    async def prediction_generation_orchestrator_factory():
+        session = session_factory()
+        redis_client = _fresh_worker_redis_client()
+        orchestrator = build_scheduled_prediction_generation_orchestrator(session)
+        orchestrator._worker_session = session
+        orchestrator._worker_redis_client = redis_client
+        return orchestrator
+
+    async def team_statistics_sync_orchestrator_factory():
+        session = session_factory()
+        redis_client = _fresh_worker_redis_client()
+        orchestrator = build_scheduled_team_statistics_sync_orchestrator(session)
+        orchestrator._worker_session = session
+        orchestrator._worker_redis_client = redis_client
+        return orchestrator
+
     async def calibration_service_factory():
         session = session_factory()
         redis_client = _fresh_worker_redis_client()
@@ -294,6 +326,12 @@ def register_factories(session_factory: async_sessionmaker[AsyncSession]) -> Non
 
     set_retraining_orchestrator_factory(retraining_orchestrator_factory)
     FACTORY_REGISTRY["retraining_orchestrator"].registered = True
+
+    set_prediction_generation_orchestrator_factory(prediction_generation_orchestrator_factory)
+    FACTORY_REGISTRY["prediction_generation_orchestrator"].registered = True
+
+    set_team_statistics_sync_orchestrator_factory(team_statistics_sync_orchestrator_factory)
+    FACTORY_REGISTRY["team_statistics_sync_orchestrator"].registered = True
 
     set_calibration_service_factory(calibration_service_factory)
     FACTORY_REGISTRY["calibration_service"].registered = True

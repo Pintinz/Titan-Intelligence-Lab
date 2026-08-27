@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -105,3 +106,42 @@ def test_task_raises_without_a_configured_factory():
     # eagerly — same shape test_celery_tasks.py's own equivalent test already asserts against.
     with pytest.raises(Exception, match="factory not configured"):
         tasks_module.check_scheduled_retraining_task.apply(kwargs={"now_iso": T0.isoformat()}).get()
+
+
+class _HangingRetrainingOrchestrator:
+    """Simulates a stuck run (e.g. a provider call or DB query that never returns) — an I/O-bound
+    hang, the case Phase 5's `asyncio.wait_for()` bound is meant to catch."""
+
+    async def run(self, now):
+        await asyncio.sleep(3600)
+        return []  # pragma: no cover — unreachable, the timeout fires first
+
+
+def test_task_times_out_instead_of_hanging_forever_on_a_stuck_run(monkeypatch):
+    """Phase 5 (Celery Worker+Beat verification): production runs `titaniq-worker` with
+    `--pool=solo`, under which Celery's own `task_time_limit` is silently not enforced (verified
+    against the installed celery package's `solo.TaskPool` — its `'timeouts': ()` is the exact
+    field Celery checks). A stuck run would otherwise block the single-threaded solo worker from
+    processing anything else, indefinitely, with no automatic recovery. This proves the
+    `asyncio.wait_for()` bound added around `orchestrator.run()` actually fires rather than just
+    existing in the source — a tiny timeout stands in for the real 1800s one so the test itself
+    doesn't hang."""
+    monkeypatch.setattr(tasks_module, "_RETRAINING_TASK_TIMEOUT_SECONDS", 0.05)
+
+    async def factory():
+        return _HangingRetrainingOrchestrator()
+
+    tasks_module.set_retraining_orchestrator_factory(factory)
+
+    with pytest.raises(Exception) as exc_info:
+        tasks_module.check_scheduled_retraining_task.apply(kwargs={"now_iso": T0.isoformat()}).get()
+    # `asyncio.TimeoutError` is the built-in `TimeoutError` on the Python version this repo targets
+    # (3.11+). autoretry_for wraps it in a celery.exceptions.Retry (possibly nested — eager mode's
+    # own retry simulation can wrap a Retry in another Retry), which carries the original exception
+    # on its `.exc` attribute, not `__cause__`.
+    causes = []
+    err = exc_info.value
+    while err is not None and err not in causes:
+        causes.append(err)
+        err = getattr(err, "exc", None) or err.__cause__
+    assert any(isinstance(c, TimeoutError) for c in causes), f"expected a TimeoutError in {causes!r}"

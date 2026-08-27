@@ -40,6 +40,12 @@ class IntelligenceMetricsRecorder:
     ingestion_run_count: int = 0
     ingestion_total_seconds: float = 0.0
     gemini_call_count: int = 0
+    # News Intelligence audit (2026-08-27) — a distinct counter for ClaudeAdapter's own real
+    # calls, kept separate from gemini_call_count rather than folded into it: the two are
+    # different providers with different cost/quota profiles, and merging them would make this
+    # dashboard's one number silently mean "either provider," misleading whoever reads it during
+    # exactly the kind of quota investigation that motivated adding a second provider at all.
+    claude_call_count: int = 0
     extraction_correct_count: int = 0
     extraction_total_count: int = 0
 
@@ -49,6 +55,9 @@ class IntelligenceMetricsRecorder:
 
     def record_gemini_call(self, count: int = 1) -> None:
         self.gemini_call_count += count
+
+    def record_claude_call(self, count: int = 1) -> None:
+        self.claude_call_count += count
 
     def record_extraction_outcome(self, was_correct: bool) -> None:
         self.extraction_total_count += 1
@@ -84,6 +93,7 @@ class IntelligenceMetricsSnapshot:
     news_duplicate_rate: float
     avg_processing_seconds: float
     gemini_call_count: int
+    claude_call_count: int
     extraction_accuracy: float | None
     average_source_reliability: float | None
     community_post_count: int
@@ -154,6 +164,7 @@ class IntelligenceMonitoringService:
             news_duplicate_rate=await self.duplicate_rate(IntelligenceChannelType.NEWS),
             avg_processing_seconds=self.recorder.avg_processing_seconds,
             gemini_call_count=self.recorder.gemini_call_count,
+            claude_call_count=self.recorder.claude_call_count,
             extraction_accuracy=self.recorder.extraction_accuracy,
             average_source_reliability=await self.average_source_reliability(),
             community_post_count=len(posts),

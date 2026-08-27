@@ -51,6 +51,12 @@ class MLAlgorithm(str, Enum):
     TWEEDIE_GLM = "tweedie_glm"
     # Statistical Baseline (football goals/score markets — see FootballGoalsPoissonAdapter)
     POISSON_GOALS_MODEL = "poisson_goals_model"
+    # Correct Score forensic audit (2026-08-27) — the same FootballGoalsPoissonAdapter with its
+    # Dixon-Coles (1997) low-score correlation adjustment enabled (`params={"dixon_coles": True}`),
+    # registered as a genuinely distinct algorithm so a won comparison honestly names which of the
+    # two real, independently-benchmarked Poisson variants is actually serving — see
+    # `scheduled_retraining_orchestrator.py`'s `DIXON_COLES_ELIGIBLE_MARKETS`.
+    POISSON_DIXON_COLES_MODEL = "poisson_dixon_coles_model"
 
 
 ALGORITHM_FRAMEWORK: dict[MLAlgorithm, MLFramework] = {

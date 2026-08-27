@@ -10,16 +10,19 @@ every other calibrator in this codebase uses (docs/decisions.md ADR-008).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import numpy as np
 from sklearn.isotonic import IsotonicRegression
 
+from modules.predictions.domain.calibration import CalibrationMetadata
 from modules.predictions.domain.value_objects import ModelId
 
 
 @dataclass
 class IsotonicRegressionCalibrator:
     _models: dict = field(default_factory=dict)  # ModelId -> fitted IsotonicRegression
+    _metadata: dict[ModelId, CalibrationMetadata] = field(default_factory=dict)
 
     async def calibrate(self, model_id: ModelId, raw_probability: float) -> float:
         model = self._models.get(model_id)
@@ -35,6 +38,10 @@ class IsotonicRegressionCalibrator:
         model = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
         model.fit(x, y)
         self._models[model_id] = model
+        self._metadata[model_id] = CalibrationMetadata(sample_count=len(samples), fitted_at=datetime.now(timezone.utc))
 
     async def is_fitted(self, model_id: ModelId) -> bool:
         return model_id in self._models
+
+    async def get_metadata(self, model_id: ModelId) -> CalibrationMetadata | None:
+        return self._metadata.get(model_id)

@@ -6,6 +6,7 @@ repeated predictions against the same champion don't repeatedly deserialize.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 
 from modules.predictions.domain.ml_value_objects import MLAlgorithm, MLFramework
@@ -20,6 +21,22 @@ from modules.predictions.ports.ml_model import ModelArtifactStorePort, Predictio
 
 class UnknownModelFrameworkError(ValueError):
     pass
+
+
+class ArtifactIntegrityError(ValueError):
+    """Forensic audit §15 "Model Artifact Integrity": raised when a loaded artifact's own bytes
+    don't hash to the checksum recorded on its `ModelDefinition` at training time — the artifact
+    at `artifact_ref` was overwritten, corrupted, or replaced out-of-band since this model version
+    was registered. `PredictionEngine._resolve_predictor` treats this exactly like any other
+    artifact-loading failure (falls back to the formula predictor rather than breaking generation)
+    but — unlike a plain missing/corrupt file — tags the resulting `Prediction.fallback_reason` as
+    `ARTIFACT_INTEGRITY_MISMATCH` specifically, since this is a materially different, more
+    concerning signal (possible tampering or a silent out-of-band artifact swap) than "the file
+    was never uploaded."""
+
+
+def compute_artifact_checksum(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _empty_adapter(framework: str, algorithm: str, target_type: TargetType) -> PredictionModelPort:
@@ -49,7 +66,13 @@ class ModelLoaderService:
     _cache: dict = field(default_factory=dict)  # ModelId -> PredictionModelPort
 
     async def load(
-        self, model_id: ModelId, framework: str, algorithm: str, target_type: TargetType, artifact_ref: str
+        self,
+        model_id: ModelId,
+        framework: str,
+        algorithm: str,
+        target_type: TargetType,
+        artifact_ref: str,
+        artifact_checksum: str | None = None,
     ) -> PredictionModelPort:
         cached = self._cache.get(model_id)
         if cached is not None:
@@ -57,6 +80,19 @@ class ModelLoaderService:
 
         adapter = _empty_adapter(framework, algorithm, target_type)
         payload = await self.artifact_store.load(artifact_ref)
+        # Verified only when a checksum was actually recorded at training time — `None` means
+        # this model version predates the checksum field (forensic audit §15) or was registered
+        # by a path that hasn't been updated to compute one yet; skipping verification for those
+        # is the same "never invent a value we don't have" posture `provenance_status`/
+        # `calibration_status` already use elsewhere on this same entity, not a security hole
+        # this change introduces.
+        if artifact_checksum is not None:
+            actual = compute_artifact_checksum(payload)
+            if actual != artifact_checksum:
+                raise ArtifactIntegrityError(
+                    f"artifact checksum mismatch for model {model_id.value} at '{artifact_ref}': "
+                    f"expected {artifact_checksum}, got {actual}"
+                )
         adapter.deserialize(payload)
         self._cache[model_id] = adapter
         return adapter

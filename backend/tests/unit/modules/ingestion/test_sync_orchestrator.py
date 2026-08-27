@@ -11,6 +11,8 @@ from modules.ingestion.application.data_quality_engine import IngestionQualityEn
 from modules.ingestion.application.data_validation_engine import DataValidationEngine
 from modules.ingestion.application.entity_reconciliation_service import EntityReconciliationService
 from modules.ingestion.application.sync_orchestrator import (
+    DEFAULT_LOCK_TTL_SECONDS,
+    LIVE_FIXTURES_LOCK_TTL_SECONDS,
     NoFixtureSourcePreferenceError,
     SportNotReconciledError,
     SyncOrchestrator,
@@ -170,8 +172,10 @@ class FakeRouter:
 @dataclass
 class FakeLock:
     held: set = field(default_factory=set)
+    acquired_ttls: dict = field(default_factory=dict)
 
     async def acquire(self, key, ttl_seconds):
+        self.acquired_ttls[key] = ttl_seconds
         if key in self.held:
             return False
         self.held.add(key)
@@ -661,6 +665,34 @@ async def test_live_trigger_bypasses_incremental_skip(orchestrator, session, rou
     assert first is not None and first.status is SyncStatus.SUCCEEDED
     assert live is not None and live.status is SyncStatus.SUCCEEDED  # LIVE trigger never skipped
     assert live.trigger is SyncTrigger.LIVE
+
+
+@pytest.mark.asyncio
+async def test_live_fixtures_requests_a_lock_ttl_that_outlasts_a_slow_real_run(orchestrator, session, lock, router):
+    """Redis/Celery pipeline verification (2026-08-25) — a real live-fixtures run against a large
+    competition took 277-300s wall-clock, longer than DEFAULT_LOCK_TTL_SECONDS (120s). If this
+    path used that default, the overlap lock would expire mid-run and a Beat-queued duplicate
+    would re-run the entire fetch once popped (confirmed live: 94% of a 5,797-deep backlog was
+    exactly this). sync_live_fixtures must request the longer, purpose-built TTL instead."""
+    season_id = SeasonId(uuid4())
+
+    await orchestrator.sync_live_fixtures("football", "39", "2026", season_id, T0)
+    await session.commit()
+
+    assert lock.acquired_ttls["sync:football:fixture:39:2026"] == LIVE_FIXTURES_LOCK_TTL_SECONDS
+    assert LIVE_FIXTURES_LOCK_TTL_SECONDS > 300  # comfortably past the largest observed real run
+
+
+@pytest.mark.asyncio
+async def test_scheduled_fixtures_sync_keeps_the_default_lock_ttl(orchestrator, session, lock, router):
+    """Only the live-fixtures path needed a longer TTL — every other (fast, checkpoint-gated)
+    sync_fixtures caller should be unaffected."""
+    season_id = SeasonId(uuid4())
+
+    await orchestrator.sync_fixtures("football", "39", "2026", season_id, T0)
+    await session.commit()
+
+    assert lock.acquired_ttls["sync:football:fixture:39:2026"] == DEFAULT_LOCK_TTL_SECONDS
 
 
 @pytest.mark.asyncio

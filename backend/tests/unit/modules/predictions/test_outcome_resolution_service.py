@@ -466,6 +466,40 @@ class TestOutcomeResolutionService:
         assert len(first) == 1
         assert len(second) == 0
 
+    async def test_corrects_an_already_resolved_outcome_when_the_score_is_later_corrected(
+        self, prediction_repo, market_repo, prediction_outcome_repo
+    ):
+        """Real bug found live (2026-08-25): a fixture resolved against a 1-1 score (Match Winner
+        -> DRAW) whose real final score was later corrected to 2-0 (-> HOME_WIN) kept the wrong
+        "DRAW" outcome frozen forever — the old idempotency guard skipped re-resolution the moment
+        ANY outcome existed, regardless of whether the fixture's score had since changed. A
+        provider correcting a completed fixture's score must now flip a previously-wrong outcome
+        to the real one, not leave it stale."""
+        market = _market("football.match_winner")
+        await market_repo.upsert(market)
+        prediction = _prediction(market.id, value="HOME_WIN")
+        await prediction_repo.record(prediction)
+        service = OutcomeResolutionService(predictions=prediction_repo, markets=market_repo, outcomes=prediction_outcome_repo)
+
+        # First pass: provisional/incorrect 1-1 score -> resolves to DRAW, prediction scored wrong.
+        first = await service.resolve_for_fixture("fx-1", home_score=1, away_score=1, now=T0)
+        assert len(first) == 1
+        assert first[0].actual_value == "DRAW"
+        assert first[0].error == 1.0
+        original_id = first[0].id
+
+        # Second pass: the provider corrects the score to the real 2-0 -> must now flip to
+        # HOME_WIN and re-score the prediction as correct, in place (same outcome id).
+        second = await service.resolve_for_fixture("fx-1", home_score=2, away_score=0, now=T0)
+        assert len(second) == 1
+        assert second[0].actual_value == "HOME_WIN"
+        assert second[0].error == 0.0
+        assert second[0].id == original_id
+
+        stored = await prediction_outcome_repo.get_for_prediction(prediction.id)
+        assert stored.actual_value == "HOME_WIN"
+        assert stored.error == 0.0
+
     async def test_only_evaluates_predictions_for_the_given_fixture(self, prediction_repo, market_repo, prediction_outcome_repo):
         market = _market("football.both_teams_to_score")
         await market_repo.upsert(market)

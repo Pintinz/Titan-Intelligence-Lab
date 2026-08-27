@@ -189,6 +189,13 @@ class InMemoryPredictionOutcomeRepository:
         self.store.append(outcome)
         return outcome
 
+    async def update(self, outcome):
+        for i, existing in enumerate(self.store):
+            if existing.prediction_id == outcome.prediction_id:
+                self.store[i] = outcome
+                return outcome
+        raise ValueError(f"no existing outcome for prediction_id={outcome.prediction_id!r} to update")
+
     async def get_for_prediction(self, prediction_id):
         return next((o for o in self.store if o.prediction_id == prediction_id), None)
 

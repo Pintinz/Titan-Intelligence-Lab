@@ -176,6 +176,53 @@ class TestFeatureFailureAssociation:
 
         assert await service.feature_failure_association(market.id) == []
 
+    async def test_regression_market_normalizes_raw_magnitude_error_before_bucketing(
+        self, service, market_repo, prediction_repo, prediction_outcome_repo
+    ):
+        """Phase 6 fix (2026-08-25): a regression market's `PredictionOutcome.error` is a raw
+        magnitude (e.g. 8 points off a ~220-point total), never bounded to [0, 1]. Before the fix,
+        the raw `error < 0.5` check would bucket EVERY regression outcome as "incorrect"
+        regardless of how good the prediction actually was, making this analysis meaningless for
+        regression markets. A tight relative miss (8/220) must land in `correct`, a huge one
+        (150/220) in `incorrect` — proving the bucketing is now relative-error-aware."""
+        market = await market_repo.upsert(_market("basketball.points_regression_market", target_type=TargetType.REGRESSION))
+
+        for i in range(10):
+            prediction = Prediction(
+                id=PredictionId(uuid4()), market_id=market.id, model_id=ModelId(uuid4()),
+                subject_ref=f"fx-tight-{uuid4()}", value="212.0", probability=0.7, confidence=CONFIDENCE,
+                explanation=ExplanationBundle(), feature_snapshot={"suspicious_feature": float(i), "stable_feature": 5.0},
+                model_version="1", status=PredictionStatus.PUBLISHED, generated_at=T0,
+            )
+            await prediction_repo.record(prediction)
+            await prediction_outcome_repo.record(
+                PredictionOutcome(
+                    id=PredictionOutcomeId(uuid4()), prediction_id=prediction.id,
+                    actual_value="220.0", error=8.0, evaluated_at=T0,  # tight: 8/220 ≈ 3.6%
+                )
+            )
+        for i in range(10):
+            prediction = Prediction(
+                id=PredictionId(uuid4()), market_id=market.id, model_id=ModelId(uuid4()),
+                subject_ref=f"fx-wild-{uuid4()}", value="70.0", probability=0.7, confidence=CONFIDENCE,
+                explanation=ExplanationBundle(), feature_snapshot={"suspicious_feature": float(90 + i), "stable_feature": 5.0},
+                model_version="1", status=PredictionStatus.PUBLISHED, generated_at=T0,
+            )
+            await prediction_repo.record(prediction)
+            await prediction_outcome_repo.record(
+                PredictionOutcome(
+                    id=PredictionOutcomeId(uuid4()), prediction_id=prediction.id,
+                    actual_value="220.0", error=150.0, evaluated_at=T0,  # wild: 150/220 ≈ 68%
+                )
+            )
+
+        associations = await service.feature_failure_association(market.id)
+
+        top = associations[0]
+        assert top.feature_key == "suspicious_feature"
+        assert top.correct_mean == pytest.approx(4.5)
+        assert top.incorrect_mean == pytest.approx(94.5)
+
 
 class TestOverconfidenceSummary:
     async def test_detects_systematic_overconfidence(self, service, market_repo, prediction_repo, prediction_outcome_repo):

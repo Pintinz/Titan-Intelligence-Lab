@@ -194,7 +194,7 @@ async def main() -> None:
         rows = (
             await session.execute(
                 text(
-                    "SELECT f.id, f.home_team_id, f.away_team_id FROM fixtures f "
+                    "SELECT f.id, f.home_team_id, f.away_team_id, f.scheduled_at FROM fixtures f "
                     "JOIN seasons se ON f.season_id = se.id "
                     "JOIN competitions c ON se.competition_id = c.id "
                     "JOIN sports s ON c.sport_id = s.id "
@@ -203,18 +203,28 @@ async def main() -> None:
             )
         ).all()
         backfilled = 0
-        for i, (raw_fixture_id, home_team_id, away_team_id) in enumerate(rows, start=1):
+        for i, (raw_fixture_id, home_team_id, away_team_id, scheduled_at) in enumerate(rows, start=1):
             # SQLite stores the UUID column as raw undashed hex (`f.id`), but every real read
             # path (PredictionContextBuilder, the frontend's own fixture_id in its API calls)
             # keys the feature store by the standard dashed `str(uuid.UUID(...))` form — writing
             # under the raw column value silently wrote invisible, unreadable rows.
             fixture_id = str(UUID(raw_fixture_id))
+            # Point-in-time leakage fix: this loop backfills fixtures spanning years, so reusing
+            # one script-start `now` as every fixture's form-differential cutoff (as this script
+            # did before) lets an early fixture's rolling stats see results from every later
+            # fixture in the same run — the same bug class `feature_as_of` closed in
+            # `entity_reconciliation_service.reconcile_fixture` (commit db844e2), but this script
+            # calls the calculators directly and never went through that fix. Each fixture must use
+            # its own kickoff as the cutoff.
+            cutoff = (
+                datetime.fromisoformat(scheduled_at) if isinstance(scheduled_at, str) else scheduled_at
+            ) or now
             # 2026-08-03: one calculator per stat (shots_on_target plus the newly-wired
             # possession/shots_total/corners/fouls/cards) — every one gets its own feature row.
             any_written = False
             for calculator in differential_calculators:
                 written = await calculator.compute_and_write(
-                    fixture_id, TeamId(UUID(home_team_id)), TeamId(UUID(away_team_id)), now
+                    fixture_id, TeamId(UUID(home_team_id)), TeamId(UUID(away_team_id)), cutoff
                 )
                 any_written = any_written or written is not None
             if any_written:
@@ -224,10 +234,16 @@ async def main() -> None:
 
         expected_goals_calculator = build_football_expected_goals_calculator(session)
         expected_goals_backfilled = 0
-        for i, (raw_fixture_id, home_team_id, away_team_id) in enumerate(rows, start=1):
+        for i, (raw_fixture_id, home_team_id, away_team_id, scheduled_at) in enumerate(rows, start=1):
             fixture_id = str(UUID(raw_fixture_id))
+            # Same point-in-time fix as the differential-calculator loop above — this is the
+            # Poisson goals model's primary training feature, so a leaky cutoff here directly
+            # contaminates every football.*.poisson_goals_model artifact trained from it.
+            cutoff = (
+                datetime.fromisoformat(scheduled_at) if isinstance(scheduled_at, str) else scheduled_at
+            ) or now
             home_value, away_value = await expected_goals_calculator.compute_and_write(
-                fixture_id, TeamId(UUID(home_team_id)), TeamId(UUID(away_team_id)), now
+                fixture_id, TeamId(UUID(home_team_id)), TeamId(UUID(away_team_id)), cutoff
             )
             if home_value is not None and away_value is not None:
                 expected_goals_backfilled += 1

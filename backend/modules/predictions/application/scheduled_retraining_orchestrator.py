@@ -143,6 +143,25 @@ POISSON_ELIGIBLE_MARKETS: dict[str, CandidateSpec] = {
     ),
 }
 
+# Correct Score forensic audit (2026-08-27) — a second, additive-only Poisson-family candidate for
+# `football.correct_score` specifically: the same `FootballGoalsPoissonAdapter`, with its Dixon &
+# Coles (1997) low-score correlation adjustment enabled (`params={"dixon_coles": True}`). Scoped to
+# this one market because the adjustment only changes the multiclass correct-score grid — every
+# other Poisson-served market shape (`total_threshold`/`clean_sheet`/`win_to_nil`) reads only the
+# two marginal lambdas, untouched by rho (see `FootballGoalsPoissonAdapter._class_distribution_
+# from_lambdas`'s own comment). Registered as a genuinely distinct `MLAlgorithm` value
+# (`POISSON_DIXON_COLES_MODEL`) so a won comparison honestly names which of the two independently-
+# fitted Poisson variants is actually serving, never silently conflated with the plain baseline.
+# Never assumed better than the plain independent-Poisson candidate — both are benchmarked
+# together against the same held-out log loss inside `AutomaticModelSelectionService`, the same
+# empirical-comparison mechanism every other candidate in this codebase goes through.
+DIXON_COLES_ELIGIBLE_MARKETS: dict[str, CandidateSpec] = {
+    "football.correct_score": CandidateSpec(
+        MLAlgorithm.POISSON_DIXON_COLES_MODEL, MLFramework.POISSON_GOALS,
+        params={"market_shape": "correct_score", "dixon_coles": True}, is_baseline=True,
+    ),
+}
+
 # A comparison holdout is only carved off when doing so still leaves the Challenger's own training
 # comfortably above `MIN_TRAINING_SAMPLES` (30) after `TrainingPipelineService`'s own internal
 # 80/20 split — 45 remaining samples clears that with real margin. Below this, skip the comparison
@@ -265,9 +284,14 @@ class ScheduledRetrainingOrchestrator:
 
         # Additive-only Poisson injection (see `POISSON_ELIGIBLE_MARKETS`'s own comment) — only
         # when the caller left `candidates` at its default, never overriding an explicit roster.
+        # `DIXON_COLES_ELIGIBLE_MARKETS` layers on a second Poisson-family candidate for the one
+        # market it actually affects (see its own comment) — additive to the additive injection,
+        # every other market's roster is completely unaffected either way.
         effective_candidates = candidates
         if candidates is None and market.market_key in POISSON_ELIGIBLE_MARKETS:
             effective_candidates = DEFAULT_CLASSIFICATION_CANDIDATES + (POISSON_ELIGIBLE_MARKETS[market.market_key],)
+            if market.market_key in DIXON_COLES_ELIGIBLE_MARKETS:
+                effective_candidates = effective_candidates + (DIXON_COLES_ELIGIBLE_MARKETS[market.market_key],)
 
         try:
             next_model_version = await self._next_model_version(market)

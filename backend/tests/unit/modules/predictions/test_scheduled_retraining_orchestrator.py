@@ -13,6 +13,7 @@ from modules.predictions.application.experiment_tracking_service import Experime
 from modules.predictions.application.model_registry_service import ModelRegistryService
 from modules.predictions.application.model_selection_service import AutomaticModelSelectionService
 from modules.predictions.application.scheduled_retraining_orchestrator import (
+    DIXON_COLES_ELIGIBLE_MARKETS,
     MIN_TRAINING_POOL_AFTER_HOLDOUT,
     POISSON_ELIGIBLE_MARKETS,
     SYSTEM_APPROVER,
@@ -520,6 +521,63 @@ class TestPoissonEligibleMarketWiring:
         await _seed_outcomes(market, prediction_repo, prediction_outcome_repo, n=60)
 
         outcomes = await orchestrator.run(T0)  # candidates=None -> real default + Poisson injection
+
+        assert len(outcomes) == 1
+        assert outcomes[0].skipped_reason is None
+
+
+class TestDixonColesEligibleMarketWiring:
+    """Correct Score forensic audit (2026-08-27) — `DIXON_COLES_ELIGIBLE_MARKETS` layers a second
+    Poisson-family candidate onto `football.correct_score` specifically, additive to
+    `POISSON_ELIGIBLE_MARKETS`'s own injection. Verified the same way that injection already is:
+    exact contents first, then a real end-to-end sweep proving the 13-candidate roster (11 default
+    + plain Poisson + Dixon-Coles) doesn't break anything."""
+
+    def test_covers_exactly_correct_score(self):
+        assert set(DIXON_COLES_ELIGIBLE_MARKETS.keys()) == {"football.correct_score"}
+
+    def test_entry_is_a_distinct_algorithm_on_the_same_framework_marked_baseline(self):
+        spec = DIXON_COLES_ELIGIBLE_MARKETS["football.correct_score"]
+        assert spec.framework is MLFramework.POISSON_GOALS
+        assert spec.algorithm is MLAlgorithm.POISSON_DIXON_COLES_MODEL
+        assert spec.algorithm is not MLAlgorithm.POISSON_GOALS_MODEL  # never conflated with the plain baseline
+        assert spec.is_baseline is True
+
+    def test_entry_enables_dixon_coles_on_the_correct_score_shape(self):
+        spec = DIXON_COLES_ELIGIBLE_MARKETS["football.correct_score"]
+        assert spec.params["market_shape"] == "correct_score"
+        assert spec.params["dixon_coles"] is True
+
+    async def test_correct_score_bootstrap_does_not_error_with_both_poisson_candidates_injected(
+        self, orchestrator, market_repo, dataset_repo, prediction_repo, prediction_outcome_repo
+    ):
+        """The real regression risk: does injecting a 13th candidate (on top of the 12th the plain
+        Poisson injection already adds) break the sweep for the one market that gets both? Real
+        correct-score labels + raw goal counts are seeded (unlike `_seed_outcomes`'s generic BTTS
+        labels) so this market's own multiclass label recovery actually produces usable samples —
+        `football.correct_score` has >2 `MARKET_OUTCOME_CATALOG` outcomes, so `DatasetBuilder`
+        recovers labels from `actual_value` directly, not from a binary polarity mapping."""
+        market = await market_repo.upsert(_market(market_key="football.correct_score"))
+        await dataset_repo.upsert(_fresh_dataset(market.id, T0))
+        labels_cycle = [("1-0", 1, 0), ("0-0", 0, 0), ("2-1", 2, 1), ("1-1", 1, 1), ("0-1", 0, 1)]
+        for i in range(60):
+            actual_label, home_goals, away_goals = labels_cycle[i % len(labels_cycle)]
+            prediction = Prediction(
+                id=PredictionId(uuid4()), market_id=market.id, model_id=ModelId(uuid4()), subject_ref=f"fx-{i}",
+                value=actual_label, probability=0.2, confidence=CONFIDENCE, explanation=ExplanationBundle(),
+                feature_snapshot={"feature_a": float(i % 20), "feature_b": float((i * 3) % 17)},
+                model_version="1", status=PredictionStatus.PUBLISHED, generated_at=T0,
+            )
+            await prediction_repo.record(prediction)
+            await prediction_outcome_repo.record(
+                PredictionOutcome(
+                    id=PredictionOutcomeId(uuid4()), prediction_id=prediction.id,
+                    actual_value=actual_label, error=0.0, evaluated_at=T0,
+                    raw_home_goals=home_goals, raw_away_goals=away_goals,
+                )
+            )
+
+        outcomes = await orchestrator.run(T0)  # candidates=None -> real default + both Poisson candidates
 
         assert len(outcomes) == 1
         assert outcomes[0].skipped_reason is None

@@ -15,6 +15,23 @@ Standing and Lineup data continue to live relationally in ``modules.sports`` —
 represents their *relationships* (a team's ranking in a season, a player's participation in a
 match) as edge attributes rather than as separate graph nodes, keeping the graph focused on
 entities with independent identity rather than mirroring every relational join-row.
+
+News-intelligence entity-resolution audit fix (2026-08-27): every ``populate_*`` wrapper that
+accepts a real-world ``name`` (team/player/venue/competition/organization/country/sport) wrote it
+into ``attributes["name"]`` but never into ``aliases`` — a real, structural bug, not a cosmetic
+gap: `EntityResolutionService.find_by_alias` (the ONLY lookup `EntityExtractionService` uses to
+resolve a free-text news mention like "Manchester City" against the graph) searches `aliases`
+exclusively, never `attributes`. Confirmed live: every real TEAM/PLAYER node in dev.db had
+``aliases == []`` despite a real, correct ``attributes["name"]``, and every one of the 29
+genuinely Gemini-extracted `NewsEvent`s in dev.db (as opposed to mock-adapter placeholder events)
+had zero resolved entities as a direct, 100%-reproducing consequence — the entire news-to-feature
+pipeline (`NewsMarketImpactEngine` and everything the Correct Score / News Intelligence master
+prompts ask to build on top of it) was structurally unable to ever resolve a single real mention,
+regardless of how exact the match would have been. Fixed at the write path (``aliases=[name]``
+alongside the existing ``attributes``) so every future reconciliation call self-heals the alias
+list going forward; ``scripts/backfill_kg_node_aliases.py`` backfills every already-populated node
+whose ``aliases`` is still empty from its own ``attributes["name"]``, so already-synced teams and
+players resolve immediately without waiting for their next reconciliation pass.
 """
 
 from __future__ import annotations
@@ -95,16 +112,21 @@ class KnowledgeGraphPopulationService:
     # -- convenience wrappers matching the Milestone 5 representative entity set ----------------
 
     async def populate_sport(self, sport_id: str, now: datetime, name: str | None = None) -> KGNode:
-        return await self.upsert_node(NodeType.SPORT, sport_id, {"name": name} if name else None, now=now)
+        return await self.upsert_node(
+            NodeType.SPORT, sport_id, {"name": name} if name else None, now=now, aliases=[name] if name else None,
+        )
 
     async def populate_country(self, country_id: str, now: datetime, code: str, name: str) -> KGNode:
-        return await self.upsert_node(NodeType.COUNTRY, country_id, {"code": code, "name": name}, now=now)
+        return await self.upsert_node(
+            NodeType.COUNTRY, country_id, {"code": code, "name": name}, now=now, aliases=[name],
+        )
 
     async def populate_competition(
         self, competition_id: str, sport_id: str, now: datetime, name: str | None = None
     ) -> KGNode:
         competition_node = await self.upsert_node(
-            NodeType.COMPETITION, competition_id, {"name": name} if name else None, now=now
+            NodeType.COMPETITION, competition_id, {"name": name} if name else None, now=now,
+            aliases=[name] if name else None,
         )
         sport_node = await self.upsert_node(NodeType.SPORT, sport_id, now=now)
         await self.upsert_edge(competition_node, sport_node, EdgeType.BELONGS_TO, now)
@@ -119,7 +141,9 @@ class KnowledgeGraphPopulationService:
     async def populate_venue(
         self, venue_id: str, now: datetime, name: str | None = None, country_id: str | None = None
     ) -> KGNode:
-        venue_node = await self.upsert_node(NodeType.VENUE, venue_id, {"name": name} if name else None, now=now)
+        venue_node = await self.upsert_node(
+            NodeType.VENUE, venue_id, {"name": name} if name else None, now=now, aliases=[name] if name else None,
+        )
         if country_id:
             country_node = await self.upsert_node(NodeType.COUNTRY, country_id, now=now)
             await self.upsert_edge(venue_node, country_node, EdgeType.LOCATED_IN, now)
@@ -128,7 +152,9 @@ class KnowledgeGraphPopulationService:
     async def populate_team(
         self, team_id: str, sport_id: str, now: datetime, name: str | None = None, country_id: str | None = None
     ) -> KGNode:
-        team_node = await self.upsert_node(NodeType.TEAM, team_id, {"name": name} if name else None, now=now)
+        team_node = await self.upsert_node(
+            NodeType.TEAM, team_id, {"name": name} if name else None, now=now, aliases=[name] if name else None,
+        )
         sport_node = await self.upsert_node(NodeType.SPORT, sport_id, now=now)
         await self.upsert_edge(team_node, sport_node, EdgeType.BELONGS_TO, now)
         if country_id:
@@ -144,7 +170,9 @@ class KnowledgeGraphPopulationService:
     async def populate_player(
         self, player_id: str, sport_id: str, now: datetime, team_id: str | None = None, name: str | None = None
     ) -> KGNode:
-        player_node = await self.upsert_node(NodeType.PLAYER, player_id, {"name": name} if name else None, now=now)
+        player_node = await self.upsert_node(
+            NodeType.PLAYER, player_id, {"name": name} if name else None, now=now, aliases=[name] if name else None,
+        )
         sport_node = await self.upsert_node(NodeType.SPORT, sport_id, now=now)
         await self.upsert_edge(player_node, sport_node, EdgeType.BELONGS_TO, now)
         if team_id:
@@ -183,7 +211,10 @@ class KnowledgeGraphPopulationService:
     # -- M6 business entities: organizations/users/subscriptions/providers ----------------------
 
     async def populate_organization(self, organization_id: str, now: datetime, name: str | None = None) -> KGNode:
-        return await self.upsert_node(NodeType.ORGANIZATION, organization_id, {"name": name} if name else None, now=now)
+        return await self.upsert_node(
+            NodeType.ORGANIZATION, organization_id, {"name": name} if name else None, now=now,
+            aliases=[name] if name else None,
+        )
 
     async def populate_user(self, user_id: str, now: datetime, email: str | None = None) -> KGNode:
         return await self.upsert_node(NodeType.USER, user_id, {"email": email} if email else None, now=now)

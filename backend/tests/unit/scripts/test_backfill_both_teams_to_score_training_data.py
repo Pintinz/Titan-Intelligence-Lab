@@ -509,3 +509,95 @@ async def test_15_regression_with_no_eligible_news_matches_pre_milestone15_behav
         assert "football.market.overround" in snapshot  # required features still populate exactly as before
         assert "news.football.home_btts_impact" not in snapshot  # zero eligible news -> no news keys, same as pre-M15
         assert "news.football.away_btts_impact" not in snapshot
+
+
+# ================================================================================================
+# Part C (tests 16-17) — forensic audit Critical Fix #1 regression: `_latest_feature_value` (which
+# read "latest ever written" with no cutoff) was renamed to `_feature_value_as_of` and given an
+# `as_of <= cutoff` bound. These prove the fixed script can no longer see a feature value written
+# after the fixture's own kickoff — the exact leakage the audit found live in dev.db (a 2023
+# fixture's features recomputed, and changing, as late as 2026).
+# ================================================================================================
+
+
+async def test_16_feature_written_only_after_kickoff_is_treated_as_missing_not_leaked(full_schema_db):
+    """A required feature that exists ONLY as a post-kickoff row (simulating a later, out-of-band
+    recompute of an already-completed historical fixture — the real bug this fix closes) must be
+    invisible to the backfill, not silently used as 'the latest value on file'."""
+    kickoff = datetime(2024, 6, 5, tzinfo=timezone.utc)
+    session_factory = async_sessionmaker(full_schema_db, expire_on_commit=False)
+
+    async with session_factory() as session:
+        await composition.build_football_market_seeder(session).seed(kickoff - timedelta(days=1000))
+        home_id, away_id = uuid4(), uuid4()
+        await _seed_team(session, home_id, "HOME")
+        await _seed_team(session, away_id, "AWAY")
+        fixture = _new_fixture_row(home_id, away_id, home_score=1, away_score=0, scheduled_at=kickoff)
+        session.add(fixture)
+        await session.flush()
+
+        feature_store = composition.build_feature_store_service(session)
+        dashed = str(fixture.id)
+        # Deliberately contaminated: the required feature is written well AFTER kickoff, as if a
+        # live re-sync recomputed this already-completed fixture without a fixture-specific
+        # cutoff — no pre-kickoff row exists for it at all.
+        await feature_store.write(
+            "football.fixture.form_shots_on_target_diff_last5", EntityType.FIXTURE, dashed, 0.9,
+            kickoff + timedelta(days=500),
+        )
+        await feature_store.write("football.market.overround", EntityType.FIXTURE, dashed, 1.05, kickoff)
+        await session.commit()
+
+    script = _load_script()
+    await script.main()
+
+    async with session_factory() as session:
+        row = (
+            await session.execute(text("SELECT feature_snapshot FROM predictions WHERE subject_ref = :ref"), {"ref": dashed})
+        ).fetchone()
+        # The fixture is skipped entirely (missing_required), never a Prediction built from the
+        # leaked value — matching every other "genuinely missing" required feature in this suite.
+        assert row is None
+
+
+async def test_17_pre_and_post_kickoff_values_coexist_script_reads_the_pre_kickoff_one(full_schema_db):
+    """When a feature has BOTH a legitimate pre-kickoff value and a later, out-of-band
+    post-kickoff recompute, the script must resolve the pre-kickoff one — proving this is a real
+    `as_of <= cutoff` bound, not merely "skip if the latest row happens to be post-kickoff"."""
+    kickoff = datetime(2024, 6, 6, tzinfo=timezone.utc)
+    session_factory = async_sessionmaker(full_schema_db, expire_on_commit=False)
+
+    async with session_factory() as session:
+        await composition.build_football_market_seeder(session).seed(kickoff - timedelta(days=1000))
+        home_id, away_id = uuid4(), uuid4()
+        await _seed_team(session, home_id, "HOME")
+        await _seed_team(session, away_id, "AWAY")
+        fixture = _new_fixture_row(home_id, away_id, home_score=2, away_score=2, scheduled_at=kickoff)
+        session.add(fixture)
+        await session.flush()
+
+        feature_store = composition.build_feature_store_service(session)
+        dashed = str(fixture.id)
+        # The real, legitimate pre-kickoff value.
+        await feature_store.write(
+            "football.fixture.form_shots_on_target_diff_last5", EntityType.FIXTURE, dashed, 0.25,
+            kickoff - timedelta(days=3),
+        )
+        # A later out-of-band recompute that must NOT shadow the value above.
+        await feature_store.write(
+            "football.fixture.form_shots_on_target_diff_last5", EntityType.FIXTURE, dashed, 0.99,
+            kickoff + timedelta(days=200),
+        )
+        await feature_store.write("football.market.overround", EntityType.FIXTURE, dashed, 1.05, kickoff)
+        await session.commit()
+
+    script = _load_script()
+    await script.main()
+
+    async with session_factory() as session:
+        row = (
+            await session.execute(text("SELECT feature_snapshot FROM predictions WHERE subject_ref = :ref"), {"ref": dashed})
+        ).fetchone()
+        assert row is not None
+        snapshot = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+        assert snapshot["football.fixture.form_shots_on_target_diff_last5"] == 0.25

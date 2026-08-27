@@ -54,7 +54,7 @@ is the piece that turns this resolver's output into a trainable multiclass label
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from uuid import uuid4
 
@@ -517,6 +517,16 @@ class OutcomeResolutionService:
         outcome — idempotently, so a fixture re-synced after it's already evaluated (e.g. a
         provider re-reporting the same final score) does not create duplicate outcome rows.
 
+        Real gap found live (2026-08-25): "idempotent" previously meant "never re-resolve once
+        any outcome exists," even when the fixture's score has since been *corrected* by the
+        provider (a live/provisional score followed by an official correction is routine sports
+        data — verified live: a Hull City vs Manchester United outcome resolved against a 1-1
+        score that was later corrected to a real 2-0, with the wrong "DRAW" outcome frozen
+        forever because nothing ever re-checked it). Each branch below now recomputes the outcome
+        every time this runs and compares it to what's already stored — identical, skip (still
+        idempotent, no wasted write); different, correct the existing row in place via
+        `self.outcomes.update()` rather than leaving it wrong.
+
         `home_score_ht`/`away_score_ht` (Milestone post-M24): optional half-time (football) or
         first-half (basketball) score, sourced from the caller's `Fixture.period_scores` when it
         genuinely carries one. `home_score_first5`/`away_score_first5` (Phase 5A): optional
@@ -535,8 +545,8 @@ class OutcomeResolutionService:
         for prediction in await self.predictions.list_by_subject(fixture_id):
             if not prediction.is_published():
                 continue
-            if await self.outcomes.get_for_prediction(prediction.id) is not None:
-                continue  # already evaluated
+
+            existing = await self.outcomes.get_for_prediction(prediction.id)
 
             market = await self.markets.get(prediction.market_id)
             if market is None:
@@ -563,7 +573,7 @@ class OutcomeResolutionService:
                     raw_home_goals=result.home_score,
                     raw_away_goals=result.away_score,
                 )
-                recorded.append(await self.outcomes.record(outcome))
+                await self._record_or_correct(recorded, existing, outcome)
                 continue
 
             regression_resolver = REGRESSION_MARKET_RESOLVERS.get(market.market_key)
@@ -582,7 +592,7 @@ class OutcomeResolutionService:
                     error=abs(predicted - actual),
                     evaluated_at=now,
                 )
-                recorded.append(await self.outcomes.record(outcome))
+                await self._record_or_correct(recorded, existing, outcome)
                 continue
 
             resolver = MARKET_OUTCOME_RESOLVERS.get(market.market_key)
@@ -614,8 +624,31 @@ class OutcomeResolutionService:
                 raw_home_goals=result.home_score,
                 raw_away_goals=result.away_score,
             )
-            recorded.append(await self.outcomes.record(outcome))
+            await self._record_or_correct(recorded, existing, outcome)
         return recorded
+
+    async def _record_or_correct(
+        self, recorded: list[PredictionOutcome], existing: PredictionOutcome | None, fresh: PredictionOutcome
+    ) -> None:
+        """Shared by every resolver branch above: `fresh` is always recomputed from the CURRENT
+        `result`, never trusted to already match what's stored. No existing row -> record it. An
+        existing row whose fields already match -> genuinely idempotent, no write (matches
+        `resolve_for_fixture`'s own "repeated call with the same score creates nothing new"
+        contract). An existing row that differs (the fixture's score was corrected since it was
+        first resolved) -> corrected in place, preserving the original outcome's own id/identity
+        rather than minting a new one, so anything already referencing it by id stays valid."""
+        if existing is None:
+            recorded.append(await self.outcomes.record(fresh))
+            return
+        if (
+            existing.actual_value == fresh.actual_value
+            and existing.error == fresh.error
+            and existing.raw_home_goals == fresh.raw_home_goals
+            and existing.raw_away_goals == fresh.raw_away_goals
+        ):
+            return  # already correct — idempotent no-op, not counted as newly recorded
+        corrected = replace(fresh, id=existing.id)
+        recorded.append(await self.outcomes.update(corrected))
 
     async def review_for_fixture(self, fixture_id: str) -> list[MarketReview]:
         """Real per-market rows for the AI Review surface (Match Discovery's "Recently Completed

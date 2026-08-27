@@ -30,6 +30,14 @@ from modules.sports.infrastructure.persistence.models import FixtureModel, TeamM
 TARGET_TEAM_NAMES = ["Coventry City FC", "Hull City AFC", "Sunderland AFC"]
 
 
+def _ensure_aware(dt: datetime, reference: datetime) -> datetime:
+    """SQLite/aiosqlite drops tzinfo on read-back (docs/decisions.md ADR-007) — duplicated
+    per-module rather than imported, matching the existing convention across this codebase."""
+    if dt.tzinfo is None and reference.tzinfo is not None:
+        return dt.replace(tzinfo=reference.tzinfo)
+    return dt
+
+
 async def main(db_path: str) -> None:
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{db_path}",
@@ -70,13 +78,20 @@ async def main(db_path: str) -> None:
     for fixture in fixtures:
         fixture_id = str(fixture.id)
         home_id, away_id = TeamId(fixture.home_team_id), TeamId(fixture.away_team_id)
-        home_val, away_val = await expected_goals_calc.compute_and_write(fixture_id, home_id, away_id, now)
+        # `status == "scheduled"` alone doesn't guarantee this fixture's kickoff hasn't already
+        # passed (the fixture-sync job can lag — the same "scheduled but actually already played"
+        # gap the public featured-intelligence endpoint had to guard against separately). For a
+        # genuinely future fixture `now` is the correct, live-equivalent cutoff; for a fixture
+        # whose scheduled_at has already passed, capping at its own kickoff prevents this
+        # recomputation from picking up results that happened after it.
+        cutoff = min(now, _ensure_aware(fixture.scheduled_at, now))
+        home_val, away_val = await expected_goals_calc.compute_and_write(fixture_id, home_id, away_id, cutoff)
         if home_val is not None:
             expected_goals_written += 1
         if away_val is not None:
             expected_goals_written += 1
         for calc in form_diff_calcs:
-            written = await calc.compute_and_write(fixture_id, home_id, away_id, now)
+            written = await calc.compute_and_write(fixture_id, home_id, away_id, cutoff)
             if written is not None:
                 form_diff_written += 1
 

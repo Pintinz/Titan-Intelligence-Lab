@@ -7,10 +7,18 @@ inference, no mocked ML internals.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from modules.predictions.domain.value_objects import TargetType
-from modules.predictions.infrastructure.ml.football_goals_poisson_adapter import FootballGoalsPoissonAdapter
+from modules.predictions.infrastructure.ml.football_goals_poisson_adapter import (
+    FootballGoalsPoissonAdapter,
+    PoissonGridClassifierView,
+    _apply_dixon_coles,
+    _correct_score_grid,
+    _dixon_coles_tau,
+    _fit_dixon_coles_rho,
+)
 from modules.predictions.ports.ml_model import InsufficientTrainingDataError, ModelNotFittedError, TrainingSample
 
 CORRECT_SCORE_LABELS = tuple(f"{home}-{away}" for home in range(6) for away in range(6)) + ("OTHER",)
@@ -151,6 +159,88 @@ class TestCorrectScore:
         result = adapter.predict_one({"x1": 1.0})
         assert result.distribution["OTHER"] > 0.5
 
+    async def test_predict_class_distribution_matches_predict_one(self):
+        """`predict_class_distribution` (the surface `PoissonGridClassifierView` calls for
+        calibration) must return exactly the same distribution `predict_one()` already does —
+        it's a factored-out reuse of the same grid math, not a second implementation."""
+        adapter = FootballGoalsPoissonAdapter(
+            params={"market_shape": "correct_score"}, class_labels=CORRECT_SCORE_LABELS
+        )
+        await adapter.fit(_samples())
+        via_predict_one = adapter.predict_one({"x1": 5.0}).distribution
+        via_class_distribution = adapter.predict_class_distribution({"x1": 5.0})
+        assert via_class_distribution == via_predict_one
+
+
+class TestPredictPositiveProbability:
+    async def test_matches_predict_one_probability_for_every_binary_shape(self):
+        """`predict_positive_probability` (the surface `PoissonGridClassifierView` calls for
+        calibration on binary-shaped markets) must return exactly the same P(positive)
+        `predict_one()` already does for each shape — a factored-out reuse, not a second
+        implementation that could silently drift from it."""
+        for params in (
+            {"market_shape": "total_threshold", "line": 2.5},
+            {"market_shape": "team_total_threshold", "line": 1.5, "team": "home"},
+            {"market_shape": "clean_sheet", "team": "home"},
+            {"market_shape": "win_to_nil", "team": "home"},
+        ):
+            adapter = FootballGoalsPoissonAdapter(params=params)
+            await adapter.fit(_samples())
+            expected = adapter.predict_one({"x1": 5.0}).probability
+            assert adapter.predict_positive_probability({"x1": 5.0}) == pytest.approx(expected)
+
+
+class TestPoissonGridClassifierView:
+    """Correct Score forensic audit (2026-08-26): `CalibrationValidationService` needs a real
+    scikit-learn-classifier surface (`predict_proba`/`classes_`) over a fitted
+    `FootballGoalsPoissonAdapter` — the raw `(home_model, away_model)` tuple
+    `underlying_estimator()` returns has neither, which crashed calibration validation live
+    against football.correct_score's real PRODUCTION Champion. These tests exercise the view
+    directly, the same way `CalibrationValidationService._predict_proba`/`CalibratedClassifierCV`
+    actually call it — vectorized `X` rows in `feature_order`, not a features dict."""
+
+    async def test_predict_proba_multiclass_matches_predict_class_distribution(self):
+        adapter = FootballGoalsPoissonAdapter(
+            params={"market_shape": "correct_score"}, class_labels=CORRECT_SCORE_LABELS
+        )
+        await adapter.fit(_samples())
+        view = PoissonGridClassifierView(adapter=adapter, classes_=np.arange(len(CORRECT_SCORE_LABELS)))
+
+        X = np.array([[5.0], [3.0]])
+        proba = view.predict_proba(X)
+
+        assert proba.shape == (2, len(CORRECT_SCORE_LABELS))
+        for row, x1 in zip(proba, (5.0, 3.0)):
+            expected = adapter.predict_class_distribution({"x1": x1})
+            assert row == pytest.approx([expected[label] for label in CORRECT_SCORE_LABELS])
+            assert sum(row) == pytest.approx(1.0, abs=1e-6)
+
+    async def test_predict_proba_binary_shape_is_two_column(self):
+        adapter = FootballGoalsPoissonAdapter(params={"market_shape": "total_threshold", "line": 2.5})
+        await adapter.fit(_samples())
+        view = PoissonGridClassifierView(adapter=adapter, classes_=np.array([0, 1]))
+
+        X = np.array([[5.0]])
+        proba = view.predict_proba(X)
+
+        assert proba.shape == (1, 2)
+        expected_positive = adapter.predict_positive_probability({"x1": 5.0})
+        assert proba[0, 1] == pytest.approx(expected_positive)
+        assert proba[0, 0] == pytest.approx(1.0 - expected_positive)
+
+    async def test_predict_returns_the_argmax_class(self):
+        adapter = FootballGoalsPoissonAdapter(
+            params={"market_shape": "correct_score"}, class_labels=CORRECT_SCORE_LABELS
+        )
+        await adapter.fit(_samples())
+        view = PoissonGridClassifierView(adapter=adapter, classes_=np.arange(len(CORRECT_SCORE_LABELS)))
+
+        X = np.array([[5.0]])
+        predicted = view.predict(X)
+
+        expected_index = np.argmax(view.predict_proba(X)[0])
+        assert predicted[0] == expected_index
+
 
 class TestFeatureImportanceAndSerialization:
     async def test_feature_importance_sums_to_one(self):
@@ -184,3 +274,133 @@ class TestFeatureImportanceAndSerialization:
     def test_target_type_is_classification_by_default(self):
         adapter = FootballGoalsPoissonAdapter()
         assert adapter.target_type is TargetType.CLASSIFICATION
+
+
+def _sample_dixon_coles_scores(rng, n, lam_home, lam_away, rho):
+    """Draws `n` (home_goals, away_goals) pairs from the Dixon-Coles-adjusted joint distribution
+    for a fixed (lam_home, lam_away, rho) — a synthetic dataset with a REAL, known low-score
+    correlation baked in, so `_fit_dixon_coles_rho` can be checked against ground truth instead of
+    just "doesn't crash"."""
+    grid = _apply_dixon_coles(_correct_score_grid(lam_home, lam_away), lam_home, lam_away, rho)
+    scores = [k for k in grid if k != "OTHER"]
+    weights = np.array([grid[k] for k in scores])
+    weights = weights / weights.sum()
+    chosen = rng.choice(len(scores), size=n, p=weights)
+    return [tuple(int(v) for v in scores[i].split("-")) for i in chosen]
+
+
+class TestDixonColesTau:
+    def test_low_score_cells_use_the_real_formula(self):
+        lam_home, lam_away, rho = 1.4, 1.1, -0.15
+        assert _dixon_coles_tau(0, 0, lam_home, lam_away, rho) == pytest.approx(1.0 - lam_home * lam_away * rho)
+        assert _dixon_coles_tau(0, 1, lam_home, lam_away, rho) == pytest.approx(1.0 + lam_home * rho)
+        assert _dixon_coles_tau(1, 0, lam_home, lam_away, rho) == pytest.approx(1.0 + lam_away * rho)
+        assert _dixon_coles_tau(1, 1, lam_home, lam_away, rho) == pytest.approx(1.0 - rho)
+
+    def test_every_other_cell_is_unadjusted(self):
+        for x, y in [(2, 0), (0, 2), (2, 2), (3, 1), (5, 5)]:
+            assert _dixon_coles_tau(x, y, 1.4, 1.1, -0.2) == 1.0
+
+    def test_zero_rho_is_the_identity_on_low_score_cells(self):
+        for x, y in [(0, 0), (0, 1), (1, 0), (1, 1)]:
+            assert _dixon_coles_tau(x, y, 1.4, 1.1, 0.0) == pytest.approx(1.0)
+
+
+class TestApplyDixonColes:
+    def test_distribution_still_sums_to_one(self):
+        grid = _correct_score_grid(1.4, 1.1)
+        adjusted = _apply_dixon_coles(grid, 1.4, 1.1, -0.2)
+        assert sum(adjusted.values()) == pytest.approx(1.0, abs=1e-9)
+
+    def test_negative_rho_increases_draws_and_decreases_10_01(self):
+        """The documented real-world direction (Dixon & Coles 1997): a negative rho makes 0-0/1-1
+        MORE likely and 1-0/0-1 LESS likely than independent Poisson alone predicts."""
+        grid = _correct_score_grid(1.4, 1.1)
+        adjusted = _apply_dixon_coles(grid, 1.4, 1.1, -0.2)
+        assert adjusted["0-0"] > grid["0-0"]
+        assert adjusted["1-1"] > grid["1-1"]
+        assert adjusted["1-0"] < grid["1-0"]
+        assert adjusted["0-1"] < grid["0-1"]
+
+    def test_zero_rho_leaves_the_grid_unchanged(self):
+        grid = _correct_score_grid(1.4, 1.1)
+        adjusted = _apply_dixon_coles(grid, 1.4, 1.1, 0.0)
+        for key in grid:
+            assert adjusted[key] == pytest.approx(grid[key])
+
+
+class TestFitDixonColesRho:
+    def test_recovers_a_known_negative_rho_from_synthetic_data(self):
+        rng = np.random.default_rng(42)
+        lam_home, lam_away, true_rho = 1.4, 1.1, -0.2
+        pairs = _sample_dixon_coles_scores(rng, 4000, lam_home, lam_away, true_rho)
+        home_goals = np.array([p[0] for p in pairs], dtype=float)
+        away_goals = np.array([p[1] for p in pairs], dtype=float)
+        lam_homes = np.full(len(pairs), lam_home)
+        lam_aways = np.full(len(pairs), lam_away)
+
+        recovered = _fit_dixon_coles_rho(home_goals, away_goals, lam_homes, lam_aways)
+
+        assert recovered == pytest.approx(true_rho, abs=0.05)
+
+    def test_independent_data_recovers_rho_near_zero(self):
+        rng = np.random.default_rng(7)
+        lam_home, lam_away = 1.4, 1.1
+        home_goals = rng.poisson(lam_home, size=4000).astype(float)
+        away_goals = rng.poisson(lam_away, size=4000).astype(float)
+        lam_homes = np.full(4000, lam_home)
+        lam_aways = np.full(4000, lam_away)
+
+        recovered = _fit_dixon_coles_rho(home_goals, away_goals, lam_homes, lam_aways)
+
+        assert recovered == pytest.approx(0.0, abs=0.08)
+
+
+class TestDixonColesAdapter:
+    async def test_use_dixon_coles_reads_params(self):
+        adapter = FootballGoalsPoissonAdapter(params={"market_shape": "correct_score", "dixon_coles": True})
+        assert adapter.use_dixon_coles is True
+        plain = FootballGoalsPoissonAdapter(params={"market_shape": "correct_score"})
+        assert plain.use_dixon_coles is False
+
+    async def test_fit_sets_rho_only_when_enabled_and_correct_score_shaped(self):
+        dc_adapter = FootballGoalsPoissonAdapter(
+            params={"market_shape": "correct_score", "dixon_coles": True}, class_labels=CORRECT_SCORE_LABELS
+        )
+        await dc_adapter.fit(_samples())
+        assert dc_adapter._rho is not None
+
+        plain_adapter = FootballGoalsPoissonAdapter(
+            params={"market_shape": "correct_score"}, class_labels=CORRECT_SCORE_LABELS
+        )
+        await plain_adapter.fit(_samples())
+        assert plain_adapter._rho is None
+
+        # dixon_coles=True on a non-correct_score shape must not fit rho — it would have no effect
+        # on that shape's marginal-only `_threshold_probability`.
+        binary_dc_adapter = FootballGoalsPoissonAdapter(
+            params={"market_shape": "total_threshold", "line": 2.5, "dixon_coles": True}
+        )
+        await binary_dc_adapter.fit(_samples())
+        assert binary_dc_adapter._rho is None
+
+    async def test_predicted_distribution_still_sums_to_one(self):
+        adapter = FootballGoalsPoissonAdapter(
+            params={"market_shape": "correct_score", "dixon_coles": True}, class_labels=CORRECT_SCORE_LABELS
+        )
+        await adapter.fit(_samples())
+        result = adapter.predict_one({"x1": 5.0})
+        assert sum(result.distribution.values()) == pytest.approx(1.0, abs=1e-6)
+
+    async def test_serialize_roundtrip_preserves_rho(self):
+        adapter = FootballGoalsPoissonAdapter(
+            params={"market_shape": "correct_score", "dixon_coles": True}, class_labels=CORRECT_SCORE_LABELS
+        )
+        await adapter.fit(_samples())
+        original_rho = adapter._rho
+
+        restored = FootballGoalsPoissonAdapter()
+        restored.deserialize(adapter.serialize())
+
+        assert restored._rho == pytest.approx(original_rho)
+        assert restored.use_dixon_coles is True

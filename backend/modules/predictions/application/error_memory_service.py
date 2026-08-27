@@ -20,6 +20,7 @@ from modules.predictions.domain.error_memory import (
     OverconfidenceSummary,
 )
 from modules.predictions.domain.value_objects import MarketId, TargetType
+from modules.predictions.domain.entities import PredictionOutcome
 from modules.predictions.ports.repositories import (
     MarketRepositoryPort,
     ModelEvaluationRepositoryPort,
@@ -27,6 +28,21 @@ from modules.predictions.ports.repositories import (
     PredictionOutcomeRepositoryPort,
     PredictionRepositoryPort,
 )
+
+
+def _regression_relative_error(outcome: PredictionOutcome) -> float:
+    """See `prediction_engine.py`'s own copy (same shape, duplicated per this codebase's
+    per-module convention) for the full rationale. Divides a regression outcome's raw magnitude
+    error by the real observed value rather than a fabricated/hardcoded per-market scale."""
+    if outcome.error is None:
+        return 0.0
+    try:
+        actual = float(outcome.actual_value)
+    except (TypeError, ValueError):
+        return 0.0
+    if actual == 0:
+        return outcome.error
+    return abs(outcome.error / actual)
 
 
 @dataclass
@@ -71,9 +87,19 @@ class ErrorMemoryService:
     async def feature_failure_association(self, market_id: MarketId, limit: int = 500) -> list[FeatureFailureAssociation]:
         """"Which features are associated with prediction failures?" — for every numeric feature
         this market's real predictions carried, compares its average value on outcomes that
-        turned out correct (`error < 0.5`) against ones that turned out incorrect. `error` alone
-        already tells us "right or wrong" (`OutcomeResolutionService`'s own convention); no label-
-        polarity recovery needed here, unlike `overconfidence_summary`."""
+        turned out correct (`error < 0.5`) against ones that turned out incorrect. For a
+        `TargetType.CLASSIFICATION` market, `error` alone already tells us "right or wrong"
+        (`OutcomeResolutionService`'s own convention, 0.0/1.0); no label-polarity recovery needed
+        here, unlike `overconfidence_summary`. For a `TargetType.REGRESSION` market, `error` is
+        instead the market's own raw magnitude — never bounded to [0, 1] — so it's normalized the
+        same way `PredictionEngine._historical_accuracy` is (Phase 6 fix, 2026-08-25): relative to
+        the real observed magnitude, via the same `_regression_relative_error` shape (duplicated
+        per-module per this codebase's convention, not imported). Applying the raw `error < 0.5`
+        check to a regression market would bucket every single outcome as "incorrect" regardless
+        of prediction quality — the same bug `_historical_accuracy` had."""
+        market = await self.markets.get(market_id)
+        if market is None:
+            raise MarketNotFoundError(str(market_id))
         outcomes = await self.outcomes.list_by_market(market_id, limit=limit)
 
         correct: dict[str, list[float]] = {}
@@ -84,7 +110,10 @@ class ErrorMemoryService:
             prediction = await self.predictions.get(outcome.prediction_id)
             if prediction is None:
                 continue
-            bucket = correct if outcome.error < 0.5 else incorrect
+            scored_error = (
+                _regression_relative_error(outcome) if market.target_type is TargetType.REGRESSION else outcome.error
+            )
+            bucket = correct if scored_error < 0.5 else incorrect
             for key, value in prediction.feature_snapshot.items():
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
                     bucket.setdefault(key, []).append(float(value))

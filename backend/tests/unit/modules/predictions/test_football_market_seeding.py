@@ -14,6 +14,7 @@ from modules.predictions.application.market_registry_service import MarketRegist
 from modules.predictions.application.windowed_feature_engineering_service import (
     football_fixture_expected_goals_calculator,
     football_fixture_stat_differential_calculators,
+    football_fixture_venue_strength_calculator,
     football_form_calculator,
     football_lineup_continuity_calculators,
     football_transfer_activity_calculators,
@@ -206,9 +207,22 @@ def news_market_impact_engine(registration, store):
 
 
 @pytest.fixture
+def manager_change_calculator(registration, store):
+    from modules.predictions.application.manager_change_context_calculator import ManagerChangeContextCalculator
+
+    return ManagerChangeContextCalculator(
+        registration=registration,
+        store=store,
+        events=InMemoryNewsEventRepositoryForSeeding(),
+        kg_nodes=InMemoryKGNodeRepositoryForSeeding(),
+        sport_code="football",
+    )
+
+
+@pytest.fixture
 def seeder(
     registration, store, market_registry, mapping_service, team_statistics_repo, fixtures_repo, lineups_repo,
-    transfers_repo, news_market_impact_engine,
+    transfers_repo, news_market_impact_engine, manager_change_calculator,
 ):
     return FootballMarketSeeder(
         registration=registration,
@@ -219,7 +233,9 @@ def seeder(
         expected_goals_calculator=football_fixture_expected_goals_calculator(registration, store, fixtures_repo),
         lineup_continuity_calculators=football_lineup_continuity_calculators(registration, store, lineups_repo),
         transfer_activity_calculators=football_transfer_activity_calculators(registration, store, transfers_repo),
+        venue_strength_calculator=football_fixture_venue_strength_calculator(registration, store, fixtures_repo),
         news_market_impact_engine=news_market_impact_engine,
+        manager_change_calculator=manager_change_calculator,
     )
 
 
