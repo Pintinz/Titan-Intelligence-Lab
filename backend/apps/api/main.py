@@ -25,13 +25,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.rate_limit import enforce_ip_rate_limit
 from modules.intelligence.infrastructure.persistence.models import NewsArticleModel as _NewsArticleModel
+from modules.predictions.application.model_health_audit_service import ModelHealthAuditService
 from modules.predictions.domain.value_objects import MarketStatus as _MarketStatus
-from modules.predictions.infrastructure.ml.model_loader import (
-    ArtifactIntegrityError,
-    ModelLoaderService,
-    UnknownModelFrameworkError,
-)
-from modules.predictions.infrastructure.ml.supabase_artifact_store import ArtifactStoreError
 from modules.predictions.infrastructure.persistence.models import ModelDefinitionModel as _ModelDefinitionModel
 from modules.predictions.infrastructure.persistence.models import PredictionModel as _PredictionModel
 from modules.predictions.infrastructure.persistence.repositories import (
@@ -2096,63 +2091,18 @@ async def database_status(session: AsyncSession = Depends(get_session), _admin: 
 async def model_health(session: AsyncSession = Depends(get_session), _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
     """Real-time Champion artifact audit (Production Integrity Hardening, 2026-08-29) — a
     registry row saying CHAMPION is not evidence the artifact it points at is actually loadable;
-    a real production incident the same day (several football markets' artifacts silently
-    missing from Supabase Storage) took manual log archaeology to even enumerate. Runs
-    `ModelLoaderService.load()` — the exact same fetch/checksum/deserialize path a real
-    prediction request takes — against every PRODUCTION market's Champion, through a throwaway
-    loader instance (never the shared serving cache), so this is read-only: no Champion status,
-    cache entry, or DB row is ever touched by running this audit.
+    a real production incident the same day (40 of 53 PRODUCTION markets' artifacts silently
+    missing from Supabase Storage) took manual log archaeology to even enumerate. Thin wrapper
+    around `ModelHealthAuditService` — see that module for the actual read-only load-path check —
+    reused as-is by `repair_broken_champions_task` to decide what needs repairing.
     """
-    markets_repo = _SqlAlchemyMarketRepository(session=session)
-    models_repo = _SqlAlchemyModelRepository(session=session)
-    loader = ModelLoaderService(artifact_store=get_model_artifact_store())
-
-    markets = await markets_repo.list_by_status(_MarketStatus.PRODUCTION)
-    champions: list[dict] = []
-
-    for market in markets:
-        champion = await models_repo.get_champion(market.id)
-        if champion is None:
-            champions.append({"market_key": market.market_key, "status": "NO_CHAMPION"})
-            continue
-        if not champion.is_genuinely_trained():
-            champions.append(
-                {
-                    "market_key": market.market_key,
-                    "model_id": str(champion.id.value),
-                    "algorithm": champion.algorithm,
-                    "status": "INVALID_CHAMPION",
-                    "detail": "placeholder/never-trained Champion (artifact_ref is None)",
-                }
-            )
-            continue
-
-        entry = {
-            "market_key": market.market_key,
-            "model_id": str(champion.id.value),
-            "version": champion.version,
-            "algorithm": champion.algorithm,
-            "framework": champion.framework,
-            "artifact_ref": champion.artifact_ref,
-            "promoted_at": champion.promoted_at.isoformat() if champion.promoted_at else None,
-        }
-        try:
-            await loader.load(
-                champion.id, champion.framework, champion.algorithm, market.target_type,
-                champion.artifact_ref, champion.artifact_checksum,
-            )
-            entry["status"] = "HEALTHY"
-        except ArtifactIntegrityError as exc:
-            entry["status"], entry["error"] = "CORRUPT_ARTIFACT", str(exc)
-        except ArtifactStoreError as exc:
-            entry["status"], entry["error"] = "MISSING_ARTIFACT", str(exc)
-        except FileNotFoundError as exc:
-            entry["status"], entry["error"] = "LEGACY_LOCAL_ONLY", str(exc)
-        except UnknownModelFrameworkError as exc:
-            entry["status"], entry["error"] = "UNKNOWN_FAILURE", str(exc)
-        except Exception as exc:  # noqa: BLE001 — this endpoint's whole job is to catalogue every failure, not raise one
-            entry["status"], entry["error"] = "RUNTIME_LOAD_FAILED", str(exc)
-        champions.append(entry)
+    service = ModelHealthAuditService(
+        markets=_SqlAlchemyMarketRepository(session=session),
+        models=_SqlAlchemyModelRepository(session=session),
+        artifact_store=get_model_artifact_store(),
+    )
+    entries = await service.audit_all_production_markets()
+    champions = [entry.as_dict() for entry in entries]
 
     summary: dict[str, int] = {}
     for c in champions:
@@ -2161,11 +2111,26 @@ async def model_health(session: AsyncSession = Depends(get_session), _admin: _Au
     return envelope(
         data={
             "checked_at": _now().isoformat(),
-            "total_production_markets": len(markets),
+            "total_production_markets": len(entries),
             "summary": summary,
             "champions": champions,
         }
     )
+
+
+@app.post("/api/v1/admin/system/model-health/repair")
+async def trigger_champion_repair(_admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
+    """Enqueues `predictions.repair_broken_champions` on the worker rather than running it inline
+    — a real repair sweep can cover every PRODUCTION market unconditionally and take well past any
+    reasonable HTTP request lifetime (Production Integrity Hardening, 2026-08-29: 40+ markets,
+    full candidate-roster training each). Returns immediately with a Celery task_id; poll
+    `GET /api/v1/admin/system/model-health` again afterward to see which markets moved to HEALTHY
+    — this is the first admin-triggered task enqueued rather than run inline in this file, so
+    there's no existing `AsyncResult`-polling endpoint to reuse yet."""
+    from modules.predictions.infrastructure.celery.tasks import repair_broken_champions_task
+
+    result = repair_broken_champions_task.delay(now_iso=_now().isoformat())
+    return envelope(data={"task_id": result.id, "status": "queued"})
 
 
 # Knowledge-graph single-entity lookup lives at GET /api/v1/graph/entities/{node_type}/{entity_ref}

@@ -667,3 +667,138 @@ class TestChallengerVsChampionComparison:
         assert len(outcomes) == 1
         assert outcomes[0].challenger is not None
         assert outcomes[0].comparison is None
+
+
+class TestRepairBrokenChampion:
+    """Real production incident, 2026-08-29: 40 of 53 PRODUCTION markets' registered CHAMPIONs
+    pointed at artifacts that were never actually durable — GET /api/v1/admin/system/model-health
+    catalogues exactly this. `repair_broken_champion` is the fix: retire the unusable row (if any)
+    and force a real bootstrap-style retrain+promote, with an independent post-registration reload
+    check standing in for the promotion-time artifact-integrity check `promote_to_champion`'s own
+    docstring flags as not yet enforced."""
+
+    async def test_repairs_a_champion_whose_artifact_is_missing_from_the_store(
+        self, orchestrator_with_comparison, market_repo, model_repo, prediction_repo, prediction_outcome_repo,
+    ):
+        market = await market_repo.upsert(_market())
+        broken = ModelDefinition(
+            id=ModelId(uuid4()), market_id=market.id, model_key=f"{market.market_key}.svm",
+            version=1, algorithm="svm", framework="sklearn", status=ModelStatus.CHAMPION,
+            artifact_ref="nowhere/v1.bin",  # never actually written to the artifact store
+        )
+        await model_repo.upsert(broken)
+        await _seed_outcomes(market, prediction_repo, prediction_outcome_repo, n=60)
+
+        outcome = await orchestrator_with_comparison.repair_broken_champion(market, T0, candidates=FAST_CANDIDATES)
+
+        assert outcome.skipped_reason is None
+        assert outcome.bootstrapped is True
+        assert outcome.challenger is not None
+
+        new_champion = await model_repo.get_champion(market.id)
+        assert new_champion is not None
+        assert new_champion.id == outcome.challenger.id
+        assert new_champion.artifact_ref is not None
+        assert new_champion.approved_by == "model-artifact-repair"
+
+        old = await model_repo.get(broken.id)
+        assert old.status is ModelStatus.RETIRED
+
+    async def test_repairs_a_market_with_no_champion_at_all(
+        self, orchestrator_with_comparison, market_repo, model_repo, prediction_repo, prediction_outcome_repo,
+    ):
+        market = await market_repo.upsert(_market())
+        assert await model_repo.get_champion(market.id) is None
+        await _seed_outcomes(market, prediction_repo, prediction_outcome_repo, n=60)
+
+        outcome = await orchestrator_with_comparison.repair_broken_champion(market, T0, candidates=FAST_CANDIDATES)
+
+        assert outcome.bootstrapped is True
+        champion = await model_repo.get_champion(market.id)
+        assert champion is not None
+        assert champion.id == outcome.challenger.id
+
+    async def test_preflight_failure_blocks_repair(
+        self, market_repo, model_repo, dataset_repo, prediction_repo, prediction_outcome_repo, artifact_store,
+    ):
+        market = await market_repo.upsert(_market())
+        broken = ModelDefinition(
+            id=ModelId(uuid4()), market_id=market.id, model_key=f"{market.market_key}.svm",
+            version=1, algorithm="svm", framework="sklearn", status=ModelStatus.CHAMPION,
+            artifact_ref="nowhere/v1.bin",
+        )
+        await model_repo.upsert(broken)
+        dataset_registry = DatasetRegistryService(datasets=dataset_repo)
+        orchestrator = ScheduledRetrainingOrchestrator(
+            markets=market_repo, models=model_repo,
+            scheduler=RetrainingScheduler(dataset_registry=dataset_registry),
+            dataset_builder=DatasetBuilder(markets=market_repo, predictions=prediction_repo, outcomes=prediction_outcome_repo),
+            dataset_registry=dataset_registry,
+            model_selection=AutomaticModelSelectionService(
+                training_pipeline=TrainingPipelineService(),
+                model_registry=ModelRegistryService(models=model_repo),
+                experiments=ExperimentTrackingService(experiments=_ExperimentRepoFake()),
+                artifact_store=artifact_store,
+            ),
+            preflight=_FakePreflight(ready=False),
+        )
+
+        outcome = await orchestrator.repair_broken_champion(market, T0, candidates=FAST_CANDIDATES)
+
+        assert outcome.skipped_reason is not None
+        assert "preflight failed" in outcome.skipped_reason
+        # Never touched — a blocked repair must never retire the (still broken, but at least
+        # present) existing row.
+        untouched = await model_repo.get(broken.id)
+        assert untouched.status is ModelStatus.CHAMPION
+
+    async def test_artifact_that_fails_to_reload_after_registration_is_never_promoted(
+        self, market_repo, model_repo, dataset_repo, prediction_repo, prediction_outcome_repo,
+    ):
+        """A save() that reports success is not proof of durability — the whole reason this
+        method exists is a real incident where exactly that assumption was wrong. A store whose
+        load() fails right after its own save() succeeded must leave the broken Champion retired
+        (repair attempted) but never promote the new, equally-unloadable Challenger."""
+
+        @dataclass
+        class _WriteOnlyArtifactStore:
+            async def save(self, key: str, payload: bytes) -> str:
+                return key
+
+            async def load(self, ref: str) -> bytes:
+                raise FileNotFoundError(f"never actually durable: {ref}")
+
+        market = await market_repo.upsert(_market())
+        broken = ModelDefinition(
+            id=ModelId(uuid4()), market_id=market.id, model_key=f"{market.market_key}.svm",
+            version=1, algorithm="svm", framework="sklearn", status=ModelStatus.CHAMPION,
+            artifact_ref="nowhere/v1.bin",
+        )
+        await model_repo.upsert(broken)
+        await _seed_outcomes(market, prediction_repo, prediction_outcome_repo, n=60)
+
+        write_only_store = _WriteOnlyArtifactStore()
+        dataset_registry = DatasetRegistryService(datasets=dataset_repo)
+        orchestrator = ScheduledRetrainingOrchestrator(
+            markets=market_repo, models=model_repo,
+            scheduler=RetrainingScheduler(dataset_registry=dataset_registry),
+            dataset_builder=DatasetBuilder(markets=market_repo, predictions=prediction_repo, outcomes=prediction_outcome_repo),
+            dataset_registry=dataset_registry,
+            model_selection=AutomaticModelSelectionService(
+                training_pipeline=TrainingPipelineService(),
+                model_registry=ModelRegistryService(models=model_repo),
+                experiments=ExperimentTrackingService(experiments=_ExperimentRepoFake()),
+                artifact_store=write_only_store,
+            ),
+            model_loader=ModelLoaderService(artifact_store=write_only_store),
+        )
+
+        outcome = await orchestrator.repair_broken_champion(market, T0, candidates=FAST_CANDIDATES)
+
+        assert outcome.skipped_reason is not None
+        assert "not promoted" in outcome.skipped_reason
+        # The broken row must still be exactly as it was — never retired for a repair that itself
+        # couldn't produce a genuinely loadable replacement.
+        still_broken = await model_repo.get(broken.id)
+        assert still_broken.status is ModelStatus.CHAMPION
+        assert await model_repo.get_champion(market.id) == still_broken

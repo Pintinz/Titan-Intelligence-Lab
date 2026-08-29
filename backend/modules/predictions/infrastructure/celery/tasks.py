@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from modules.ingestion.infrastructure.celery.celery_app import celery_app
 from modules.predictions.application.calibration_fitting_service import CalibrationFittingService
 from modules.predictions.application.calibration_validation_service import CalibrationValidationService
+from modules.predictions.application.model_health_audit_service import REPAIRABLE_STATUSES, ModelHealthAuditService
 from modules.predictions.application.scheduled_prediction_generation_orchestrator import (
     ScheduledPredictionGenerationOrchestrator,
 )
@@ -214,6 +215,10 @@ _CALIBRATION_VALIDATION_TASK_TIMEOUT_SECONDS = 1800  # heavy: comparably costly 
 # this is generously long relative to the real expected cost), and `beat_schedule.py`'s own
 # SCHEDULED_PREDICTION_GENERATION_INTERVAL_SECONDS (1 hour) leaves 4x headroom over it.
 _PREDICTION_GENERATION_TASK_TIMEOUT_SECONDS = 900
+# On-demand only (see repair_broken_champions_task) — a full sweep can cover every PRODUCTION
+# market unconditionally (no staleness gate narrows it, unlike the regular retraining task above),
+# so it's sized generously rather than against a Beat cadence it doesn't have.
+_REPAIR_TASK_TIMEOUT_SECONDS = 3600
 
 
 @celery_app.task(name="predictions.check_scheduled_prediction_generation", bind=True, **_RETRY_KWARGS)
@@ -278,6 +283,60 @@ def check_scheduled_retraining_task(self, now_iso: str | None = None) -> dict:
             }
 
     return asyncio.run(_do())
+
+
+@celery_app.task(name="predictions.repair_broken_champions", bind=True, **_RETRY_KWARGS)
+@_logged("predictions.repair_broken_champions")
+def repair_broken_champions_task(self, now_iso: str | None = None) -> dict:
+    """On-demand only — not on Beat's schedule. Real production incident, 2026-08-29:
+    `GET /api/v1/admin/system/model-health` found 40 of 53 PRODUCTION markets' registered
+    Champions pointed at artifacts that were never actually durable. Audits every PRODUCTION
+    market fresh (never trusts a prior run's result), then repairs only what's still actually
+    broken via `ScheduledRetrainingOrchestrator.repair_broken_champion` — already-healthy markets
+    are never touched, so a retry after a partial run or a timeout is safe and cheap, not a
+    wasteful full re-run."""
+
+    async def _do() -> dict:
+        async with _get_retraining_orchestrator() as orchestrator:
+            now = datetime.fromisoformat(now_iso) if now_iso else datetime.now(timezone.utc)
+            audit_service = ModelHealthAuditService(
+                markets=orchestrator.markets, models=orchestrator.models,
+                artifact_store=orchestrator.model_selection.artifact_store,
+            )
+            entries = await audit_service.audit_all_production_markets()
+            broken = [e for e in entries if e.status in REPAIRABLE_STATUSES]
+
+            results = []
+            for entry in broken:
+                try:
+                    outcome = await orchestrator.repair_broken_champion(entry.market, now)
+                except Exception as exc:  # noqa: BLE001 — one market's failure must never stop the batch
+                    results.append(
+                        {"market_key": entry.market.market_key, "was_status": entry.status, "repaired": False, "error": str(exc)}
+                    )
+                    continue
+                results.append(
+                    {
+                        "market_key": entry.market.market_key,
+                        "was_status": entry.status,
+                        "repaired": outcome.skipped_reason is None,
+                        "skipped_reason": outcome.skipped_reason,
+                        "new_champion_model_key": (
+                            outcome.challenger.model_key if outcome.skipped_reason is None and outcome.challenger else None
+                        ),
+                    }
+                )
+
+            return {
+                "total_production_markets": len(entries),
+                "already_healthy": sum(1 for e in entries if e.status == "HEALTHY"),
+                "attempted_repairs": len(broken),
+                "repaired": sum(1 for r in results if r["repaired"]),
+                "failed": sum(1 for r in results if not r["repaired"]),
+                "results": results,
+            }
+
+    return asyncio.run(asyncio.wait_for(_do(), timeout=_REPAIR_TASK_TIMEOUT_SECONDS))
 
 
 @celery_app.task(name="predictions.check_scheduled_calibration", bind=True, **_RETRY_KWARGS)

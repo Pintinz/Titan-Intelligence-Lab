@@ -85,6 +85,7 @@ from modules.predictions.ports.ml_model import TrainingSample
 from modules.predictions.ports.repositories import MarketRepositoryPort, ModelComparisonRepositoryPort, ModelRepositoryPort
 
 SYSTEM_APPROVER = "scheduled-retraining"
+SYSTEM_REPAIR_APPROVER = "model-artifact-repair"
 
 # Statistical-baseline charter, live wiring — a real, empirically-benchmarked
 # `FootballGoalsPoissonAdapter` candidate for each of the 12 football goals/score markets it
@@ -338,6 +339,98 @@ class ScheduledRetrainingOrchestrator:
 
         return RetrainingOutcome(
             market_key=market.market_key, should_retrain=True, reason=reason, challenger=challenger, bootstrapped=True
+        )
+
+    async def repair_broken_champion(
+        self, market: MarketDefinition, now: datetime, candidates: tuple[CandidateSpec, ...] | None = None
+    ) -> RetrainingOutcome:
+        """Forces a bootstrap-style retrain+promote for a market whose registered Champion exists
+        in the database but is provably unloadable — see `GET /api/v1/admin/system/model-health`
+        (real production incident, 2026-08-29: 40 of 53 PRODUCTION markets' Champions pointed at
+        artifacts that were never actually durable, only ever written to a training process's
+        local disk before it had Supabase Storage credentials). Retires the broken row first (if
+        one exists) so `promote_to_champion`'s comparison-requirement gate exempts this promotion
+        exactly the way it already exempts a market's genuine first-ever Champion — there is no
+        valid baseline to compare a repair against, only a row we already know is unusable.
+
+        Keeps every other real gate this orchestrator already enforces (preflight, dataset build/
+        validate/approve, the same additive Poisson/Dixon-Coles candidate injection every other
+        retrain path gets) and adds the one check `promote_to_champion`'s own docstring flags as
+        "scoped out, not overlooked": an independent, freshly-loaded reload of the just-registered
+        artifact — through a throwaway `ModelLoaderService`, never the shared serving cache —
+        before promotion. A repair that can't prove its own new artifact loads is never promoted;
+        the broken row it would have replaced stays retired regardless, so the market falls back
+        to the statistical baseline honestly rather than keep claiming a Champion that doesn't
+        work."""
+        broken_champion = await self.models.get_champion(market.id)
+
+        if self.preflight is not None:
+            report = await self.preflight.check(market.market_key, now)
+            if not report.ready:
+                blocking = ", ".join(f"{c.name}: {c.detail}" for c in report.blocking())
+                return RetrainingOutcome(
+                    market_key=market.market_key, should_retrain=True, reason="artifact repair",
+                    skipped_reason=f"preflight failed — {blocking}",
+                )
+
+        try:
+            dataset = await self._build_validate_approve_dataset(market, now)
+        except Exception as exc:  # noqa: BLE001 — isolate one market's failure from a batch repair run
+            return RetrainingOutcome(
+                market_key=market.market_key, should_retrain=True, reason="artifact repair",
+                skipped_reason=f"dataset build failed: {exc}",
+            )
+
+        effective_candidates = candidates
+        if candidates is None and market.market_key in POISSON_ELIGIBLE_MARKETS:
+            effective_candidates = DEFAULT_CLASSIFICATION_CANDIDATES + (POISSON_ELIGIBLE_MARKETS[market.market_key],)
+            if market.market_key in DIXON_COLES_ELIGIBLE_MARKETS:
+                effective_candidates = effective_candidates + (DIXON_COLES_ELIGIBLE_MARKETS[market.market_key],)
+
+        try:
+            next_version = await self._next_model_version(market)
+            challenger, _selection = await self.model_selection.select_and_register_challenger(
+                market_id=market.id, dataset=dataset, target_type=market.target_type,
+                model_key_prefix=market.market_key, next_version=next_version, now=now,
+                candidates=effective_candidates,
+            )
+        except Exception as exc:  # noqa: BLE001 — same isolation as the dataset-build path
+            return RetrainingOutcome(
+                market_key=market.market_key, should_retrain=True, reason="artifact repair",
+                skipped_reason=f"model selection failed: {exc}",
+            )
+
+        if self.model_loader is not None:
+            try:
+                verifier = ModelLoaderService(artifact_store=self.model_loader.artifact_store)
+                await verifier.load(
+                    challenger.id, challenger.framework, challenger.algorithm, market.target_type,
+                    challenger.artifact_ref, challenger.artifact_checksum,
+                )
+            except Exception as exc:  # noqa: BLE001 — the whole point of this check is to catch this, not raise it
+                return RetrainingOutcome(
+                    market_key=market.market_key, should_retrain=True, reason="artifact repair", challenger=challenger,
+                    skipped_reason=f"post-registration artifact reload failed, not promoted: {exc}",
+                )
+
+        if broken_champion is not None:
+            await self.model_selection.model_registry.retire(broken_champion.id, now)
+
+        try:
+            await self.model_selection.model_registry.promote_to_champion(
+                challenger.id, approved_by=SYSTEM_REPAIR_APPROVER, now=now
+            )
+        except Exception as exc:  # noqa: BLE001 — a promotion failure still leaves a real, reviewable
+            # CHALLENGER registered (and the broken champion already retired); report it rather
+            # than silently leaving the market in an ambiguous state.
+            return RetrainingOutcome(
+                market_key=market.market_key, should_retrain=True, reason="artifact repair", challenger=challenger,
+                skipped_reason=f"promotion failed: {exc}",
+            )
+
+        return RetrainingOutcome(
+            market_key=market.market_key, should_retrain=True, reason="artifact repair", challenger=challenger,
+            bootstrapped=True,
         )
 
     async def _compare_against_champion(
