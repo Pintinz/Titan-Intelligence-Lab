@@ -127,20 +127,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="TitanIQ API", version="0.1.0", lifespan=lifespan)
 
-# CORS: the frontend (Milestone 10) is a separate origin (Vite dev server / deployed static host),
-# so the browser needs an explicit allowlist — no API route below authenticates via cookies, only
-# a Bearer token in the Authorization header, so allow_credentials is not required for that path
-# but is enabled for future cookie-based flows (e.g. Supabase's SSR helpers) without another change.
-_default_origins = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000"
-_cors_origins = [origin.strip() for origin in os.environ.get("TITANIQ_CORS_ORIGINS", _default_origins).split(",") if origin.strip()]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 
 _DOCS_PATHS = {"/docs", "/redoc", "/openapi.json"}
 
@@ -183,6 +169,31 @@ async def security_headers(request: Request, call_next):
         response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
+
+
+# CORS: the frontend (Milestone 10) is a separate origin (Vite dev server / deployed static host),
+# so the browser needs an explicit allowlist — no API route below authenticates via cookies, only
+# a Bearer token in the Authorization header, so allow_credentials is not required for that path
+# but is enabled for future cookie-based flows (e.g. Supabase's SSR helpers) without another change.
+#
+# Registered AFTER `security_headers` deliberately (real bug, 2026-08-29): Starlette wraps
+# middleware in reverse registration order — the last-added middleware becomes outermost. With
+# CORSMiddleware added before security_headers, security_headers wrapped OUTSIDE it, so its
+# rate-limit rejection (a raw JSONResponse returned without calling call_next()) never passed
+# through CORSMiddleware and shipped with no Access-Control-Allow-Origin header at all. A browser
+# can't distinguish "no CORS header" from "server unreachable", so a legitimate admin exceeding
+# the 120 req/60s admin-API limit saw every subsequent request reported as a CORS/network failure
+# instead of the real 429. Registering CORSMiddleware last makes it the outermost layer, so its
+# headers reach every response this app returns, short-circuited or not.
+_default_origins = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000"
+_cors_origins = [origin.strip() for origin in os.environ.get("TITANIQ_CORS_ORIGINS", _default_origins).split(",") if origin.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 app.include_router(public_router.router)
