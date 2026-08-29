@@ -25,8 +25,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.rate_limit import enforce_ip_rate_limit
 from modules.intelligence.infrastructure.persistence.models import NewsArticleModel as _NewsArticleModel
+from modules.predictions.domain.value_objects import MarketStatus as _MarketStatus
+from modules.predictions.infrastructure.ml.model_loader import (
+    ArtifactIntegrityError,
+    ModelLoaderService,
+    UnknownModelFrameworkError,
+)
+from modules.predictions.infrastructure.ml.supabase_artifact_store import ArtifactStoreError
 from modules.predictions.infrastructure.persistence.models import ModelDefinitionModel as _ModelDefinitionModel
 from modules.predictions.infrastructure.persistence.models import PredictionModel as _PredictionModel
+from modules.predictions.infrastructure.persistence.repositories import (
+    SqlAlchemyMarketRepository as _SqlAlchemyMarketRepository,
+    SqlAlchemyModelRepository as _SqlAlchemyModelRepository,
+)
 from modules.sports.infrastructure.persistence.database import Environment, get_database_settings, get_environment
 from modules.sports.infrastructure.persistence.models import FixtureModel as _FixtureModel
 from apps.api.routers import (
@@ -64,6 +75,7 @@ from apps.api.composition import (
     build_provider_management_service,
     build_sync_orchestrator,
     get_football_data_org_adapter,
+    get_model_artifact_store,
     get_redis_client,
     get_session,
     PROVIDER_KEY_BY_SPORT,
@@ -2076,6 +2088,82 @@ async def database_status(session: AsyncSession = Depends(get_session), _admin: 
             "latest_prediction_generated_at": latest_prediction,
             "latest_model_created_at": latest_model,
             "latest_news_fetched_at": latest_news,
+        }
+    )
+
+
+@app.get("/api/v1/admin/system/model-health")
+async def model_health(session: AsyncSession = Depends(get_session), _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
+    """Real-time Champion artifact audit (Production Integrity Hardening, 2026-08-29) — a
+    registry row saying CHAMPION is not evidence the artifact it points at is actually loadable;
+    a real production incident the same day (several football markets' artifacts silently
+    missing from Supabase Storage) took manual log archaeology to even enumerate. Runs
+    `ModelLoaderService.load()` — the exact same fetch/checksum/deserialize path a real
+    prediction request takes — against every PRODUCTION market's Champion, through a throwaway
+    loader instance (never the shared serving cache), so this is read-only: no Champion status,
+    cache entry, or DB row is ever touched by running this audit.
+    """
+    markets_repo = _SqlAlchemyMarketRepository(session=session)
+    models_repo = _SqlAlchemyModelRepository(session=session)
+    loader = ModelLoaderService(artifact_store=get_model_artifact_store())
+
+    markets = await markets_repo.list_by_status(_MarketStatus.PRODUCTION)
+    champions: list[dict] = []
+
+    for market in markets:
+        champion = await models_repo.get_champion(market.id)
+        if champion is None:
+            champions.append({"market_key": market.market_key, "status": "NO_CHAMPION"})
+            continue
+        if not champion.is_genuinely_trained():
+            champions.append(
+                {
+                    "market_key": market.market_key,
+                    "model_id": str(champion.id.value),
+                    "algorithm": champion.algorithm,
+                    "status": "INVALID_CHAMPION",
+                    "detail": "placeholder/never-trained Champion (artifact_ref is None)",
+                }
+            )
+            continue
+
+        entry = {
+            "market_key": market.market_key,
+            "model_id": str(champion.id.value),
+            "version": champion.version,
+            "algorithm": champion.algorithm,
+            "framework": champion.framework,
+            "artifact_ref": champion.artifact_ref,
+            "promoted_at": champion.promoted_at.isoformat() if champion.promoted_at else None,
+        }
+        try:
+            await loader.load(
+                champion.id, champion.framework, champion.algorithm, market.target_type,
+                champion.artifact_ref, champion.artifact_checksum,
+            )
+            entry["status"] = "HEALTHY"
+        except ArtifactIntegrityError as exc:
+            entry["status"], entry["error"] = "CORRUPT_ARTIFACT", str(exc)
+        except ArtifactStoreError as exc:
+            entry["status"], entry["error"] = "MISSING_ARTIFACT", str(exc)
+        except FileNotFoundError as exc:
+            entry["status"], entry["error"] = "LEGACY_LOCAL_ONLY", str(exc)
+        except UnknownModelFrameworkError as exc:
+            entry["status"], entry["error"] = "UNKNOWN_FAILURE", str(exc)
+        except Exception as exc:  # noqa: BLE001 — this endpoint's whole job is to catalogue every failure, not raise one
+            entry["status"], entry["error"] = "RUNTIME_LOAD_FAILED", str(exc)
+        champions.append(entry)
+
+    summary: dict[str, int] = {}
+    for c in champions:
+        summary[c["status"]] = summary.get(c["status"], 0) + 1
+
+    return envelope(
+        data={
+            "checked_at": _now().isoformat(),
+            "total_production_markets": len(markets),
+            "summary": summary,
+            "champions": champions,
         }
     )
 

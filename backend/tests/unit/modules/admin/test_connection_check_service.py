@@ -12,8 +12,10 @@ from modules.admin.application.connection_check_service import (
 )
 from modules.admin.application.health_intelligence_engine import HealthIntelligenceEngine
 from modules.admin.application.provider_management_service import ProviderManagementService
-from modules.admin.domain.entities import ProviderDefinition
-from modules.admin.domain.value_objects import ProviderCategory, ProviderId, ProviderStatus
+from modules.admin.domain.entities import ProviderCredential, ProviderDefinition
+from modules.admin.domain.value_objects import CredentialId, ProviderCategory, ProviderId, ProviderStatus
+from modules.admin.infrastructure.connection_tester import ConnectionTestStatus
+from modules.admin.infrastructure.vault import DecryptionError
 
 T0 = datetime(2026, 8, 2, tzinfo=timezone.utc)
 
@@ -112,3 +114,43 @@ async def test_check_provider_connection_leaves_note_untouched_when_shape_unreco
     updated = await provider_repo.get(provider.id)
     assert updated.capability_note is None
     assert updated.capability_checked_at is None
+
+
+@pytest.mark.asyncio
+async def test_undecryptable_credential_is_a_classified_failure_not_a_crash(
+    provider_repo, credential_repo, vault, health_repo, health_state_repo, incident_repo, usage_repo, monkeypatch,
+):
+    """Real production incident (2026-08-29): a credential ciphertext that no longer matches the
+    active TITANIQ_ENCRYPTION_KEY (api_football, then Gemini — both hit this) previously crashed
+    this function with an unhandled DecryptionError, which surfaced to the browser as a generic
+    CORS/network failure rather than the real, specific, actionable error. Must degrade to a
+    classified ConnectionTestResult instead — never raise."""
+    provider = ProviderDefinition(
+        id=ProviderId(uuid4()), key="gemini", name="Gemini API", category=ProviderCategory.AI,
+        status=ProviderStatus.ACTIVE, base_url="https://generativelanguage.googleapis.com", auth_type="api_key_query",
+    )
+    await provider_repo.upsert(provider)
+    await credential_repo.upsert(
+        ProviderCredential(id=CredentialId(uuid4()), provider_id=provider.id, label="primary", encrypted_value="enc:whatever")
+    )
+
+    def _broken_decrypt(ciphertext: str) -> str:
+        raise DecryptionError("credential ciphertext is invalid or was encrypted with a different key")
+
+    monkeypatch.setattr(vault, "decrypt", _broken_decrypt)
+
+    service = ProviderManagementService(providers=provider_repo, credentials=credential_repo, vault=vault)
+    engine = HealthIntelligenceEngine(
+        health=health_repo, health_state=health_state_repo, incidents=incident_repo, usage=usage_repo,
+    )
+
+    result = await check_provider_connection(service, engine, provider.id, T0)
+
+    assert result.status is ConnectionTestStatus.UNAUTHORIZED
+    assert result.success is False
+    assert "decryption failed" in result.message
+    # The shared health/incident recording path must still run for this failure, same as any
+    # other classified failure — a crash previously skipped it entirely.
+    checks = await health_repo.list_recent(provider.id)
+    assert len(checks) == 1
+    assert checks[0].success is False

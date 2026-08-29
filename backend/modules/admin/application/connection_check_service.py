@@ -21,6 +21,7 @@ from modules.admin.infrastructure.connection_tester import (
     test_connection,
     test_oauth2_client_credentials,
 )
+from modules.admin.infrastructure.vault import DecryptionError
 
 
 def _extract_capability_note(raw_body: dict | None) -> str | None:
@@ -60,27 +61,45 @@ async def check_provider_connection(
 
     usable = await service.usable_credentials(provider_id)
 
-    if provider.auth_type == "oauth2_client_credentials":
-        # Two paired credential values, not one — picked by label rather than "the first active
-        # credential" (that convention only makes sense for the single-value auth types below).
-        client_id_cred = next((c for c in usable if normalize_credential_label(c.label) == "client_id"), None)
-        client_secret_cred = next((c for c in usable if normalize_credential_label(c.label) == "client_secret"), None)
-        client_id = await service.reveal_plaintext(client_id_cred.id) if client_id_cred else None
-        client_secret = await service.reveal_plaintext(client_secret_cred.id) if client_secret_cred else None
-        result = await test_oauth2_client_credentials(
-            token_url=provider.base_url,
-            client_id=client_id,
-            client_secret=client_secret,
-            timeout_seconds=provider.timeout_seconds,
-        )
-    else:
-        plaintext = await service.reveal_plaintext(usable[0].id) if usable else None
-        result = await test_connection(
-            base_url=provider.base_url,
-            auth_type=provider.auth_type,
-            credential=plaintext,
-            header_name=provider.auth_header_name,
-            timeout_seconds=provider.timeout_seconds,
+    try:
+        if provider.auth_type == "oauth2_client_credentials":
+            # Two paired credential values, not one — picked by label rather than "the first
+            # active credential" (that convention only makes sense for the single-value auth
+            # types below).
+            client_id_cred = next((c for c in usable if normalize_credential_label(c.label) == "client_id"), None)
+            client_secret_cred = next((c for c in usable if normalize_credential_label(c.label) == "client_secret"), None)
+            client_id = await service.reveal_plaintext(client_id_cred.id) if client_id_cred else None
+            client_secret = await service.reveal_plaintext(client_secret_cred.id) if client_secret_cred else None
+            result = await test_oauth2_client_credentials(
+                token_url=provider.base_url,
+                client_id=client_id,
+                client_secret=client_secret,
+                timeout_seconds=provider.timeout_seconds,
+            )
+        else:
+            plaintext = await service.reveal_plaintext(usable[0].id) if usable else None
+            result = await test_connection(
+                base_url=provider.base_url,
+                auth_type=provider.auth_type,
+                credential=plaintext,
+                header_name=provider.auth_header_name,
+                timeout_seconds=provider.timeout_seconds,
+            )
+    except DecryptionError as exc:
+        # Real incident (2026-08-29): this was previously unguarded, so a credential whose
+        # ciphertext doesn't match the currently-active TITANIQ_ENCRYPTION_KEY (api_football, then
+        # Gemini — both hit the exact same DecryptionError at reveal_plaintext) crashed this
+        # endpoint with an unhandled 500. Starlette's ServerErrorMiddleware sits OUTSIDE every
+        # user-added middleware including CORSMiddleware, so that 500 shipped with no CORS headers
+        # at all — the browser reported it as a generic "CORS/network failure", not the real,
+        # specific, actionable error underneath. Converted into an honest, classified
+        # ConnectionTestResult instead: still recorded by `engine.record_check` below like any
+        # other failure, and — critically — a clean JSON response like every other result this
+        # function returns, so it always carries correct CORS headers regardless of which provider
+        # or failure mode produced it.
+        result = ConnectionTestResult(
+            status=ConnectionTestStatus.UNAUTHORIZED, latency_ms=None, http_status=None,
+            message=f"credential decryption failed: {exc} — re-save the credential to fix",
         )
     if result.status is not ConnectionTestStatus.NOT_CONFIGURED:
         await engine.record_check(provider_id, now, result.success, latency_ms=result.latency_ms, message=result.message)
