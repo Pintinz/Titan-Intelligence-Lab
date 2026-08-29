@@ -7,10 +7,12 @@ docs/api_specification.md's route groups land as their owning modules are built
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 
 import os
 
@@ -18,10 +20,15 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.rate_limit import enforce_ip_rate_limit
+from modules.intelligence.infrastructure.persistence.models import NewsArticleModel as _NewsArticleModel
+from modules.predictions.infrastructure.persistence.models import ModelDefinitionModel as _ModelDefinitionModel
+from modules.predictions.infrastructure.persistence.models import PredictionModel as _PredictionModel
+from modules.sports.infrastructure.persistence.database import Environment, get_database_settings, get_environment
+from modules.sports.infrastructure.persistence.models import FixtureModel as _FixtureModel
 from apps.api.routers import (
     alerts_router,
     billing_router,
@@ -121,6 +128,20 @@ logger = logging.getLogger("titaniq.api")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("TitanIQ API starting — Milestone 3 (Provider Foundation + Health Intelligence)")
+    # Real incident (2026-08-29): which database a running process was actually talking to took a
+    # live dashboard/log investigation to answer, because nothing printed it anywhere at startup.
+    # Never logs the connection string itself — see database_status()'s _mask_db_host for the same
+    # masking rule applied here.
+    settings = get_database_settings()
+    environment = get_environment()
+    engine_kind = "sqlite" if settings.url.startswith("sqlite") else "postgresql"
+    logger.info(
+        "TitanIQ Environment: %s | Database: %s | Database Host: %s | SQLite fallback: %s",
+        environment.value.upper(),
+        engine_kind,
+        _mask_db_host(settings.url),
+        "DISABLED" if environment is not Environment.DEVELOPMENT else "enabled (development only)",
+    )
     yield
     logger.info("TitanIQ API shutting down")
 
@@ -1984,6 +2005,77 @@ async def get_worker_health(session: AsyncSession = Depends(get_session), _admin
             "worker_names": list(report.worker_names),
             "active_task_counts": report.active_task_counts,
             "error": report.error,
+        }
+    )
+
+
+def _mask_db_host(url: str) -> str:
+    """Never the credentials, never the full connection string — just enough to answer "which
+    database, roughly" (Production Readiness Audit-style incident, 2026-08-29: distinguishing a
+    real production Supabase host from a stale one took reading a raw connection string in a
+    dashboard DOM, which is exactly the kind of ad-hoc credential exposure this endpoint exists to
+    make unnecessary). Shows only the last two DNS labels, prefixed with asterisks."""
+    try:
+        host = urlsplit(url.replace("+asyncpg", "").replace("+aiosqlite", "")).hostname
+    except ValueError:
+        return "unknown"
+    if not host:
+        return "n/a (sqlite)"
+    labels = host.split(".")
+    return "*****." + ".".join(labels[-2:]) if len(labels) > 2 else host
+
+
+@app.get("/api/v1/admin/system/database-status")
+async def database_status(session: AsyncSession = Depends(get_session), _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
+    """Answers, in one place and without an operator ever needing to read a raw connection string,
+    the exact question a 2026-08-29 incident took an hour of live dashboard/log spelunking to
+    answer: which environment is this process, which real database is it talking to, and is the
+    data flowing through it actually current — never exposing the connection string, password, or
+    any other secret itself."""
+    settings = get_database_settings()
+    dialect = session.bind.dialect.name if session.bind is not None else "unknown"
+
+    connectivity = "healthy"
+    try:
+        await session.execute(text("SELECT 1"))
+    except Exception:  # noqa: BLE001 — this endpoint's job is to report a failure, not raise one
+        connectivity = "unhealthy"
+
+    migration_revision = None
+    try:
+        version_table = "alembic_version" if dialect == "sqlite" else "sports.alembic_version"
+        row = (await session.execute(text(f"SELECT version_num FROM {version_table}"))).first()  # noqa: S608 — version_table is one of two fixed internal literals, never user input
+        migration_revision = row[0] if row else None
+    except Exception:  # noqa: BLE001
+        migration_revision = None
+
+    async def _latest(model, column_name: str) -> str | None:
+        try:
+            column = getattr(model, column_name)
+            value = (await session.execute(select(func.max(column)))).scalar()
+            return value.isoformat() if value else None
+        except Exception:  # noqa: BLE001 — one stat's failure must never blacken the whole report
+            return None
+
+    latest_fixture, latest_prediction, latest_model, latest_news = await asyncio.gather(
+        _latest(_FixtureModel, "updated_at"),
+        _latest(_PredictionModel, "generated_at"),
+        _latest(_ModelDefinitionModel, "created_at"),
+        _latest(_NewsArticleModel, "fetched_at"),
+    )
+
+    return envelope(
+        data={
+            "environment": get_environment().value,
+            "database_engine": "postgresql" if dialect != "sqlite" else "sqlite",
+            "database_host": _mask_db_host(settings.url),
+            "connectivity": connectivity,
+            "migration_revision": migration_revision,
+            "sqlite_fallback_disabled": get_environment() is not Environment.DEVELOPMENT,
+            "latest_fixture_updated_at": latest_fixture,
+            "latest_prediction_generated_at": latest_prediction,
+            "latest_model_created_at": latest_model,
+            "latest_news_fetched_at": latest_news,
         }
     )
 

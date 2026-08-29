@@ -47,6 +47,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from apps.api.composition import get_engine
+from scripts.production_safety_guard import require_confirmation_outside_development
 from modules.predictions.application.model_registry_service import ModelAlreadyRegisteredError, ModelRegistryService
 from modules.predictions.application.outcome_label_mapper import MARKET_OUTCOME_LABELS
 from modules.predictions.application.outcome_resolution_service import (
@@ -180,6 +181,7 @@ async def _feature_value_as_of(session, feature_key: str, dashed: str, cutoff: d
 
 
 async def main() -> None:
+    require_confirmation_outside_development(__file__)
     session_factory = async_sessionmaker(get_engine(), expire_on_commit=False)
     async with session_factory() as session:
         markets_repo = SqlAlchemyMarketRepository(session=session)

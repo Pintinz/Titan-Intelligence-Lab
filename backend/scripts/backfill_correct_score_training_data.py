@@ -47,6 +47,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from apps.api.composition import get_engine
+from scripts.production_safety_guard import require_confirmation_outside_development
 from modules.predictions.domain.entities import ConfidenceBreakdown, ExplanationBundle, Prediction, PredictionOutcome
 from modules.predictions.domain.value_objects import ModelId, PredictionId, PredictionOutcomeId, PredictionStatus
 from modules.predictions.infrastructure.persistence.repositories import (
@@ -77,6 +78,7 @@ def _bucket_scoreline(home_score: int, away_score: int, allowed_values: tuple[st
 
 
 async def main() -> None:
+    require_confirmation_outside_development(__file__)
     session_factory = async_sessionmaker(get_engine(), expire_on_commit=False)
     async with session_factory() as session:
         markets = SqlAlchemyMarketRepository(session=session)

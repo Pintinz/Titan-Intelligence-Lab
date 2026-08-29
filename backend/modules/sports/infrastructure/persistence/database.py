@@ -4,13 +4,37 @@ config, per docs/architecture.md §10) rather than defaulting silently to a loca
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
+from enum import Enum
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import Pool
+
+
+class Environment(str, Enum):
+    """`TITANIQ_ENVIRONMENT` — absent anywhere in this codebase before 2026-08-29, the exact gap
+    that let a staging deployment be mistaken for production and a local script be run without
+    anyone being able to check, in code, which database it was actually about to touch."""
+
+    DEVELOPMENT = "development"
+    STAGING = "staging"
+    PRODUCTION = "production"
+
+
+def get_environment() -> Environment:
+    """Defaults to DEVELOPMENT — the same "fail toward the safer, more restrictive local
+    default" posture `DatabaseSettings.url` already has (required, no default), not toward the
+    default that would silently grant production-level trust to an unconfigured process."""
+    raw = os.environ.get("TITANIQ_ENVIRONMENT", "development").strip().lower()
+    try:
+        return Environment(raw)
+    except ValueError:
+        valid = ", ".join(e.value for e in Environment)
+        raise RuntimeError(f"TITANIQ_ENVIRONMENT={raw!r} is not one of: {valid}") from None
 
 
 class DatabaseSettings(BaseSettings):
@@ -50,6 +74,23 @@ class DatabaseSettings(BaseSettings):
         if value.startswith("postgresql://"):
             return "postgresql+asyncpg://" + value[len("postgresql://") :]
         return value
+
+    @model_validator(mode="after")
+    def _no_sqlite_outside_development(self) -> "DatabaseSettings":
+        """The fail-fast this module's own docstring already claimed but never actually enforced
+        beyond "TITANIQ_DB_URL must be set to *something*" — a staging or production process
+        pointed at sqlite (by a copy-pasted local .env, an unset TITANIQ_DB_URL falling through to
+        some other default, etc.) previously started up successfully and served real traffic
+        against a throwaway local file. Scoped to TITANIQ_ENVIRONMENT, not a database-type ban:
+        local development against sqlite (docs/deployment.md §1's documented zero-Postgres-needed
+        default) is unaffected."""
+        if self.url.startswith("sqlite") and get_environment() is not Environment.DEVELOPMENT:
+            raise RuntimeError(
+                f"TITANIQ_ENVIRONMENT={get_environment().value!r} but TITANIQ_DB_URL points at "
+                "sqlite — refusing to start. A staging or production process must never silently "
+                "serve real traffic against a local throwaway database."
+            )
+        return self
 
 
 @lru_cache

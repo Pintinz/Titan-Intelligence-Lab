@@ -48,6 +48,7 @@ from apps.api.composition import (
 from modules.ingestion.application.data_validation_engine import DataValidationEngine
 from modules.sports.domain.value_objects import ProviderRef, TeamId
 from modules.sports.infrastructure.providers.mock_provider import MockSportsDataProvider
+from scripts.production_safety_guard import require_confirmation_outside_development
 
 # (canonical api-football name, duplicate football-data.org name) — the 3 pairs the logo backfill
 # (2026-08-04) surfaced. Extend this list if a future sync creates another unmapped duplicate.
@@ -74,6 +75,7 @@ TEAM_FK_COLUMNS: tuple[tuple[str, str], ...] = (
 
 
 async def main() -> None:
+    require_confirmation_outside_development(__file__)
     session_factory = async_sessionmaker(get_engine(), expire_on_commit=False)
     async with session_factory() as session:
         now = datetime.now(timezone.utc)

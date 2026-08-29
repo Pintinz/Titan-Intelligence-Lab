@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from apps.api.composition import build_scheduled_retraining_orchestrator, get_engine
+from scripts.production_safety_guard import require_confirmation_outside_development
 from modules.predictions.application.scheduled_retraining_orchestrator import (
     DEFAULT_CLASSIFICATION_CANDIDATES,
     DIXON_COLES_ELIGIBLE_MARKETS,
@@ -125,6 +126,7 @@ async def run_one(orchestrator, markets_repo, market_key: str, now: datetime) ->
 
 
 async def main() -> None:
+    require_confirmation_outside_development(__file__)
     session_factory = async_sessionmaker(get_engine(), expire_on_commit=False)
     results = []
     for market_key in MARKET_KEYS:

@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from apps.api.composition import build_scheduled_retraining_orchestrator, get_engine
+from scripts.production_safety_guard import require_confirmation_outside_development
 from modules.predictions.application.scheduled_retraining_orchestrator import (
     DEFAULT_CLASSIFICATION_CANDIDATES,
     DIXON_COLES_ELIGIBLE_MARKETS,
@@ -39,6 +40,7 @@ APPROVED_BY = "claude-agent (user-authorized full pipeline, 2026-08-27)"
 
 
 async def main() -> None:
+    require_confirmation_outside_development(__file__)
     session_factory = async_sessionmaker(get_engine(), expire_on_commit=False)
     async with session_factory() as session:
         orchestrator = build_scheduled_retraining_orchestrator(session)
