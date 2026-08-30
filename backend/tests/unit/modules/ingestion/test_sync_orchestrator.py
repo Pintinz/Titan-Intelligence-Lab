@@ -1571,3 +1571,43 @@ async def test_a_hang_in_unprotected_post_loop_bookkeeping_is_still_bounded_and_
     assert run.status is SyncStatus.FAILED
     assert run.error_message is not None and "timed out" in run.error_message.lower()
     assert lock_key not in lock.held  # the lock was released, not left stuck forever
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_rolls_back_the_shared_session_before_reusing_it(monkeypatch, orchestrator, session):
+    """Real production incident, 2026-08-30, live-verified via worker logs: cancelling an
+    in-flight DB call (exactly what a timeout does) can leave the shared AsyncSession's
+    transaction in SQLAlchemy's "invalid, must rollback before reuse" state — confirmed live as a
+    `PendingRollbackError` cascading through every subsequent write on the same session, including
+    inside `_fail`'s own bookkeeping (which every timeout path calls). This proves the rollback
+    actually fires before `_fail` touches the session again."""
+    import asyncio
+
+    import modules.ingestion.application.sync_orchestrator as sync_orchestrator_module
+
+    monkeypatch.setattr(sync_orchestrator_module, "FETCH_TIMEOUT_SECONDS", 0.05)
+
+    rollback_calls = []
+    real_rollback = orchestrator.sync_runs.session.rollback
+
+    async def spy_rollback():
+        rollback_calls.append(True)
+        await real_rollback()
+
+    monkeypatch.setattr(orchestrator.sync_runs.session, "rollback", spy_rollback)
+
+    async def fetch():
+        await asyncio.sleep(999)  # simulates the real incident: an unbounded hang
+
+    async def process_one(record):
+        raise AssertionError("unreachable — fetch() never returns")  # pragma: no cover
+
+    run = await orchestrator._run_sync(
+        "football", EntityKind.COUNTRY, "rollback-test", SyncTrigger.SCHEDULED, T0,
+        fetch=fetch, process_one=process_one,
+    )
+    await session.commit()
+
+    assert len(rollback_calls) == 1  # rolled back exactly once, before _fail's own writes
+    assert run is not None
+    assert run.status is SyncStatus.FAILED  # _fail's writes succeeded — the rollback actually worked

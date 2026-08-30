@@ -211,6 +211,14 @@ class SyncOrchestrator:
                     extra={"sport_code": sport_code, "entity_kind": entity_kind.value, "scope_key": scope_key},
                     exc_info=True,
                 )
+                # Real production incident, 2026-08-30: cancelling fetch() mid-flight (this is
+                # exactly what a timeout does) can leave the shared session's transaction invalid
+                # if fetch() itself touched the DB (e.g. resolving a provider's decrypted API key)
+                # before being cut off — every subsequent call on this same session then raises
+                # `PendingRollbackError` instead of the real error, cascading into every retry and
+                # even unrelated later tasks sharing the same worker process. Must roll back before
+                # `_fail` below does its own writes on this same session.
+                await self._rollback_session()
                 # asyncio.wait_for's TimeoutError carries no message of its own (str(exc) == "") —
                 # an admin reading the SyncRun row later would see a genuinely empty error_message,
                 # exactly the kind of unhelpful gap the 2026-08-27 incident above already fixed
@@ -234,6 +242,7 @@ class SyncOrchestrator:
                             "timeout_seconds": RECORD_PROCESSING_TIMEOUT_SECONDS,
                         },
                     )
+                    await self._rollback_session()  # same PendingRollbackError risk as fetch() above
                     outcome = RecordOutcome(rejected=True)
                 if outcome.created:
                     run.records_created += 1
@@ -290,12 +299,28 @@ class SyncOrchestrator:
                         "timeout_seconds": lock_ttl_seconds,
                     },
                 )
+                await self._rollback_session()  # same PendingRollbackError risk as the inner timeouts above
                 return await self._fail(
                     run, checkpoint, sport_code, entity_kind, scope_key, now,
                     f"sync run timed out after {lock_ttl_seconds}s (lock TTL exceeded)",
                 )
         finally:
             await self.lock.release(lock_key)
+
+    async def _rollback_session(self) -> None:
+        """Real production incident, 2026-08-30: cancelling an in-flight DB call (exactly what
+        every `asyncio.wait_for` timeout above does) can leave the shared AsyncSession's
+        transaction in SQLAlchemy's "invalid, must rollback before reuse" state — confirmed live,
+        via a `PendingRollbackError` cascading through every subsequent write on the same session,
+        including inside `_fail`'s own bookkeeping. All repositories on this orchestrator share
+        one session (built once per task by `_get_orchestrator`'s factory), so rolling back via
+        any one of them clears it for all. Never raises: a rollback failing here must not mask the
+        real timeout that triggered it, and the worst case (a still-broken session) is exactly the
+        pre-fix behavior, not a new regression."""
+        try:
+            await self.sync_runs.session.rollback()
+        except Exception:  # noqa: BLE001 — see docstring: must never mask the real timeout
+            logger.error("sync_orchestrator.session_rollback_failed", exc_info=True)
 
     async def _fail(self, run, checkpoint, sport_code, entity_kind, scope_key, now, error_message) -> SyncRun:
         run.mark_failed(now, error_message)
