@@ -91,6 +91,38 @@ def test_requires_authentication(client):
     assert response.status_code in (401, 403)
 
 
+def test_dead_letters_requires_authentication(client):
+    del client.headers["Authorization"]
+    response = client.get("/api/v1/admin/system/dead-letters")
+    assert response.status_code in (401, 403)
+
+
+def test_dead_letters_returns_entries_from_the_dlq(client, monkeypatch):
+    """A real Celery task that exhausted its retries writes here (`task_failure` signal handler,
+    `celery_app.py`) — this admin view exists so an on-demand-triggered task's silent failure
+    (`.delay()` only ever returns a task_id, never the eventual outcome) can be diagnosed without
+    direct Redis or worker-log access."""
+    import fakeredis
+
+    import modules.ingestion.infrastructure.celery.dead_letter as dead_letter_module
+
+    fake_client = fakeredis.FakeRedis(decode_responses=True)
+    dead_letter_module.record_dead_letter(
+        task_name="predictions.repair_correct_score_feature_requirements", task_id="abc-123",
+        args=[], kwargs={"now_iso": "2026-08-30T00:00:00+00:00"}, error="RuntimeError: something failed",
+        client=fake_client,
+    )
+    monkeypatch.setattr(dead_letter_module, "_client", lambda: fake_client)
+
+    response = client.get("/api/v1/admin/system/dead-letters")
+
+    assert response.status_code == 200
+    entries = response.json()["data"]
+    assert len(entries) == 1
+    assert entries[0]["task_name"] == "predictions.repair_correct_score_feature_requirements"
+    assert entries[0]["error"] == "RuntimeError: something failed"
+
+
 def test_market_with_no_champion_is_reported_honestly(client, db_session_factory):
     async def seed():
         async with db_session_factory() as session:

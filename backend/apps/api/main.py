@@ -2108,6 +2108,19 @@ async def database_status(session: AsyncSession = Depends(get_session), _admin: 
     )
 
 
+@app.get("/api/v1/admin/system/dead-letters")
+async def dead_letters(limit: int = 50, _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
+    """Read-only view of `dlq:sync_tasks` (`modules.ingestion.infrastructure.celery.dead_letter`)
+    — every Celery task that exhausted its retries, recorded by the `task_failure` signal handler
+    in `celery_app.py`. Built this way round (admin-triggered task fails silently from an HTTP
+    caller's perspective — `.delay()` only ever returns a task_id, never the eventual outcome) so
+    a stuck on-demand repair/retrain trigger can actually be diagnosed without direct Redis or
+    worker-log access."""
+    from modules.ingestion.infrastructure.celery.dead_letter import list_dead_letters
+
+    return envelope(data=list_dead_letters(limit=limit))
+
+
 @app.get("/api/v1/admin/system/model-health")
 async def model_health(session: AsyncSession = Depends(get_session), _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
     """Real-time Champion artifact audit (Production Integrity Hardening, 2026-08-29) — a
@@ -2169,6 +2182,33 @@ async def trigger_correct_score_feature_repair(_admin: _AuthUser = Depends(requi
     from modules.predictions.infrastructure.celery.tasks import repair_correct_score_feature_requirements_task
 
     result = repair_correct_score_feature_requirements_task.delay(now_iso=_now().isoformat())
+    return envelope(data={"task_id": result.id, "status": "queued"})
+
+
+@app.post("/api/v1/admin/system/retraining/check-all")
+async def trigger_retraining_check_all(_admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
+    """Runs `predictions.check_scheduled_retraining` on demand instead of waiting for its Beat
+    cadence — the real drift/staleness check, for every PRODUCTION market, that trains + registers
+    a Challenger wherever it says yes. Never force-promotes: a Challenger only becomes Champion if
+    `ChallengerEvaluationService`'s empirical comparison against the current Champion says it's
+    actually better (same gate `repair_broken_champion` only ever bypasses for a market with no
+    Champion at all). Same delegate-to-worker, return-a-task_id-immediately shape as
+    `trigger_champion_repair`."""
+    from modules.predictions.infrastructure.celery.tasks import check_scheduled_retraining_task
+
+    result = check_scheduled_retraining_task.delay(now_iso=_now().isoformat())
+    return envelope(data={"task_id": result.id, "status": "queued"})
+
+
+@app.post("/api/v1/admin/system/predictions/generate-all")
+async def trigger_prediction_generation_all(_admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
+    """Runs `predictions.check_scheduled_prediction_generation` on demand instead of waiting for
+    its Beat cadence — generates (or refreshes) a prediction for every PRODUCTION market, for
+    every fixture of that market's sport due within the orchestrator's lookahead window. Same
+    delegate-to-worker, return-a-task_id-immediately shape as `trigger_champion_repair`."""
+    from modules.predictions.infrastructure.celery.tasks import check_scheduled_prediction_generation_task
+
+    result = check_scheduled_prediction_generation_task.delay(now_iso=_now().isoformat())
     return envelope(data={"task_id": result.id, "status": "queued"})
 
 
