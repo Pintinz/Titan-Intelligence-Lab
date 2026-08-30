@@ -33,9 +33,13 @@ from modules.predictions.application.prediction_cache_service import (
 from modules.predictions.application.prediction_context_builder import PredictionContextBuilder
 from modules.predictions.application.prediction_engine import PredictionEngine
 from modules.predictions.application.predictor_registry import PredictorRegistry
+from modules.predictions.domain.ml_value_objects import MLAlgorithm
 from modules.predictions.domain.value_objects import MarketKind, PredictionStatus, TargetType
 from modules.predictions.infrastructure.calibration.platt_scaling_calibrator import PlattScalingCalibrator
+from modules.predictions.infrastructure.ml.model_loader import ModelLoaderService
+from modules.predictions.infrastructure.ml.sklearn_adapter import SklearnAdapter
 from modules.predictions.infrastructure.predictors.weighted_scoring import WeightedLogisticPredictor
+from modules.predictions.ports.ml_model import TrainingSample
 from modules.watchlist.domain.value_objects import WatchlistEntityType
 
 T0 = datetime(2026, 7, 26, tzinfo=timezone.utc)
@@ -78,6 +82,39 @@ def mapping_service(feature_mapping_repo, market_repo, feature_definition_repo):
     )
 
 
+@dataclass
+class _InMemoryArtifactStore:
+    store: dict
+
+    async def save(self, key: str, payload: bytes) -> str:
+        self.store[key] = payload
+        return key
+
+    async def load(self, ref: str) -> bytes:
+        return self.store[ref]
+
+
+@pytest.fixture
+def artifact_store():
+    return _InMemoryArtifactStore(store={})
+
+
+@pytest.fixture
+def model_loader(artifact_store):
+    return ModelLoaderService(artifact_store=artifact_store)
+
+
+async def _fit_and_store_sklearn_model(artifact_store, feature_key: str) -> tuple[str, str]:
+    """A real, fitted SklearnAdapter — same rationale as test_prediction_engine.py's identical
+    helper: master rebuild command §3 (2026-08-30) means `PredictionEngine` no longer falls back
+    to a formula predictor, so tests need a genuinely loadable Champion artifact."""
+    model = SklearnAdapter(algorithm=MLAlgorithm.LOGISTIC_REGRESSION, target_type=TargetType.CLASSIFICATION)
+    samples = [TrainingSample(features={feature_key: float(i % 10) - 5.0}, label=1.0 if i % 2 == 0 else 0.0) for i in range(40)]
+    await model.fit(samples)
+    artifact_ref = await artifact_store.save("test-model.bin", model.serialize())
+    return artifact_ref, MLAlgorithm.LOGISTIC_REGRESSION.value
+
+
 @pytest.fixture
 def engine(
     market_repo,
@@ -88,6 +125,7 @@ def engine(
     prediction_outcome_repo,
     model_evaluation_repo,
     prediction_repo,
+    model_loader,
 ):
     context_builder = PredictionContextBuilder(
         markets=market_repo,
@@ -103,6 +141,8 @@ def engine(
         ai_reports=_EmptyRetrievalPort(), team_names=_EmptyTeamNamesResolver(),
     )
     explainability_engine = ExplainabilityEngine(retrieval=retrieval_service, text_intelligence=_FakeTextIntelligenceProvider())
+    # `model_loader` wired by default (master rebuild command §3, 2026-08-30) — see
+    # test_prediction_engine.py's identical `engine` fixture comment for the full rationale.
     return PredictionEngine(
         context_builder=context_builder,
         predictors=predictors,
@@ -113,6 +153,7 @@ def engine(
         outcomes=prediction_outcome_repo,
         model_evaluations=model_evaluation_repo,
         predictions=prediction_repo,
+        model_loader=model_loader,
     )
 
 
@@ -146,8 +187,13 @@ def service_with_alerts(engine, market_repo, prediction_repo, prediction_audit_r
 
 
 async def _setup_production_market(
-    market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo, key, confidence_threshold=0.0
+    market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo, key,
+    confidence_threshold=0.0, artifact_store=None,
 ):
+    """`artifact_store=None` keeps the old placeholder-Champion behavior for the few tests that
+    specifically want it; every other caller passes the real `artifact_store` fixture so its
+    Champion is genuinely loadable (master rebuild command §3, 2026-08-30 — see
+    test_prediction_engine.py's identical helper for the full rationale)."""
     market = await market_registry.register(
         market_key=key,
         sport_code="football",
@@ -189,9 +235,16 @@ async def _setup_production_market(
     await market_registry.approve(key, reviewer="cto", now=T0)
     await market_registry.promote_to_production(key, now=T0)
 
-    model = await model_registry.register(
-        market_id=market.id, model_key=f"{key}.heuristic", version=1, algorithm="heuristic_logistic_v1", now=T0
-    )
+    if artifact_store is None:
+        model = await model_registry.register(
+            market_id=market.id, model_key=f"{key}.heuristic", version=1, algorithm="heuristic_logistic_v1", now=T0
+        )
+    else:
+        artifact_ref, algorithm = await _fit_and_store_sklearn_model(artifact_store, str(definition.feature_key))
+        model = await model_registry.register(
+            market_id=market.id, model_key=f"{key}.{algorithm}", version=1,
+            algorithm=algorithm, framework="sklearn", artifact_ref=artifact_ref, now=T0,
+        )
     await model_registry.promote_to_challenger(model.id)
     champion = await model_registry.promote_to_champion(model.id, approved_by="cto", now=T0)
     return market, champion
@@ -205,11 +258,12 @@ async def test_get_or_generate_raises_for_unknown_market(service):
 
 @pytest.mark.asyncio
 async def test_get_or_generate_publishes_when_confidence_meets_threshold(
-    service, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo
+    service, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+    artifact_store,
 ):
     market, _ = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.publish_market", confidence_threshold=0.0,
+        "football.publish_market", confidence_threshold=0.0, artifact_store=artifact_store,
     )
 
     prediction = await service.get_or_generate(market.market_key, EntityType.FIXTURE, "fixture-1", "fixture-1", now=T0)
@@ -219,11 +273,12 @@ async def test_get_or_generate_publishes_when_confidence_meets_threshold(
 
 @pytest.mark.asyncio
 async def test_get_or_generate_stays_draft_when_confidence_below_threshold(
-    service, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo
+    service, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+    artifact_store,
 ):
     market, _ = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.draft_market", confidence_threshold=1.1,
+        "football.draft_market", confidence_threshold=1.1, artifact_store=artifact_store,
     )
 
     prediction = await service.get_or_generate(market.market_key, EntityType.FIXTURE, "fixture-1", "fixture-1", now=T0)
@@ -234,11 +289,11 @@ async def test_get_or_generate_stays_draft_when_confidence_below_threshold(
 @pytest.mark.asyncio
 async def test_get_or_generate_records_audit_on_generation(
     service, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-    prediction_audit_repo,
+    prediction_audit_repo, artifact_store,
 ):
     market, _ = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.audit_market",
+        "football.audit_market", artifact_store=artifact_store,
     )
 
     prediction = await service.get_or_generate(market.market_key, EntityType.FIXTURE, "fixture-1", "fixture-1", now=T0)
@@ -251,10 +306,11 @@ async def test_get_or_generate_records_audit_on_generation(
 @pytest.mark.asyncio
 async def test_get_or_generate_returns_cached_prediction_within_ttl(
     service, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+    artifact_store,
 ):
     market, _ = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.cache_market",
+        "football.cache_market", artifact_store=artifact_store,
     )
 
     first = await service.get_or_generate(market.market_key, EntityType.FIXTURE, "fixture-1", "fixture-1", now=T0)
@@ -268,10 +324,11 @@ async def test_get_or_generate_returns_cached_prediction_within_ttl(
 @pytest.mark.asyncio
 async def test_get_or_generate_regenerates_after_ttl_and_supersedes_previous(
     service, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+    artifact_store,
 ):
     market, _ = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.ttl_market",
+        "football.ttl_market", artifact_store=artifact_store,
     )
     service.cache_ttl_seconds = 60.0
 
@@ -289,10 +346,11 @@ async def test_get_or_generate_regenerates_after_ttl_and_supersedes_previous(
 @pytest.mark.asyncio
 async def test_approve_draft_prediction(
     service, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+    artifact_store,
 ):
     market, _ = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.approve_market", confidence_threshold=1.1,
+        "football.approve_market", confidence_threshold=1.1, artifact_store=artifact_store,
     )
     prediction = await service.get_or_generate(market.market_key, EntityType.FIXTURE, "fixture-1", "fixture-1", now=T0)
     assert prediction.status is PredictionStatus.DRAFT
@@ -305,10 +363,11 @@ async def test_approve_draft_prediction(
 @pytest.mark.asyncio
 async def test_approve_already_published_prediction_raises(
     service, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+    artifact_store,
 ):
     market, _ = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.already_published_market",
+        "football.already_published_market", artifact_store=artifact_store,
     )
     prediction = await service.get_or_generate(market.market_key, EntityType.FIXTURE, "fixture-1", "fixture-1", now=T0)
     assert prediction.status is PredictionStatus.PUBLISHED
@@ -320,11 +379,11 @@ async def test_approve_already_published_prediction_raises(
 @pytest.mark.asyncio
 async def test_reject_draft_prediction_voids_it(
     service, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-    prediction_audit_repo,
+    prediction_audit_repo, artifact_store,
 ):
     market, _ = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.reject_market", confidence_threshold=1.1,
+        "football.reject_market", confidence_threshold=1.1, artifact_store=artifact_store,
     )
     prediction = await service.get_or_generate(market.market_key, EntityType.FIXTURE, "fixture-1", "fixture-1", now=T0)
 
@@ -339,10 +398,11 @@ async def test_reject_draft_prediction_voids_it(
 @pytest.mark.asyncio
 async def test_regenerate_bypasses_cache_ttl_and_supersedes_previous(
     service, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+    artifact_store,
 ):
     market, _ = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.regenerate_market",
+        "football.regenerate_market", artifact_store=artifact_store,
     )
     first = await service.get_or_generate(market.market_key, EntityType.FIXTURE, "fixture-1", "fixture-1", now=T0)
 
@@ -365,12 +425,12 @@ async def test_regenerate_raises_for_unknown_market(service):
 @pytest.mark.asyncio
 async def test_first_publish_does_not_notify_watchers(
     service_with_alerts, alert_spy, market_registry, model_registry, mapping_service,
-    feature_definition_repo, feature_value_repo,
+    feature_definition_repo, feature_value_repo, artifact_store,
 ):
     """No previous PUBLISHED prediction to supersede — nothing has "changed" yet, so no alert."""
     market, _ = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.alerts_first_market",
+        "football.alerts_first_market", artifact_store=artifact_store,
     )
 
     await service_with_alerts.get_or_generate(market.market_key, EntityType.FIXTURE, "fixture-1", "fixture-1", now=T0)
@@ -381,11 +441,11 @@ async def test_first_publish_does_not_notify_watchers(
 @pytest.mark.asyncio
 async def test_regenerating_a_published_prediction_notifies_watchers(
     service_with_alerts, alert_spy, market_registry, model_registry, mapping_service,
-    feature_definition_repo, feature_value_repo,
+    feature_definition_repo, feature_value_repo, artifact_store,
 ):
     market, _ = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.alerts_regenerate_market",
+        "football.alerts_regenerate_market", artifact_store=artifact_store,
     )
     await service_with_alerts.get_or_generate(market.market_key, EntityType.FIXTURE, "fixture-1", "fixture-1", now=T0)
 
@@ -403,12 +463,12 @@ async def test_regenerating_a_published_prediction_notifies_watchers(
 @pytest.mark.asyncio
 async def test_regenerating_a_draft_prediction_does_not_notify_watchers(
     service_with_alerts, alert_spy, market_registry, model_registry, mapping_service,
-    feature_definition_repo, feature_value_repo,
+    feature_definition_repo, feature_value_repo, artifact_store,
 ):
     """A DRAFT prediction was never published — nothing watchers saw is "changing"."""
     market, _ = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.alerts_draft_market", confidence_threshold=1.1,
+        "football.alerts_draft_market", confidence_threshold=1.1, artifact_store=artifact_store,
     )
     prediction = await service_with_alerts.get_or_generate(
         market.market_key, EntityType.FIXTURE, "fixture-1", "fixture-1", now=T0

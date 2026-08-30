@@ -33,9 +33,13 @@ from modules.predictions.application.prediction_serving_service import (
     RequestNotFoundError,
 )
 from modules.predictions.application.predictor_registry import PredictorRegistry
+from modules.predictions.domain.ml_value_objects import MLAlgorithm
 from modules.predictions.domain.value_objects import MarketKind, TargetType
 from modules.predictions.infrastructure.calibration.platt_scaling_calibrator import PlattScalingCalibrator
+from modules.predictions.infrastructure.ml.model_loader import ModelLoaderService
+from modules.predictions.infrastructure.ml.sklearn_adapter import SklearnAdapter
 from modules.predictions.infrastructure.predictors.weighted_scoring import WeightedLogisticPredictor
+from modules.predictions.ports.ml_model import TrainingSample
 
 T0 = datetime(2026, 7, 26, tzinfo=timezone.utc)
 
@@ -77,8 +81,41 @@ def mapping_service(feature_mapping_repo, market_repo, feature_definition_repo):
     )
 
 
+@dataclass
+class _InMemoryArtifactStore:
+    store: dict
+
+    async def save(self, key: str, payload: bytes) -> str:
+        self.store[key] = payload
+        return key
+
+    async def load(self, ref: str) -> bytes:
+        return self.store[ref]
+
+
 @pytest.fixture
-def engine(market_repo, model_repo, mapping_service, feature_value_repo, feature_definition_repo, prediction_outcome_repo, model_evaluation_repo, prediction_repo):
+def artifact_store():
+    return _InMemoryArtifactStore(store={})
+
+
+@pytest.fixture
+def model_loader(artifact_store):
+    return ModelLoaderService(artifact_store=artifact_store)
+
+
+async def _fit_and_store_sklearn_model(artifact_store, feature_key: str) -> tuple[str, str]:
+    """A real, fitted SklearnAdapter — same rationale as test_prediction_engine.py's identical
+    helper: master rebuild command §3 (2026-08-30) means `PredictionEngine` no longer falls back
+    to a formula predictor, so tests need a genuinely loadable Champion artifact."""
+    model = SklearnAdapter(algorithm=MLAlgorithm.LOGISTIC_REGRESSION, target_type=TargetType.CLASSIFICATION)
+    samples = [TrainingSample(features={feature_key: float(i % 10) - 5.0}, label=1.0 if i % 2 == 0 else 0.0) for i in range(40)]
+    await model.fit(samples)
+    artifact_ref = await artifact_store.save("test-model.bin", model.serialize())
+    return artifact_ref, MLAlgorithm.LOGISTIC_REGRESSION.value
+
+
+@pytest.fixture
+def engine(market_repo, model_repo, mapping_service, feature_value_repo, feature_definition_repo, prediction_outcome_repo, model_evaluation_repo, prediction_repo, model_loader):
     context_builder = PredictionContextBuilder(
         markets=market_repo,
         models=model_repo,
@@ -103,6 +140,7 @@ def engine(market_repo, model_repo, mapping_service, feature_value_repo, feature
         outcomes=prediction_outcome_repo,
         model_evaluations=model_evaluation_repo,
         predictions=prediction_repo,
+        model_loader=model_loader,
     )
 
 
@@ -122,7 +160,8 @@ def queue_service():
 
 
 async def _setup_production_market(
-    market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo, key, entity_id="fixture-1"
+    market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo, key,
+    entity_id="fixture-1", artifact_store=None,
 ):
     market = await market_registry.register(
         market_key=key,
@@ -165,9 +204,16 @@ async def _setup_production_market(
     await market_registry.approve(key, reviewer="cto", now=T0)
     await market_registry.promote_to_production(key, now=T0)
 
-    model = await model_registry.register(
-        market_id=market.id, model_key=f"{key}.heuristic", version=1, algorithm="heuristic_logistic_v1", now=T0
-    )
+    if artifact_store is None:
+        model = await model_registry.register(
+            market_id=market.id, model_key=f"{key}.heuristic", version=1, algorithm="heuristic_logistic_v1", now=T0
+        )
+    else:
+        artifact_ref, algorithm = await _fit_and_store_sklearn_model(artifact_store, str(definition.feature_key))
+        model = await model_registry.register(
+            market_id=market.id, model_key=f"{key}.{algorithm}", version=1,
+            algorithm=algorithm, framework="sklearn", artifact_ref=artifact_ref, now=T0,
+        )
     await model_registry.promote_to_challenger(model.id)
     await model_registry.promote_to_champion(model.id, approved_by="cto", now=T0)
     return market
@@ -175,10 +221,12 @@ async def _setup_production_market(
 
 class TestBatchPredictionService:
     async def test_generates_predictions_for_multiple_subjects(
-        self, batch_service, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo
+        self, batch_service, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+        artifact_store,
     ):
         market = await _setup_production_market(
-            market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo, "football.batch_market"
+            market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+            "football.batch_market", artifact_store=artifact_store,
         )
 
         requests = [(market.market_key, EntityType.FIXTURE, "fixture-1", "fixture-1")]
@@ -189,10 +237,12 @@ class TestBatchPredictionService:
         assert results[0].subject_ref == "fixture-1"
 
     async def test_one_bad_request_does_not_fail_the_whole_batch(
-        self, batch_service, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo
+        self, batch_service, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+        artifact_store,
     ):
         market = await _setup_production_market(
-            market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo, "football.batch_mixed"
+            market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+            "football.batch_mixed", artifact_store=artifact_store,
         )
 
         requests = [
@@ -207,10 +257,12 @@ class TestBatchPredictionService:
 
 class TestAsyncPredictionQueueService:
     async def test_enqueue_then_process_then_poll_returns_prediction(
-        self, queue_service, cache_service, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo
+        self, queue_service, cache_service, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+        artifact_store,
     ):
         market = await _setup_production_market(
-            market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo, "football.queue_market"
+            market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+            "football.queue_market", artifact_store=artifact_store,
         )
 
         request_id = queue_service.enqueue(market.market_key, EntityType.FIXTURE, "fixture-1", "fixture-1", now=T0)

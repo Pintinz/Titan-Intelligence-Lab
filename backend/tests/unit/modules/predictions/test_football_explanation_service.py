@@ -398,6 +398,19 @@ class TestScorelineReasoningSeed:
         # Sorted by real probability, descending
         assert seed.alternatives[0].score == "1-1"
 
+    def test_expected_goals_rounds_up_only_at_or_above_point_eight(self):
+        prediction = _prediction(None, {"football.fixture.expected_home_goals": 1.8, "football.fixture.expected_away_goals": 2.79})
+        prediction = dataclasses.replace(
+            prediction, value="2-1",
+            probability_distribution={"2-1": 0.107, "1-1": 0.098, "2-0": 0.083, "0-0": 0.045},
+        )
+
+        seed = _build_scoreline_reasoning_seed(prediction)
+
+        assert seed is not None
+        assert seed.expected_home_goals == 2.0  # 1.8 -> rounds up (frac >= 0.8)
+        assert seed.expected_away_goals == 2.79  # 2.79 -> left as-is (frac < 0.8)
+
     def test_non_score_value_returns_none(self):
         prediction = _prediction(None, {})
         prediction = dataclasses.replace(prediction, value="AWAY_WIN", probability_distribution={"HOME_WIN": 0.4, "AWAY_WIN": 0.6})

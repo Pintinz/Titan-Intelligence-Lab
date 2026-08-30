@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
@@ -29,7 +30,7 @@ from modules.predictions.application.feature_market_mapping_service import Featu
 from modules.predictions.application.market_registry_service import MarketRegistryService
 from modules.predictions.application.model_registry_service import ModelRegistryService
 from modules.predictions.application.prediction_context_builder import PredictionContextBuilder
-from modules.predictions.application.prediction_engine import PredictionEngine, _calibrate_distribution
+from modules.predictions.application.prediction_engine import ChampionUnavailableError, PredictionEngine, _calibrate_distribution
 from modules.predictions.application.predictor_registry import PredictorRegistry
 from modules.predictions.domain.calibration import CalibrationMetadata
 from modules.predictions.domain.entities import PredictionOutcome
@@ -159,7 +160,14 @@ def engine(
     prediction_outcome_repo,
     model_evaluation_repo,
     prediction_repo,
+    model_loader,
 ):
+    # `model_loader` wired by default (master rebuild command §3, 2026-08-30): production
+    # (composition.py's build_prediction_engine) always wires a real one, so tests using this
+    # shared fixture — every one that just wants *a* real prediction, not one specifically
+    # testing Champion-resolution failure modes — need the same, paired with
+    # `_setup_production_market(..., artifact_store=artifact_store)` to register a genuinely-
+    # trained Champion rather than a placeholder that would now raise ChampionUnavailableError.
     return PredictionEngine(
         context_builder=context_builder,
         predictors=predictors,
@@ -171,6 +179,7 @@ def engine(
         model_evaluations=model_evaluation_repo,
         predictions=prediction_repo,
         expected_kg_facts=10,
+        model_loader=model_loader,
     )
 
 
@@ -201,19 +210,31 @@ def model_loader(artifact_store):
     return ModelLoaderService(artifact_store=artifact_store)
 
 
-async def _fit_and_store_sklearn_model(artifact_store, target_type, feature_key: str) -> str:
+async def _fit_and_store_sklearn_model(artifact_store, target_type, feature_key: str) -> tuple[str, str]:
     """A real, fitted SklearnAdapter — serialized the exact way select_and_register_challenger
-    now does, so these tests exercise the genuine load-and-serve path, not a stub."""
-    model = SklearnAdapter(algorithm=MLAlgorithm.LOGISTIC_REGRESSION, target_type=target_type)
+    now does, so these tests exercise the genuine load-and-serve path, not a stub. Returns
+    ``(artifact_ref, algorithm)`` — LOGISTIC_REGRESSION is classification-only
+    (sklearn_adapter.py's own `_CLASSIFICATION_ONLY`), so a REGRESSION market needs RIDGE
+    instead; the caller registers the `ModelDefinition` with whichever algorithm this actually
+    used, not a hardcoded one that might not match."""
+    algorithm = MLAlgorithm.LOGISTIC_REGRESSION if target_type is TargetType.CLASSIFICATION else MLAlgorithm.RIDGE
+    model = SklearnAdapter(algorithm=algorithm, target_type=target_type)
     samples = [TrainingSample(features={feature_key: float(i % 10) - 5.0}, label=1.0 if i % 2 == 0 else 0.0) for i in range(40)]
     await model.fit(samples)
-    return await artifact_store.save("test-model.bin", model.serialize())
+    artifact_ref = await artifact_store.save("test-model.bin", model.serialize())
+    return artifact_ref, algorithm.value
 
 
 async def _setup_production_market(
     market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo, key,
-    feature_value: float = 0.8,
+    feature_value: float = 0.8, artifact_store=None,
 ):
+    """Registers a genuinely-trained, loadable Champion by default (master rebuild command §3,
+    2026-08-30: `PredictionEngine` no longer falls back to a formula predictor for a placeholder
+    Champion, so every test that just wants *a* real prediction — not one testing the Champion-
+    resolution path itself — needs a real artifact behind the Champion it sets up). Pass
+    `artifact_store=None` (the old behavior) only for tests that specifically want the placeholder/
+    no-artifact case."""
     market = await market_registry.register(
         market_key=key,
         sport_code="football",
@@ -254,20 +275,31 @@ async def _setup_production_market(
     await market_registry.approve(key, reviewer="cto", now=T0)
     await market_registry.promote_to_production(key, now=T0)
 
-    model = await model_registry.register(
-        market_id=market.id, model_key=f"{key}.heuristic", version=1, algorithm="heuristic_logistic_v1", now=T0
-    )
+    if artifact_store is None:
+        model = await model_registry.register(
+            market_id=market.id, model_key=f"{key}.heuristic", version=1, algorithm="heuristic_logistic_v1", now=T0
+        )
+    else:
+        artifact_ref, algorithm = await _fit_and_store_sklearn_model(
+            artifact_store, TargetType.CLASSIFICATION, str(definition.feature_key)
+        )
+        model = await model_registry.register(
+            market_id=market.id, model_key=f"{key}.{algorithm}", version=1,
+            algorithm=algorithm, framework="sklearn", artifact_ref=artifact_ref, now=T0,
+        )
     await model_registry.promote_to_challenger(model.id)
     champion = await model_registry.promote_to_champion(model.id, approved_by="cto", now=T0)
     return market, champion
 
 
 async def _setup_regression_market(
-    market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo, key
+    market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo, key,
+    artifact_store=None,
 ):
     """Same shape as `_setup_production_market` but registers a TargetType.REGRESSION,
     MarketKind.PLAYER_PROP market — the shape a real regression-shaped market (e.g.
-    `basketball.player_points_prop`) takes."""
+    `basketball.player_points_prop`) takes. Same `artifact_store` default-to-genuinely-trained
+    behavior as `_setup_production_market` — see its docstring."""
     market = await market_registry.register(
         market_key=key,
         sport_code="basketball",
@@ -308,9 +340,18 @@ async def _setup_regression_market(
     await market_registry.approve(key, reviewer="cto", now=T0)
     await market_registry.promote_to_production(key, now=T0)
 
-    model = await model_registry.register(
-        market_id=market.id, model_key=f"{key}.heuristic", version=1, algorithm="heuristic_linear_v1", now=T0
-    )
+    if artifact_store is None:
+        model = await model_registry.register(
+            market_id=market.id, model_key=f"{key}.heuristic", version=1, algorithm="heuristic_linear_v1", now=T0
+        )
+    else:
+        artifact_ref, algorithm = await _fit_and_store_sklearn_model(
+            artifact_store, TargetType.REGRESSION, str(definition.feature_key)
+        )
+        model = await model_registry.register(
+            market_id=market.id, model_key=f"{key}.{algorithm}", version=1,
+            algorithm=algorithm, framework="sklearn", artifact_ref=artifact_ref, now=T0,
+        )
     await model_registry.promote_to_challenger(model.id)
     champion = await model_registry.promote_to_champion(model.id, approved_by="cto", now=T0)
     return market, champion
@@ -365,11 +406,12 @@ class TestCalibrateDistribution:
 
 @pytest.mark.asyncio
 async def test_generate_returns_draft_prediction_with_full_pipeline(
-    engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo
+    engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+    artifact_store,
 ):
     market, champion = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.match_result",
+        "football.match_result", artifact_store=artifact_store,
     )
 
     prediction = await engine.generate(
@@ -392,13 +434,14 @@ async def test_generate_returns_draft_prediction_with_full_pipeline(
 
 @pytest.mark.asyncio
 async def test_generate_emits_real_domain_label_for_a_phase_2_market(
-    engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo
+    engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+    artifact_store,
 ):
     """For a market Milestone 9.2 Phase 2 covers, the stored prediction value must be the market's
     real label (YES/NO), never the generic predictor's bare "positive"/"negative"."""
     market, _ = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.both_teams_to_score",
+        "football.both_teams_to_score", artifact_store=artifact_store,
     )
 
     prediction = await engine.generate(
@@ -410,11 +453,12 @@ async def test_generate_emits_real_domain_label_for_a_phase_2_market(
 
 @pytest.mark.asyncio
 async def test_generate_uses_neutral_defaults_with_no_history(
-    engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo
+    engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+    artifact_store,
 ):
     market, _ = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.no_history_market",
+        "football.no_history_market", artifact_store=artifact_store,
     )
 
     prediction = await engine.generate(
@@ -429,11 +473,11 @@ async def test_generate_uses_neutral_defaults_with_no_history(
 @pytest.mark.asyncio
 async def test_generate_computes_historical_accuracy_from_outcomes(
     engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-    prediction_outcome_repo,
+    prediction_outcome_repo, artifact_store,
 ):
     market, _ = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.accuracy_market",
+        "football.accuracy_market", artifact_store=artifact_store,
     )
     for _ in range(3):
         await prediction_outcome_repo.record(
@@ -457,7 +501,7 @@ async def test_generate_computes_historical_accuracy_from_outcomes(
 async def test_generate_normalizes_regression_error_for_historical_accuracy(
     context_builder, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
     confidence_engine_dep, explainability_engine, retrieval_service, prediction_outcome_repo,
-    model_evaluation_repo, prediction_repo,
+    model_evaluation_repo, prediction_repo, model_loader, artifact_store,
 ):
     """Phase 6 fix (2026-08-25): a regression market's `PredictionOutcome.error` is a raw
     magnitude (e.g. 8 points off a ~220-point total), never bounded to [0, 1] the way a
@@ -468,7 +512,7 @@ async def test_generate_normalizes_regression_error_for_historical_accuracy(
     error (8/220 ≈ 3.6%) must now produce a high, not a floored-to-zero, accuracy."""
     market, _ = await _setup_regression_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "basketball.accuracy_regression_market",
+        "basketball.accuracy_regression_market", artifact_store=artifact_store,
     )
     linear_predictors = PredictorRegistry()
     linear_predictors.register_many(WeightedLinearPredictor.SUPPORTED_KINDS, WeightedLinearPredictor())
@@ -476,7 +520,7 @@ async def test_generate_normalizes_regression_error_for_historical_accuracy(
         context_builder=context_builder, predictors=linear_predictors, calibrator=PlattScalingCalibrator(),
         confidence_engine=confidence_engine_dep, explainability_engine=explainability_engine,
         retrieval=retrieval_service, outcomes=prediction_outcome_repo, model_evaluations=model_evaluation_repo,
-        predictions=prediction_repo,
+        predictions=prediction_repo, model_loader=model_loader,
     )
     for _ in range(3):
         await prediction_outcome_repo.record(
@@ -501,11 +545,12 @@ async def test_generate_normalizes_regression_error_for_historical_accuracy(
 
 @pytest.mark.asyncio
 async def test_generate_reflects_kg_and_news_and_community_signals(
-    engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo
+    engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+    artifact_store,
 ):
     market, _ = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.retrieval_market",
+        "football.retrieval_market", artifact_store=artifact_store,
     )
 
     prediction = await engine.generate(
@@ -520,11 +565,11 @@ async def test_generate_reflects_kg_and_news_and_community_signals(
 @pytest.mark.asyncio
 async def test_generate_prediction_stability_drops_with_prior_prediction_disagreement(
     engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-    prediction_repo,
+    prediction_repo, artifact_store,
 ):
     market, champion = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.stability_market",
+        "football.stability_market", artifact_store=artifact_store,
     )
     from modules.predictions.domain.entities import ConfidenceBreakdown, ExplanationBundle, Prediction
 
@@ -566,7 +611,7 @@ async def test_generate_serves_a_real_trained_model_when_champion_has_an_artifac
         "football.trained_model_market",
     )
     feature_key = "football.team.form_index_last5"
-    artifact_ref = await _fit_and_store_sklearn_model(artifact_store, TargetType.CLASSIFICATION, feature_key)
+    artifact_ref, _algorithm = await _fit_and_store_sklearn_model(artifact_store, TargetType.CLASSIFICATION, feature_key)
 
     trained_model = await model_registry.register(
         market_id=market.id, model_key="football.trained_model_market.logistic_regression", version=2,
@@ -597,14 +642,16 @@ async def test_generate_serves_a_real_trained_model_when_champion_has_an_artifac
 
 
 @pytest.mark.asyncio
-async def test_generate_falls_back_to_registry_for_placeholder_champion_even_with_loader_wired(
+async def test_generate_raises_when_champion_is_a_never_trained_placeholder(
     engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
     context_builder, predictors, confidence_engine_dep, explainability_engine, retrieval_service,
     prediction_outcome_repo, model_evaluation_repo, prediction_repo, model_loader,
 ):
-    """The legacy heuristic champion (no artifact_ref) must keep working exactly as before, even
-    once model_loader is wired platform-wide — a market that's never had a real model trained
-    must not suddenly break."""
+    """Master rebuild command §3/§104 (2026-08-30): a market may only ever serve a prediction
+    from its own genuinely-trained Champion — a placeholder (no artifact_ref) must now raise
+    ChampionUnavailableError, never silently serve a generic formula prediction. This replaces
+    the pre-rebuild `test_generate_falls_back_to_registry_for_placeholder_champion_even_with_
+    loader_wired`, which asserted the exact opposite of the now-required behavior."""
     market, champion = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
         "football.placeholder_champion_market",
@@ -618,21 +665,19 @@ async def test_generate_falls_back_to_registry_for_placeholder_champion_even_wit
         predictions=prediction_repo, model_loader=model_loader,
     )
 
-    prediction = await engine_with_loader.generate(
-        market.market_key, EntityType.FIXTURE, "fixture-1", subject_ref="fixture-1", now=T0
-    )
+    with pytest.raises(ChampionUnavailableError) as exc_info:
+        await engine_with_loader.generate(
+            market.market_key, EntityType.FIXTURE, "fixture-1", subject_ref="fixture-1", now=T0
+        )
 
-    assert prediction.model_id == champion.id
-    assert prediction.value in ("positive", "negative")
-    assert prediction.predictor_provenance == "formula_fallback"
-    # Forensic audit §3/§13 — a placeholder Champion was never trained at all, distinct from a
-    # real artifact that exists but failed to load.
-    assert prediction.fallback_reason == "NO_ARTIFACT_REGISTERED"
+    assert exc_info.value.reason_code == "NO_ARTIFACT_REGISTERED"
+    assert exc_info.value.market_key == market.market_key
 
 
 @pytest.mark.asyncio
 async def test_generate_reports_uncalibrated_when_the_model_has_never_been_fitted(
     engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+    artifact_store,
 ):
     """Section 31 audit fix (2026-08-23), extended by Phase 4: `calibrate()`'s identity
     pass-through for a never-fitted model must never be reported to the API as calibrated —
@@ -641,7 +686,7 @@ async def test_generate_reports_uncalibrated_when_the_model_has_never_been_fitte
     and no metadata is recorded since no fit exists."""
     market, champion = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.uncalibrated_market",
+        "football.uncalibrated_market", artifact_store=artifact_store,
     )
 
     prediction = await engine.generate(
@@ -658,6 +703,7 @@ async def test_generate_reports_uncalibrated_when_the_model_has_never_been_fitte
 @pytest.mark.asyncio
 async def test_generate_reports_calibrated_once_the_model_has_actually_been_fitted(
     engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+    artifact_store,
 ):
     """The other half of the same fix: once `CalibratorPort.fit()` has genuinely run for this
     model, a subsequent prediction must report the real "FITTED" status (Phase 4 taxonomy) — this
@@ -666,7 +712,7 @@ async def test_generate_reports_calibrated_once_the_model_has_actually_been_fitt
     now-calibrated `probability` (the fit is a genuine transform, not an identity)."""
     market, champion = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.calibrated_market",
+        "football.calibrated_market", artifact_store=artifact_store,
     )
     await engine.calibrator.fit(champion.id, [(0.6, True), (0.4, False), (0.7, True), (0.3, False)])
 
@@ -686,6 +732,7 @@ async def test_generate_reports_stale_when_the_fit_is_older_than_the_staleness_w
     context_builder, predictors, confidence_engine_dep, explainability_engine, retrieval_service,
     prediction_outcome_repo, model_evaluation_repo, prediction_repo,
     market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+    model_loader, artifact_store,
 ):
     """Phase 4 (Calibration Integrity): a fit that exists but predates the configured staleness
     window must be reported as "STALE", not "FITTED" — still applied (a stale calibration is
@@ -702,10 +749,11 @@ async def test_generate_reports_stale_when_the_fit_is_older_than_the_staleness_w
         confidence_engine=confidence_engine_dep, explainability_engine=explainability_engine,
         retrieval=retrieval_service, outcomes=prediction_outcome_repo, model_evaluations=model_evaluation_repo,
         predictions=prediction_repo, expected_kg_facts=10, calibration_staleness=timedelta(days=1),
+        model_loader=model_loader,
     )
     market, champion = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.stale_calibration_market",
+        "football.stale_calibration_market", artifact_store=artifact_store,
     )
     await engine.calibrator.fit(champion.id, [(0.6, True), (0.4, False), (0.7, True), (0.3, False)])
 
@@ -724,6 +772,7 @@ async def test_generate_reports_invalid_and_uses_raw_probability_when_calibratio
     context_builder, predictors, confidence_engine_dep, explainability_engine, retrieval_service,
     prediction_outcome_repo, model_evaluation_repo, prediction_repo,
     market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+    model_loader, artifact_store,
 ):
     """Phase 4: a corrupt/degenerate calibration fit (NaN/Inf) must never poison the published
     probability — `generate()` must detect it, discard it, and honestly report "INVALID" rather
@@ -747,11 +796,11 @@ async def test_generate_reports_invalid_and_uses_raw_probability_when_calibratio
         context_builder=context_builder, predictors=predictors, calibrator=_NonFiniteCalibrator(),
         confidence_engine=confidence_engine_dep, explainability_engine=explainability_engine,
         retrieval=retrieval_service, outcomes=prediction_outcome_repo, model_evaluations=model_evaluation_repo,
-        predictions=prediction_repo, expected_kg_facts=10,
+        predictions=prediction_repo, expected_kg_facts=10, model_loader=model_loader,
     )
     market, champion = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.invalid_calibration_market",
+        "football.invalid_calibration_market", artifact_store=artifact_store,
     )
 
     prediction = await engine.generate(
@@ -766,6 +815,7 @@ async def test_generate_reports_invalid_and_uses_raw_probability_when_calibratio
 @pytest.mark.asyncio
 async def test_generate_skips_the_post_hoc_calibrator_when_the_champions_own_artifact_is_already_calibrated(
     engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+    artifact_store,
 ):
     """Phase 4: `CalibrationValidationService` can promote a Champion whose own artifact already
     bakes in calibration (`ModelDefinition.calibration_ref` set). Passing that Champion's
@@ -775,7 +825,7 @@ async def test_generate_skips_the_post_hoc_calibrator_when_the_champions_own_art
     there for the same model_id, `generate()` must not apply it."""
     market, champion = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.model_baked_calibration_market",
+        "football.model_baked_calibration_market", artifact_store=artifact_store,
     )
     await model_registry.models.upsert(replace(champion, calibration_ref="isotonic_regression"))
     # A real, non-identity fit for the same model_id — proves it's genuinely bypassed, not just
@@ -797,7 +847,7 @@ async def test_generate_staleness_check_survives_a_real_sql_backed_naive_datetim
     context_builder, predictors, confidence_engine_dep, explainability_engine, retrieval_service,
     prediction_outcome_repo, model_evaluation_repo, prediction_repo,
     market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-    sqlite_session,
+    sqlite_session, model_loader, artifact_store,
 ):
     """Phase 3 verification found the exact same bug shape in `model_registry_service.py`:
     `now - <a real SQL-backed timestamp>` crashes with `TypeError: can't subtract offset-naive
@@ -812,10 +862,11 @@ async def test_generate_staleness_check_survives_a_real_sql_backed_naive_datetim
         confidence_engine=confidence_engine_dep, explainability_engine=explainability_engine,
         retrieval=retrieval_service, outcomes=prediction_outcome_repo, model_evaluations=model_evaluation_repo,
         predictions=prediction_repo, expected_kg_facts=10, calibration_staleness=timedelta(days=1),
+        model_loader=model_loader,
     )
     market, champion = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "football.sql_backed_staleness_market",
+        "football.sql_backed_staleness_market", artifact_store=artifact_store,
     )
     await engine.calibrator.fit(champion.id, [(0.6, True), (0.4, False), (0.7, True), (0.3, False)])
     await sqlite_session.commit()
@@ -838,14 +889,16 @@ async def test_generate_staleness_check_survives_a_real_sql_backed_naive_datetim
 
 
 @pytest.mark.asyncio
-async def test_generate_falls_back_when_artifact_cannot_be_loaded(
+async def test_generate_raises_when_artifact_cannot_be_loaded(
     engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
     context_builder, predictors, confidence_engine_dep, explainability_engine, retrieval_service,
     prediction_outcome_repo, model_evaluation_repo, prediction_repo, model_loader,
 ):
-    """A Champion that claims an artifact_ref pointing at nothing real (corrupt data, wrong
-    framework, missing file) must never crash generation — it falls back to the safe formula
-    predictor, exactly like a market with no trained model at all."""
+    """Master rebuild command §3/§104 (2026-08-30): a Champion that claims an artifact_ref
+    pointing at nothing real (corrupt data, wrong framework, missing file) must never crash
+    generation, but it also must never silently fall back to a generic formula predictor —
+    ChampionUnavailableError is the honest outcome now. Replaces the pre-rebuild
+    `test_generate_falls_back_when_artifact_cannot_be_loaded`."""
     market, _placeholder = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
         "football.broken_artifact_market",
@@ -864,41 +917,38 @@ async def test_generate_falls_back_when_artifact_cannot_be_loaded(
         predictions=prediction_repo, model_loader=model_loader,
     )
 
-    prediction = await engine_with_loader.generate(
-        market.market_key, EntityType.FIXTURE, "fixture-1", subject_ref="fixture-1", now=T0
-    )
+    with pytest.raises(ChampionUnavailableError) as exc_info:
+        await engine_with_loader.generate(
+            market.market_key, EntityType.FIXTURE, "fixture-1", subject_ref="fixture-1", now=T0
+        )
 
-    assert prediction.value in ("positive", "negative")
-    # Real prod incident audit (2026-08-23): this is the exact case that was silently
-    # misattributed before — a Champion IS registered with a real artifact_ref, but loading it
-    # fails, so a formula predictor actually computed `value`/`probability` above. Provenance must
-    # say so, never "trained_model" just because a Champion with an artifact_ref exists.
-    assert prediction.predictor_provenance == "formula_fallback"
     # Forensic audit §3/§13 — a genuinely missing/unreachable artifact, distinct from a checksum
     # mismatch (real file exists but doesn't hash to what was recorded) or no artifact at all.
-    assert prediction.fallback_reason == "ARTIFACT_LOAD_FAILURE"
+    assert exc_info.value.reason_code == "ARTIFACT_LOAD_FAILURE"
 
 
 @pytest.mark.asyncio
-async def test_generate_falls_back_and_flags_integrity_mismatch_on_checksum_mismatch(
+async def test_generate_raises_integrity_mismatch_on_checksum_mismatch(
     engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
     context_builder, predictors, confidence_engine_dep, explainability_engine, retrieval_service,
     prediction_outcome_repo, model_evaluation_repo, prediction_repo, model_loader, artifact_store,
 ):
-    """Forensic audit §15 "Model Artifact Integrity": a real, loadable artifact whose bytes don't
-    hash to the checksum recorded at training time (corrupted, overwritten, or swapped out-of-band)
-    must fall back exactly like a missing artifact, but be distinguishable from one — this is a
-    materially more concerning signal (possible tampering) than "the file was never uploaded"."""
+    """Forensic audit §15 "Model Artifact Integrity", updated for the master rebuild command
+    §3/§104 (2026-08-30): a real, loadable artifact whose bytes don't hash to the checksum
+    recorded at training time (corrupted, overwritten, or swapped out-of-band) must raise
+    ChampionUnavailableError — distinguishable via reason_code from a missing artifact, but no
+    longer silently served through a formula fallback either. Replaces the pre-rebuild
+    `test_generate_falls_back_and_flags_integrity_mismatch_on_checksum_mismatch`."""
     market, _placeholder = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
         "football.tampered_artifact_market",
     )
     feature_key = "football.team.form_index_last5"
-    artifact_ref = await _fit_and_store_sklearn_model(artifact_store, TargetType.CLASSIFICATION, feature_key)
+    artifact_ref, algorithm = await _fit_and_store_sklearn_model(artifact_store, TargetType.CLASSIFICATION, feature_key)
 
     tampered_model = await model_registry.register(
         market_id=market.id, model_key="football.tampered_artifact_market.logistic_regression", version=2,
-        algorithm=MLAlgorithm.LOGISTIC_REGRESSION.value, framework="sklearn", artifact_ref=artifact_ref, now=T0,
+        algorithm=algorithm, framework="sklearn", artifact_ref=artifact_ref, now=T0,
         artifact_checksum="0" * 64,  # deliberately wrong — cannot match the real artifact's real hash
     )
     await model_registry.promote_to_challenger(tampered_model.id)
@@ -911,74 +961,94 @@ async def test_generate_falls_back_and_flags_integrity_mismatch_on_checksum_mism
         predictions=prediction_repo, model_loader=model_loader,
     )
 
-    prediction = await engine_with_loader.generate(
-        market.market_key, EntityType.FIXTURE, "fixture-1", subject_ref="fixture-1", now=T0
-    )
+    with pytest.raises(ChampionUnavailableError) as exc_info:
+        await engine_with_loader.generate(
+            market.market_key, EntityType.FIXTURE, "fixture-1", subject_ref="fixture-1", now=T0
+        )
 
-    assert prediction.value in ("positive", "negative")
-    assert prediction.predictor_provenance == "formula_fallback"
-    assert prediction.fallback_reason == "ARTIFACT_INTEGRITY_MISMATCH"
+    assert exc_info.value.reason_code == "ARTIFACT_INTEGRITY_MISMATCH"
 
 
 @pytest.mark.asyncio
 async def test_generate_populates_probability_distribution_for_classification_market(
-    engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+    engine, context_builder, market_registry, model_registry, mapping_service, feature_definition_repo,
+    feature_value_repo,
 ):
     """Universal Probability Engine — every classification prediction stores the full probability
     distribution, not just the winning outcome, and the winning entry matches the published,
-    calibrated `Prediction.probability` exactly (not the predictor's raw pre-calibration value)."""
+    calibrated `Prediction.probability` exactly (not the predictor's raw pre-calibration value).
+
+    Exercises `_shape_outcome`/`_calibrate` directly against a real `WeightedLogisticPredictor`
+    output rather than going through `generate()`'s Champion resolution (master rebuild command
+    §3, 2026-08-30: `_resolve_predictor` no longer ever returns a formula predictor) — this test
+    is genuinely about the distribution/calibration math, not which predictor served it."""
     market, _ = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
         "football.distribution_market",
     )
-
-    prediction = await engine.generate(
-        market.market_key, EntityType.FIXTURE, "fixture-1", subject_ref="fixture-1", now=T0
+    context = await context_builder.build(market.market_key, EntityType.FIXTURE, "fixture-1", T0)
+    predictor_output = await WeightedLogisticPredictor().predict(
+        context.market.market_kind, context.resolved_features, context.mapping_weights
+    )
+    calibrated_probability, *_ = await engine._calibrate(context, predictor_output.probability, T0)
+    value, probability, probability_distribution, confidence_interval, expected_error, _raw = (
+        await engine._shape_outcome(context, predictor_output, calibrated_probability)
     )
 
-    assert set(prediction.probability_distribution.keys()) == {"positive", "negative"}
-    assert sum(prediction.probability_distribution.values()) == pytest.approx(1.0)
-    assert prediction.probability_distribution[prediction.value] == pytest.approx(prediction.probability)
-    assert prediction.confidence_interval is None
-    assert prediction.expected_error is None
+    assert set(probability_distribution.keys()) == {"positive", "negative"}
+    assert sum(probability_distribution.values()) == pytest.approx(1.0)
+    assert probability_distribution[value] == pytest.approx(probability)
+    assert confidence_interval is None
+    assert expected_error is None
 
 
 @pytest.mark.asyncio
 async def test_generate_distribution_sums_to_one_when_the_negative_side_wins(
-    engine, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
+    engine, context_builder, market_registry, model_registry, mapping_service, feature_definition_repo,
+    feature_value_repo,
 ):
     """Regression test for a real bug: `WeightedLogisticPredictor.probability` is always
     P("positive") regardless of which side `value` actually is — a negative feature value makes
     "negative" win with `raw_score < 0` (P(positive) < 0.5). Before the fix, `_shape_outcome`
     calibrated the *winning* key ("negative") to `predictor_output.probability` (which is P(positive),
     not P(negative)) and left "positive" at its own raw P(positive) unchanged — both entries ended
-    up carrying nearly the same number and the distribution summed to well under 1.0."""
+    up carrying nearly the same number and the distribution summed to well under 1.0.
+
+    Same direct `_shape_outcome` exercise as the test above — see its own comment for why."""
     market, _ = await _setup_production_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
         "football.negative_side_wins_market", feature_value=-0.8,
     )
-
-    prediction = await engine.generate(
-        market.market_key, EntityType.FIXTURE, "fixture-1", subject_ref="fixture-1", now=T0
+    context = await context_builder.build(market.market_key, EntityType.FIXTURE, "fixture-1", T0)
+    predictor_output = await WeightedLogisticPredictor().predict(
+        context.market.market_kind, context.resolved_features, context.mapping_weights
+    )
+    calibrated_probability, *_ = await engine._calibrate(context, predictor_output.probability, T0)
+    value, probability, probability_distribution, _ci, _ee, _raw = await engine._shape_outcome(
+        context, predictor_output, calibrated_probability
     )
 
-    assert prediction.value == "negative"
-    assert sum(prediction.probability_distribution.values()) == pytest.approx(1.0)
-    assert prediction.probability_distribution["negative"] == pytest.approx(prediction.probability)
+    assert value == "negative"
+    assert sum(probability_distribution.values()) == pytest.approx(1.0)
+    assert probability_distribution["negative"] == pytest.approx(probability)
 
 
 @pytest.mark.asyncio
 async def test_generate_regression_market_stores_raw_value_not_fake_probability(
     context_builder, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
     confidence_engine_dep, explainability_engine, retrieval_service, prediction_outcome_repo,
-    model_evaluation_repo, prediction_repo,
+    model_evaluation_repo, prediction_repo, model_loader, artifact_store,
 ):
     """Universal Probability Engine — a REGRESSION-shaped market's `value` is the predicted
     continuous number itself (from the predictor's `raw_score`), and it never gets a
-    `probability_distribution` (no discrete outcome space exists for it)."""
+    `probability_distribution` (no discrete outcome space exists for it). Real Champion resolution
+    (master rebuild command §3, 2026-08-30) means `prediction.value` is now whatever the real
+    fitted Ridge model predicts, not the exact literal `feature_value` a formula predictor's raw
+    weighted sum used to reproduce — the assertion checks it's a real finite number, not a
+    specific figure a formula fallback happened to compute."""
     market, _ = await _setup_regression_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "basketball.regression_market",
+        "basketball.regression_market", artifact_store=artifact_store,
     )
     linear_predictors = PredictorRegistry()
     linear_predictors.register_many(WeightedLinearPredictor.SUPPORTED_KINDS, WeightedLinearPredictor())
@@ -986,14 +1056,14 @@ async def test_generate_regression_market_stores_raw_value_not_fake_probability(
         context_builder=context_builder, predictors=linear_predictors, calibrator=PlattScalingCalibrator(),
         confidence_engine=confidence_engine_dep, explainability_engine=explainability_engine,
         retrieval=retrieval_service, outcomes=prediction_outcome_repo, model_evaluations=model_evaluation_repo,
-        predictions=prediction_repo,
+        predictions=prediction_repo, model_loader=model_loader,
     )
 
     prediction = await engine.generate(
         market.market_key, EntityType.FIXTURE, "fixture-1", subject_ref="fixture-1", now=T0
     )
 
-    assert float(prediction.value) == pytest.approx(24.5)
+    assert math.isfinite(float(prediction.value))
     assert prediction.probability_distribution == {}
     # No PredictionOutcome history recorded yet for this market — an honest gap, not a fabricated
     # interval (see _regression_uncertainty's docstring).
@@ -1005,11 +1075,11 @@ async def test_generate_regression_market_stores_raw_value_not_fake_probability(
 async def test_generate_regression_market_derives_confidence_interval_from_history(
     context_builder, market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
     confidence_engine_dep, explainability_engine, retrieval_service, prediction_outcome_repo,
-    model_evaluation_repo, prediction_repo,
+    model_evaluation_repo, prediction_repo, model_loader, artifact_store,
 ):
     market, _ = await _setup_regression_market(
         market_registry, model_registry, mapping_service, feature_definition_repo, feature_value_repo,
-        "basketball.regression_history_market",
+        "basketball.regression_history_market", artifact_store=artifact_store,
     )
     for error in (2.0, 4.0):
         await prediction_outcome_repo.record(
@@ -1024,7 +1094,7 @@ async def test_generate_regression_market_derives_confidence_interval_from_histo
         context_builder=context_builder, predictors=linear_predictors, calibrator=PlattScalingCalibrator(),
         confidence_engine=confidence_engine_dep, explainability_engine=explainability_engine,
         retrieval=retrieval_service, outcomes=prediction_outcome_repo, model_evaluations=model_evaluation_repo,
-        predictions=prediction_repo,
+        predictions=prediction_repo, model_loader=model_loader,
     )
 
     prediction = await engine.generate(

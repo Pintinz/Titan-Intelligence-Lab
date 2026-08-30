@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -165,6 +166,16 @@ def _market_reasoning_kind(market_key: str) -> str:
     return "generic"
 
 
+def _round_expected_goals_for_display(value: float) -> float:
+    """Display-only rounding for the Correct-Score explanation's expected-goals figures (user
+    directive, 2026-08-30): round up to the next whole number only when the fractional part is
+    >= 0.8 (e.g. 1.8 -> 2.0); anything below that is left as a genuine, unrounded decimal (e.g.
+    1.7 stays 1.7). Only affects what's shown here — `feature_snapshot`'s own raw value (what the
+    model actually trained/predicted on) is untouched."""
+    fractional = value - math.floor(value)
+    return float(math.ceil(value)) if fractional >= 0.8 else value
+
+
 def _build_scoreline_reasoning_seed(prediction: Prediction) -> ScorelineReasoning | None:
     """The real, numeric half of Correct-Score reasoning (spec §2/§3/§4) — every field here comes
     straight from `probability_distribution`/`feature_snapshot`; Gemini only ever supplies the
@@ -192,8 +203,8 @@ def _build_scoreline_reasoning_seed(prediction: Prediction) -> ScorelineReasonin
     return ScorelineReasoning(
         selected_score=str(prediction.value),
         selected_probability=distribution.get(prediction.value, prediction.probability),
-        expected_home_goals=float(home_goals) if isinstance(home_goals, (int, float)) else None,
-        expected_away_goals=float(away_goals) if isinstance(away_goals, (int, float)) else None,
+        expected_home_goals=_round_expected_goals_for_display(float(home_goals)) if isinstance(home_goals, (int, float)) else None,
+        expected_away_goals=_round_expected_goals_for_display(float(away_goals)) if isinstance(away_goals, (int, float)) else None,
         alternatives=alternatives,
     )
 

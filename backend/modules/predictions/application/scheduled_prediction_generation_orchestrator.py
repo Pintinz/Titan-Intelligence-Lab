@@ -23,10 +23,12 @@ regenerated), same confidence-gated auto-publish, same audit trail. This orchest
 generation logic of its own; it only supplies the caller loop nothing else ever did.
 
 One (fixture, market) pair's failure — most commonly `MissingRequiredFeatureError` (a required
-feature genuinely has no verified pre-match value yet) or `NoChampionModelError` (the market has
-no trained model to serve) — is captured and skipped, never allowed to stop the sweep from
-reaching every other pair, matching `ScheduledRetrainingOrchestrator`'s own per-market isolation
-posture.
+feature genuinely has no verified pre-match value yet), `NoChampionModelError` (the market has no
+trained model to serve), or `ChampionUnavailableError` (a Champion is registered but its artifact
+won't load, or it's a never-trained placeholder — master rebuild command §3, 2026-08-30: no
+generic formula fallback exists to serve it instead) — is captured and skipped, never allowed to
+stop the sweep from reaching every other pair, matching `ScheduledRetrainingOrchestrator`'s own
+per-market isolation posture.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ from modules.features.domain.value_objects import EntityType
 from modules.predictions.application.feature_market_mapping_service import MissingRequiredFeatureError
 from modules.predictions.application.prediction_cache_service import MarketNotFoundError, PredictionCacheService
 from modules.predictions.application.prediction_context_builder import MarketNotInProductionError, NoChampionModelError
+from modules.predictions.application.prediction_engine import ChampionUnavailableError
 from modules.predictions.domain.entities import MarketDefinition
 from modules.predictions.domain.value_objects import MarketStatus, PredictionStatus
 from modules.predictions.ports.repositories import MarketRepositoryPort
@@ -113,9 +116,13 @@ class ScheduledPredictionGenerationOrchestrator:
             prediction = await self.cache.get_or_generate(
                 market.market_key, EntityType.FIXTURE, subject_ref, subject_ref, now, actor=SYSTEM_ACTOR,
             )
-        except (MarketNotFoundError, MarketNotInProductionError, NoChampionModelError, MissingRequiredFeatureError) as exc:
+        except (
+            MarketNotFoundError, MarketNotInProductionError, NoChampionModelError, MissingRequiredFeatureError,
+            ChampionUnavailableError,
+        ) as exc:
             # Honest, expected gaps — a real prediction just isn't buildable yet (no champion model,
-            # a required feature hasn't verified a pre-match value, etc.), never treated as a bug.
+            # a required feature hasn't verified a pre-match value, a registered Champion whose
+            # artifact won't load, etc.), never treated as a bug.
             return GenerationOutcome(fixture_id=subject_ref, market_key=market.market_key, status="skipped", reason=str(exc))
         except Exception as exc:  # noqa: BLE001 — one pair's failure must never stop the sweep
             return GenerationOutcome(

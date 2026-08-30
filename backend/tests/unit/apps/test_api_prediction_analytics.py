@@ -38,6 +38,7 @@ from modules.identity.infrastructure.security import MockJWTValidator
 from modules.intelligence.infrastructure.persistence.models import Base as IntelligenceBase
 from modules.knowledge_graph.infrastructure.persistence.models import Base as KnowledgeGraphBase
 from modules.predictions.domain.entities import FeatureMarketMapping, MarketDefinition, ModelDefinition
+from modules.predictions.domain.ml_value_objects import MLAlgorithm
 from modules.predictions.domain.value_objects import (
     FeatureMarketMappingId,
     MarketId,
@@ -47,12 +48,14 @@ from modules.predictions.domain.value_objects import (
     ModelStatus,
     TargetType,
 )
+from modules.predictions.infrastructure.ml.sklearn_adapter import SklearnAdapter
 from modules.predictions.infrastructure.persistence.models import Base as PredictionsBase
 from modules.predictions.infrastructure.persistence.repositories import (
     SqlAlchemyFeatureMarketMappingRepository,
     SqlAlchemyMarketRepository,
     SqlAlchemyModelRepository,
 )
+from modules.predictions.ports.ml_model import TrainingSample
 from modules.sports.domain.entities import Fixture
 from modules.sports.domain.value_objects import FixtureId, FixtureStatus, SeasonId, TeamId
 from modules.sports.infrastructure.persistence.models import Base as SportsBase
@@ -139,6 +142,20 @@ def _admin_headers(client, db_session_factory, email="analytics-admin@titaniq.te
     return {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
 
 
+async def _fit_and_store_sklearn_model(feature_key: str) -> tuple[str, str]:
+    """A real, fitted SklearnAdapter saved through the same `get_model_artifact_store()` the app's
+    real `PredictionEngine` reads from (composition.py) — master rebuild command §3 (2026-08-30)
+    means `PredictionEngine` no longer falls back to a formula predictor, so a market's Champion
+    must have a genuinely loadable artifact for a live end-to-end request to succeed. Keyed by
+    `feature_key` (unique per test/market) so concurrent tests never overwrite each other's file
+    under the shared `LocalFilesystemArtifactStore` root."""
+    model = SklearnAdapter(algorithm=MLAlgorithm.LOGISTIC_REGRESSION, target_type=TargetType.CLASSIFICATION)
+    samples = [TrainingSample(features={feature_key: float(i % 10) - 5.0}, label=1.0 if i % 2 == 0 else 0.0) for i in range(40)]
+    await model.fit(samples)
+    artifact_ref = await composition.get_model_artifact_store().save(f"{feature_key}.bin", model.serialize())
+    return artifact_ref, MLAlgorithm.LOGISTIC_REGRESSION.value
+
+
 async def _seed_production_market(
     db_session_factory,
     market_key: str,
@@ -196,12 +213,15 @@ async def _seed_production_market(
                 id=FeatureMarketMappingId(uuid4()), market_id=market.id, feature_key=feature_key, is_required=True
             )
         )
+        artifact_ref, algorithm = await _fit_and_store_sklearn_model(feature_key)
         model = ModelDefinition(
             id=ModelId(uuid4()),
             market_id=market.id,
-            model_key=f"{market_key}.heuristic",
+            model_key=f"{market_key}.{algorithm}",
             version=1,
-            algorithm="heuristic_logistic_v1",
+            algorithm=algorithm,
+            framework="sklearn",
+            artifact_ref=artifact_ref,
             status=ModelStatus.CHAMPION,
         )
         await models.upsert(model)

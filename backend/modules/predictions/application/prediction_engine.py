@@ -147,6 +147,24 @@ def _calibrate_distribution(
     return result
 
 
+class ChampionUnavailableError(RuntimeError):
+    """Master rebuild command, §3/§104 (2026-08-30): a market prediction may only ever originate
+    from that market's own genuinely-trained Champion — never a generic formula/weighted-scoring
+    fallback. Raised by `_resolve_predictor` for every case that previously fell back silently:
+    no Champion artifact registered (a placeholder Champion), an artifact that fails to load/
+    deserialize/checksum-verify, or `model_loader` not being wired at all. `reason_code` matches
+    the taxonomy `Prediction.fallback_reason` used to record for the same cases, so callers/UI
+    that already branch on those strings keep working: MODEL_LOADER_NOT_WIRED,
+    NO_ARTIFACT_REGISTERED, ARTIFACT_INTEGRITY_MISMATCH, ARTIFACT_DESERIALIZE_FAILURE,
+    ARTIFACT_LOAD_FAILURE. The honest outcome now is `prediction_status = UNAVAILABLE`, not a
+    silently-served statistical guess."""
+
+    def __init__(self, market_key: str, reason_code: str, message: str) -> None:
+        super().__init__(message)
+        self.market_key = market_key
+        self.reason_code = reason_code
+
+
 @dataclass
 class PredictionEngine:
     context_builder: PredictionContextBuilder
@@ -348,21 +366,29 @@ class PredictionEngine:
         return expected_error, (predicted_value - expected_error, predicted_value + expected_error)
 
     async def _resolve_predictor(self, context: PredictionContext) -> tuple[PredictorPort, str, str | None]:
-        """Prefers the market's real CHAMPION model when one has actually been trained (a real
-        `artifact_ref` exists) — loaded via `ModelLoaderService` and served through
-        `TrainedModelPredictor`. Falls back to the generic formula-predictor registry for a
-        placeholder Champion (no artifact), an unrecognized/corrupt/tampered artifact, or when
-        `model_loader` was never wired — a trained-model problem must never break generation.
-
-        Returns ``(predictor, predictor_provenance, fallback_reason)`` — "trained_model" or
-        "formula_fallback", plus (only for the latter) a specific reason code — so the caller can
-        persist genuine provenance on `Prediction` instead of the API inferring "trained model"
-        from `model_id` alone, which stays the Champion's id either way and would misattribute a
-        fallback-served prediction as ML-computed (real prod incident, audited 2026-08-23)."""
+        """Resolves the market's real CHAMPION model — loaded via `ModelLoaderService` and served
+        through `TrainedModelPredictor`. Never falls back to a generic formula/weighted-scoring
+        predictor (master rebuild command, §3/§104, 2026-08-30 — removed the fallback this
+        docstring used to describe): a placeholder Champion (no artifact), an unrecognized/
+        corrupt/tampered artifact, or `model_loader` not being wired all raise
+        `ChampionUnavailableError` instead of silently serving a statistical guess. The caller
+        (`generate()`) lets this propagate — an honest "prediction unavailable," never a
+        misattributed fallback (the exact real prod incident, audited 2026-08-23, that made
+        `predictor_provenance`/`fallback_reason` exist on `Prediction` in the first place: before
+        those fields, a fallback-served prediction still carried the Champion's own `model_id`,
+        so there was no way to tell a real trained-model prediction from a formula guess after
+        the fact — this closes that gap the other way, by never serving the guess at all)."""
         if self.model_loader is None:
-            return self.predictors.get(context.market.market_kind, context.market.market_key), "formula_fallback", "MODEL_LOADER_NOT_WIRED"
+            raise ChampionUnavailableError(
+                context.market.market_key, "MODEL_LOADER_NOT_WIRED",
+                f"market '{context.market.market_key}' has no model loader wired — prediction unavailable",
+            )
         if not context.model.artifact_ref:
-            return self.predictors.get(context.market.market_kind, context.market.market_key), "formula_fallback", "NO_ARTIFACT_REGISTERED"
+            raise ChampionUnavailableError(
+                context.market.market_key, "NO_ARTIFACT_REGISTERED",
+                f"market '{context.market.market_key}' has no genuinely-trained Champion (placeholder "
+                "model, no artifact_ref) — prediction unavailable",
+            )
 
         try:
             model = await self.model_loader.load(
@@ -374,11 +400,7 @@ class PredictionEngine:
                 context.model.artifact_checksum,
             )
             return TrainedModelPredictor(market_kind=context.market.market_kind, model=model), "trained_model", None
-        except Exception as exc:  # noqa: BLE001 — any artifact-loading failure falls back, classified below
-            # Falling back is deliberate (a broken/tampered artifact must never break generation
-            # when a safe formula-based path exists), but it must never be *silent* — this is the
-            # Champion model failing to serve its own market, which operators need to see and act
-            # on (a corrupt/missing/tampered artifact is a real incident, not routine behavior).
+        except Exception as exc:  # noqa: BLE001 — any artifact-loading failure is reported, classified below
             # Reason classification is coarse by design (§3 forensic-audit taxonomy) — this codebase
             # runs multiple artifact-store backends and cannot reliably distinguish "the store
             # couldn't fetch the payload" from "the payload fetched but failed to deserialize" for
@@ -397,11 +419,15 @@ class PredictionEngine:
                     "model_id": str(context.model.id.value),
                     "artifact_ref": context.model.artifact_ref,
                     "framework": context.model.framework,
-                    "fallback_reason": reason,
+                    "unavailable_reason": reason,
                 },
                 exc_info=True,
             )
-            return self.predictors.get(context.market.market_kind, context.market.market_key), "formula_fallback", reason
+            raise ChampionUnavailableError(
+                context.market.market_key, reason,
+                f"market '{context.market.market_key}' Champion artifact failed to load ({reason}) — "
+                "prediction unavailable",
+            ) from exc
 
     async def _historical_accuracy(self, market_id: MarketId, target_type: TargetType) -> float:
         outcomes = await self.outcomes.list_by_market(market_id, limit=200)

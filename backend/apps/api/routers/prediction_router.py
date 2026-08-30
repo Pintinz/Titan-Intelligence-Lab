@@ -39,6 +39,7 @@ from modules.predictions.application.prediction_context_builder import (
     MarketNotInProductionError,
     NoChampionModelError,
 )
+from modules.predictions.application.prediction_engine import ChampionUnavailableError
 from modules.predictions.domain.contextual_reasoning import ContextualReview
 from modules.predictions.domain.football_explanation import FootballExplanation
 from modules.predictions.domain.entities import INITIAL_FREE_PREDICTIONS, REWARDED_AD_CREDIT_GRANT, Prediction, PredictionCreditExhaustedError
@@ -497,6 +498,15 @@ async def generate_prediction(
         # an internal implementation detail (an uncaught ValueError) into the same honest
         # "insufficient data" response MarketNotInProductionError/NoChampionModelError already get.
         raise HTTPException(status_code=409, detail=_blocked_detail("MISSING_REQUIRED_FEATURE", str(exc))) from None
+    except ChampionUnavailableError as exc:
+        # Master rebuild command §3/§104 (2026-08-30): no market may ever serve a generic
+        # formula-fallback prediction — a market with no genuinely-trained, loadable Champion now
+        # reports this honest gap instead, same shape/status code as every other "insufficient
+        # data" reason above, distinguished by exc.reason_code so an operator/UI can tell "never
+        # trained" (NO_ARTIFACT_REGISTERED) apart from "artifact broke" (ARTIFACT_LOAD_FAILURE et al).
+        raise HTTPException(
+            status_code=409, detail=_blocked_detail(f"CHAMPION_UNAVAILABLE_{exc.reason_code}", str(exc))
+        ) from None
 
     contextual_review: ContextualReview | None = None
     if body.include_contextual_review:
