@@ -117,8 +117,14 @@ class ScheduledTeamStatisticsSyncOrchestrator:
         # A `SyncRun` that succeeded without raising can still have fetched zero real records —
         # `run` is `None` when `_run_sync`'s own checkpoint/lock skipped the attempt entirely, and
         # `records_fetched == 0` when the provider call itself returned nothing (the fixture's
-        # only linked provider doesn't publish stats for it). Neither is a genuine "stats now
-        # exist" outcome, so both must be reported honestly rather than as "synced".
+        # only linked provider doesn't publish stats for it) OR failed outright (e.g.
+        # ProviderRouter._guard_same_provider refusing a cross-provider fixture-id mismatch —
+        # real incident, 2026-08-30). Neither is a genuine "stats now exist" outcome, so both must
+        # be reported honestly rather than as "synced" — and a real failure's own `error_message`
+        # is surfaced verbatim rather than collapsed into the same generic "no data" reason a
+        # provider that legitimately has nothing to report would get.
+        if run is not None and run.error_message:
+            return TeamStatisticsSyncOutcome(fixture_id=fixture_id, status="skipped", reason=run.error_message)
         if run is None or run.records_fetched == 0:
             return TeamStatisticsSyncOutcome(
                 fixture_id=fixture_id, status="no_data_from_provider",

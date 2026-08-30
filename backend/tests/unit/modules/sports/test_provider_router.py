@@ -18,6 +18,7 @@ from modules.admin.domain.value_objects import (
 )
 from modules.ingestion.infrastructure.cache.redis_lock import RedisDistributedLock
 from modules.ingestion.infrastructure.cache.redis_sync_cache import RedisSyncCache
+from modules.sports.domain.value_objects import ProviderRef
 from modules.sports.infrastructure.providers.api_sports_adapter import ProviderErrorKind, ProviderRequestError
 from modules.sports.infrastructure.providers.mock_provider import MockSportsDataProvider
 from modules.sports.infrastructure.providers.provider_router import (
@@ -274,6 +275,51 @@ async def test_fetch_odds_uses_mock_when_no_real_adapter_registered():
 
     assert odds is not None
     assert odds.home_win > 1.0
+
+
+@pytest.mark.asyncio
+async def test_fetch_team_statistics_refuses_a_cross_provider_fixture_ref():
+    """Real production incident (2026-08-30): a fixture reconciled only via football-data.org
+    had its own numeric external id sent straight to api-sports.io's /fixtures/statistics as if
+    it were an api-sports.io fixture id — TitanIQ has no cross-provider fixture-id mapping, so an
+    honest-looking HTTP 200/empty response was really luck, not correctness (a numeric collision
+    could have silently attributed a real, unrelated match's stats to the wrong fixture). The
+    router must refuse this outright rather than ever call the mismatched adapter."""
+    calls = []
+
+    @dataclass
+    class _RecordingStatsAdapter:
+        provider_key: str
+
+        async def fetch_team_statistics(self, fixture_ref):
+            calls.append(fixture_ref)
+            return ["should never be reached"]
+
+    router, provider_repo, credential_repo = _build_router(
+        real_adapters={"football": _RecordingStatsAdapter(provider_key="api_football")}
+    )
+    provider = ProviderDefinition(
+        id=ProviderId(uuid.uuid4()), key="api_football", name="API-Football",
+        category=ProviderCategory.SPORTS_DATA, status=ProviderStatus.ACTIVE,
+    )
+    await provider_repo.upsert(provider)
+    await credential_repo.upsert(
+        ProviderCredential(id=CredentialId(uuid.uuid4()), provider_id=provider.id, label="primary", encrypted_value="k")
+    )
+    mismatched_ref = ProviderRef(provider="football_data_org", external_id="560571")
+
+    with pytest.raises(ProviderNotConfiguredError):
+        await router.fetch_team_statistics("football", mismatched_ref, T0)
+
+    assert calls == []  # the mismatched adapter must never actually be called
+
+    # And this refusal must never count as a circuit-breaker failure against api-football, since
+    # it's a caller-side routing mismatch, not evidence api-football itself is unhealthy — even
+    # well past _build_router's failure_threshold=2, the circuit must stay closed.
+    for _ in range(5):
+        with pytest.raises(ProviderNotConfiguredError):
+            await router.fetch_team_statistics("football", mismatched_ref, T0, low_priority=True)
+    assert router.circuit_breaker.allow_request("api_football", T0) is True
 
 
 @pytest.mark.asyncio

@@ -267,6 +267,13 @@ class SportsProviderRouter:
                     raise ProviderThrottledError(f"quota protection throttled '{adapter.provider_key}'")
                 try:
                     result = await self._call_with_retry(call, adapter)
+                except ProviderNotConfiguredError:
+                    # Not evidence the provider itself is unhealthy — either a genuine missing
+                    # capability, or (see _guard_same_provider) a caller-side cross-provider
+                    # fixture-id mismatch. Recording either as a circuit/quota failure would let
+                    # a structurally-impossible call (not a real api-sports.io fault) trip the
+                    # breaker for every other, legitimate api-sports.io request.
+                    raise
                 except Exception:
                     self.circuit_breaker.record_failure(adapter.provider_key, now)
                     if provider:
@@ -337,12 +344,39 @@ class SportsProviderRouter:
             lambda adapter: adapter.fetch_standings(competition_ref, season_label),
         )
 
+    def _guard_same_provider(self, fixture_ref: ProviderRef, call: callable) -> callable:
+        """Real production incident (2026-08-30): `_execute` resolves its adapter purely from
+        `sport_code` (the sport's currently-active default provider), completely ignoring which
+        provider `fixture_ref` actually came from — so a fixture reconciled only via
+        football-data.org had *its own* numeric external id sent straight to api-sports.io's
+        `/fixtures/statistics?fixture={id}` as if it were an api-sports.io fixture id. Live-
+        observed as an honest-looking `HTTP 200` with an empty `response` (no api-sports.io
+        fixture happens to share that number) — but nothing prevented a numeric collision from
+        silently attributing a real, unrelated match's statistics to the wrong fixture. TitanIQ
+        has no cross-provider fixture-id mapping (unlike teams, which now go through
+        `ProviderRefIndexRepositoryPort`/`_resolve_existing_team`), so the only safe behavior
+        today is to refuse the call outright rather than guess. Wraps any fixture_ref-keyed call
+        (`fetch_team_statistics`/`fetch_lineups`/`fetch_odds`) so this can never regress
+        independently in one of them."""
+
+        def _checked(adapter):
+            if adapter.provider_key != fixture_ref.provider:
+                raise ProviderNotConfiguredError(
+                    f"fixture was reconciled via provider {fixture_ref.provider!r}, but the sport's "
+                    f"active adapter is {adapter.provider_key!r} — no cross-provider fixture-id "
+                    f"mapping exists, so external id {fixture_ref.external_id!r} cannot safely be "
+                    "sent to a different provider's endpoint"
+                )
+            return call(adapter)
+
+        return _checked
+
     async def fetch_team_statistics(
         self, sport_code: str, fixture_ref: ProviderRef, now: datetime, *, low_priority: bool = False
     ) -> list[ProviderTeamStatisticsRecord]:
         return await self._execute(
             sport_code, ("team_statistics", sport_code, fixture_ref.provider, fixture_ref.external_id),
-            now, low_priority, lambda adapter: adapter.fetch_team_statistics(fixture_ref),
+            now, low_priority, self._guard_same_provider(fixture_ref, lambda adapter: adapter.fetch_team_statistics(fixture_ref)),
         )
 
     async def fetch_lineups(
@@ -350,7 +384,7 @@ class SportsProviderRouter:
     ) -> list[ProviderLineupRecord]:
         return await self._execute(
             sport_code, ("lineups", sport_code, fixture_ref.provider, fixture_ref.external_id),
-            now, low_priority, lambda adapter: adapter.fetch_lineups(fixture_ref),
+            now, low_priority, self._guard_same_provider(fixture_ref, lambda adapter: adapter.fetch_lineups(fixture_ref)),
         )
 
     async def fetch_odds(
@@ -358,7 +392,7 @@ class SportsProviderRouter:
     ) -> ProviderOddsRecord | None:
         return await self._execute(
             sport_code, ("odds", sport_code, fixture_ref.provider, fixture_ref.external_id),
-            now, low_priority, lambda adapter: adapter.fetch_odds(fixture_ref),
+            now, low_priority, self._guard_same_provider(fixture_ref, lambda adapter: adapter.fetch_odds(fixture_ref)),
         )
 
     async def fetch_injuries(

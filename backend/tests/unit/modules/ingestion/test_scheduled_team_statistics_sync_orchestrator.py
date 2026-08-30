@@ -78,12 +78,15 @@ class FakeSyncOrchestrator:
     calls: list = field(default_factory=list)
     raise_for: dict = field(default_factory=dict)  # fixture_id -> Exception
     fetched_for: dict = field(default_factory=dict)  # fixture_id -> int, default 1 (has real data)
+    error_for: dict = field(default_factory=dict)  # fixture_id -> the failed SyncRun's own error_message
 
     async def sync_team_statistics_for_fixture(self, sport_code, fixture_ref, fixture_id, now):
         self.calls.append((sport_code, fixture_ref, fixture_id))
         if fixture_id in self.raise_for:
             raise self.raise_for[fixture_id]
-        return SimpleNamespace(records_fetched=self.fetched_for.get(fixture_id, 1))
+        return SimpleNamespace(
+            records_fetched=self.fetched_for.get(fixture_id, 1), error_message=self.error_for.get(fixture_id),
+        )
 
 
 def _sport(code: SportCode) -> Sport:
@@ -141,6 +144,25 @@ def test_reports_honestly_when_the_provider_returns_zero_records(sync, registry_
     assert len(sync.calls) == 1
     assert outcomes[0].status == "no_data_from_provider"
     assert "no team statistics" in outcomes[0].reason
+
+
+def test_surfaces_the_real_failure_reason_instead_of_a_generic_no_data_message(sync, registry_and_repos):
+    """Real production incident (2026-08-30): ProviderRouter._guard_same_provider now refuses a
+    fixture whose provider doesn't match the sport's active adapter (a cross-provider fixture-id
+    mismatch, e.g. sending a football-data.org fixture id to api-sports.io) — that failed
+    SyncRun's own error_message must reach the operator, not get collapsed into the same generic
+    "returned no team statistics" reason a provider with genuinely nothing to report would get."""
+    football, _sports, fixtures, _matches, _team_statistics, _plugins = registry_and_repos
+    fixture = _Fixture(id=FixtureId(uuid4()), scheduled_at=T0 - timedelta(hours=3))
+    fixtures.by_sport[football.id] = [fixture]
+    sync.fetched_for[str(fixture.id)] = 0
+    sync.error_for[str(fixture.id)] = "no cross-provider fixture-id mapping exists"
+
+    orchestrator = _orchestrator(sync, registry_and_repos)
+    outcomes = asyncio.run(orchestrator.run(T0))
+
+    assert outcomes[0].status == "skipped"
+    assert outcomes[0].reason == "no cross-provider fixture-id mapping exists"
 
 
 def test_skips_a_fixture_whose_match_already_has_both_sides_stats(sync, registry_and_repos):
