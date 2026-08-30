@@ -2165,6 +2165,20 @@ async def task_result(task_id: str, _admin: _AuthUser = Depends(require_role(_Ro
     )
 
 
+@app.post("/api/v1/admin/system/task-result/{task_id}/revoke")
+async def revoke_task(task_id: str, _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
+    """Marks a task revoked so it will NOT execute the next time it's dispatched (a scheduled
+    retry, or if it's still sitting unclaimed in the queue) — does NOT interrupt a task already
+    mid-execution (this worker runs `--pool=solo`, a single process with no separate child to
+    signal). Real need, 2026-08-30: a stuck task repeatedly retrying the same bug on the
+    single-threaded worker was blocking every other queued task (including
+    predictions.repair_broken_champions) from ever getting a turn."""
+    from modules.ingestion.infrastructure.celery.celery_app import celery_app
+
+    celery_app.control.revoke(task_id)
+    return envelope(data={"task_id": task_id, "revoked": True})
+
+
 @app.get("/api/v1/admin/system/dead-letters")
 async def dead_letters(limit: int = 50, _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
     """Read-only view of `dlq:sync_tasks` (`modules.ingestion.infrastructure.celery.dead_letter`)
