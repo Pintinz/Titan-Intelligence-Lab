@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import hashlib
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -107,3 +108,24 @@ def check_all_provider_health_task(self, now_iso: str | None = None) -> dict:
             return {"checked": checked, "skipped_inactive": skipped, "total_providers": len(providers)}
 
     return asyncio.run(_do())
+
+
+@celery_app.task(name="admin.report_vault_key_fingerprint", bind=True, **_RETRY_KWARGS)
+@_logged("admin.report_vault_key_fingerprint")
+def report_vault_key_fingerprint_task(self) -> dict:
+    """Vault/Fernet key consistency audit, 2026-08-30: `admin.check_all_provider_health` has been
+    failing in THIS worker process with `credential ciphertext is invalid or was encrypted with a
+    different key` for every provider, while nothing established whether the API process's own
+    TITANIQ_ENCRYPTION_KEY actually differs, or whether the stored ciphertext is simply
+    unrecoverable under any key currently configured anywhere. Reports only a truncated SHA-256
+    fingerprint of the key as resolved by THIS process — never the key itself — for comparison
+    against `GET /api/v1/admin/system/vault-key-fingerprint` (the API's own view), via
+    `GET /api/v1/admin/system/task-result/{task_id}`. No DB/session/factory needed — this reads
+    only the environment this worker process itself was started with."""
+    from modules.admin.infrastructure.vault import get_vault_settings
+
+    try:
+        key = get_vault_settings().encryption_key
+    except Exception as exc:  # noqa: BLE001 — "unset" is itself the diagnostic answer here
+        return {"present": False, "error": str(exc)}
+    return {"present": True, "fingerprint": hashlib.sha256(key.encode()).hexdigest()[:8]}

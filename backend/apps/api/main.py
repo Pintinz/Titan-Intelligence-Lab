@@ -8,6 +8,7 @@ docs/api_specification.md's route groups land as their owning modules are built
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import uuid
 from contextlib import asynccontextmanager
@@ -2104,6 +2105,62 @@ async def database_status(session: AsyncSession = Depends(get_session), _admin: 
             "latest_prediction_generated_at": latest_prediction,
             "latest_model_created_at": latest_model,
             "latest_news_fetched_at": latest_news,
+        }
+    )
+
+
+@app.get("/api/v1/admin/system/vault-key-fingerprint")
+async def vault_key_fingerprint(_admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
+    """SHA-256(TITANIQ_ENCRYPTION_KEY)[:8] as resolved by THIS process — never the key itself
+    (spec: never log/return a secret, even to an admin). A real, live 2026-08-30 incident:
+    `admin.check_all_provider_health` has been failing in the worker with
+    `credential ciphertext is invalid or was encrypted with a different key` for every provider,
+    while the API process's own Provider Management view of the same rows never reported that.
+    Render doesn't auto-sync a manually-set (non-blueprint) env var like TITANIQ_ENCRYPTION_KEY
+    across services, so API/Worker/Beat can silently diverge. Compare this fingerprint against
+    the worker's (`admin.report_vault_key_fingerprint` task, polled via
+    `/admin/system/task-result/{task_id}`) to prove or rule out a cross-service key mismatch
+    without ever exposing the actual key."""
+    from modules.admin.infrastructure.vault import get_vault_settings
+
+    try:
+        key = get_vault_settings().encryption_key
+    except Exception as exc:  # noqa: BLE001 — "unset" is itself diagnostic information here
+        return envelope(data={"present": False, "error": str(exc)})
+    return envelope(data={"present": True, "fingerprint": hashlib.sha256(key.encode()).hexdigest()[:8]})
+
+
+@app.post("/api/v1/admin/system/vault-key-fingerprint/worker")
+async def trigger_worker_vault_key_fingerprint(_admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
+    """Enqueues `admin.report_vault_key_fingerprint` so the WORKER process's own view of
+    TITANIQ_ENCRYPTION_KEY can be compared against `GET /admin/system/vault-key-fingerprint`
+    (the API's own view) — poll the returned task_id via `GET /admin/system/task-result/{task_id}`."""
+    from modules.admin.infrastructure.celery.tasks import report_vault_key_fingerprint_task
+
+    result = report_vault_key_fingerprint_task.delay()
+    return envelope(data={"task_id": result.id, "status": "queued"})
+
+
+@app.get("/api/v1/admin/system/task-result/{task_id}")
+async def task_result(task_id: str, _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
+    """Generic Celery `AsyncResult` polling — every admin-triggered on-demand task in this file
+    (`repair_broken_champions_task`, `repair_correct_score_feature_requirements_task`,
+    `check_scheduled_retraining_task`, `check_scheduled_prediction_generation_task`, and the new
+    `report_vault_key_fingerprint_task`) so far only ever returned a task_id with no way to learn
+    the eventual outcome short of grepping worker logs — this closes that gap."""
+    from celery.result import AsyncResult
+
+    from modules.ingestion.infrastructure.celery.celery_app import celery_app
+
+    result = AsyncResult(task_id, app=celery_app)
+    return envelope(
+        data={
+            "task_id": task_id,
+            "state": result.state,
+            "ready": result.ready(),
+            "successful": result.successful() if result.ready() else None,
+            "result": result.result if result.ready() and result.successful() else None,
+            "error": str(result.result) if result.ready() and not result.successful() else None,
         }
     )
 

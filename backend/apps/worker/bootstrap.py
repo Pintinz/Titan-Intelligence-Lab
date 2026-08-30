@@ -125,7 +125,10 @@ def _fresh_registry() -> dict[str, FactoryRecord]:
         "admin_context": FactoryRecord(
             name="admin_context", module="modules.admin.infrastructure.celery.tasks",
             service="(ProviderManagementService, HealthIntelligenceEngine)",
-            task_names=("admin.check_all_provider_health",),
+            # admin.report_vault_key_fingerprint needs no factory (it only reads this process's own
+            # TITANIQ_ENCRYPTION_KEY env var, no DB/session) — named here anyway so the "every real
+            # task belongs to exactly one FactoryRecord" invariant (test_worker_bootstrap.py) holds.
+            task_names=("admin.check_all_provider_health", "admin.report_vault_key_fingerprint"),
         ),
         "retraining_orchestrator": FactoryRecord(
             name="retraining_orchestrator", module="modules.predictions.infrastructure.celery.tasks",
