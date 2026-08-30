@@ -34,6 +34,18 @@ STATISTICS_INTERVAL_SECONDS = 1800
 # re-fetch loop. Paired with sync_orchestrator.py's LIVE_FIXTURES_LOCK_TTL_SECONDS (600s), which
 # protects the (now much rarer) case of a run that still overruns this interval.
 LIVE_FIXTURES_INTERVAL_SECONDS = 300
+# Backlog-runaway fix, 2026-08-30 — this is the SAME failure mode the 30s->300s interval change
+# above already fixed once (see that comment's own "queue backlog of 5,797 tasks" incident),
+# recurring at smaller scale (373 queued, mostly this task) for a different reason: the 300s
+# interval only bounds duplication while the worker is keeping pace. Live-verified today: the
+# worker was genuinely unavailable for extended stretches (crash/restart cycles, an unrelated
+# hung provider call) totally unrelated to this task's own logic, and Beat kept firing every 300s
+# regardless, since Beat has no way to know the worker isn't consuming. `expires` is Celery's own
+# answer to exactly this: a queued instance older than its own refresh interval is simply "already
+# stale — a fresher one is due any moment," so the worker (once it recovers) discards it instead of
+# running a late, redundant sync. Caps backlog growth per scope regardless of how long an outage
+# lasts, self-healing the moment the worker comes back — no lock/dedup mechanism needed.
+_LIVE_FIXTURES_OPTIONS = {"expires": LIVE_FIXTURES_INTERVAL_SECONDS}
 PROVIDER_HEALTH_CHECK_INTERVAL_SECONDS = 300
 PROVIDER_POLL_INTERVAL_SECONDS = 900
 # Retraining is a heavy, dataset-build-plus-multi-algorithm-training operation — a 6-hour cadence
@@ -142,6 +154,7 @@ BEAT_SCHEDULE = {
     "sync-live-fixtures-football-epl": {
         "task": "ingestion.sync_live_fixtures", "schedule": timedelta(seconds=LIVE_FIXTURES_INTERVAL_SECONDS),
         "args": ("football", "39", "2023", "21521495-4dd4-4c50-a41d-d88642322804"),
+        "options": _LIVE_FIXTURES_OPTIONS,
     },
     "sync-countries-basketball": {
         "task": "ingestion.sync_countries", "schedule": timedelta(seconds=HISTORICAL_IMPORT_INTERVAL_SECONDS * 4),
@@ -154,6 +167,7 @@ BEAT_SCHEDULE = {
     "sync-live-fixtures-basketball-nba": {
         "task": "ingestion.sync_live_fixtures", "schedule": timedelta(seconds=LIVE_FIXTURES_INTERVAL_SECONDS),
         "args": ("basketball", "12", "2023-2024", "0b1c3ee3-88c9-4f2c-83b3-78144a3481d3"),
+        "options": _LIVE_FIXTURES_OPTIONS,
     },
     "sync-standings-basketball-euroleague": {
         "task": "ingestion.sync_standings", "schedule": timedelta(seconds=STANDINGS_INTERVAL_SECONDS),
@@ -162,6 +176,7 @@ BEAT_SCHEDULE = {
     "sync-live-fixtures-basketball-euroleague": {
         "task": "ingestion.sync_live_fixtures", "schedule": timedelta(seconds=LIVE_FIXTURES_INTERVAL_SECONDS),
         "args": ("basketball", "120", "2023", "0cfa00cc-1fd9-433d-a8d9-cdf7d7cbab6f"),
+        "options": _LIVE_FIXTURES_OPTIONS,
     },
     "sync-countries-baseball": {
         "task": "ingestion.sync_countries", "schedule": timedelta(seconds=HISTORICAL_IMPORT_INTERVAL_SECONDS * 4),
@@ -174,6 +189,7 @@ BEAT_SCHEDULE = {
     "sync-live-fixtures-baseball-mlb": {
         "task": "ingestion.sync_live_fixtures", "schedule": timedelta(seconds=LIVE_FIXTURES_INTERVAL_SECONDS),
         "args": ("baseball", "1", "2023", "0c67a838-9049-4bab-b3e4-6bbf675fc96b"),
+        "options": _LIVE_FIXTURES_OPTIONS,
     },
     "sync-standings-baseball-npb": {
         "task": "ingestion.sync_standings", "schedule": timedelta(seconds=STANDINGS_INTERVAL_SECONDS),
@@ -182,6 +198,7 @@ BEAT_SCHEDULE = {
     "sync-live-fixtures-baseball-npb": {
         "task": "ingestion.sync_live_fixtures", "schedule": timedelta(seconds=LIVE_FIXTURES_INTERVAL_SECONDS),
         "args": ("baseball", "2", "2023", "0ee2290f-e216-48a1-bb2f-f92ec4f39d51"),
+        "options": _LIVE_FIXTURES_OPTIONS,
     },
     # football-data.org fixture-schedule path (opt-in per competition via
     # CompetitionFixtureSourcePreference) — competition_id/season_label/season_id below are EPL's

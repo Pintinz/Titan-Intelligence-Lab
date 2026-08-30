@@ -2203,6 +2203,23 @@ async def queue_depth(_admin: _AuthUser = Depends(require_role(_Role.ADMINISTRAT
     return envelope(data={"queue_length": length, "oldest_queued_tasks": sample})
 
 
+@app.post("/api/v1/admin/system/queue-purge")
+async def purge_queue(_admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
+    """Clears the entire Celery broker queue via `control.purge()` — real need, 2026-08-30:
+    `GET /admin/system/queue-depth` found 373 backlogged messages, ~94% redundant
+    `ingestion.sync_live_fixtures` duplicates accumulated during today's worker outages (the exact
+    failure mode `beat_schedule.py`'s `_LIVE_FIXTURES_OPTIONS` now caps going forward — see that
+    comment — but doesn't retroactively clear). A full purge, not a selective one, because every
+    task class currently queued is safely re-triggerable: every ingestion/admin-health entry is
+    Beat-recurring and self-heals within its own next interval, and any admin-triggered repair
+    task lost here can simply be re-triggered. Discards messages already in the broker; does not
+    touch anything already executing."""
+    from modules.ingestion.infrastructure.celery.celery_app import celery_app
+
+    purged = celery_app.control.purge()
+    return envelope(data={"purged": purged})
+
+
 @app.post("/api/v1/admin/system/task-result/{task_id}/revoke")
 async def revoke_task(task_id: str, _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
     """Marks a task revoked so it will NOT execute the next time it's dispatched (a scheduled
