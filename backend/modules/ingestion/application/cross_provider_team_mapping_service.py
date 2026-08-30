@@ -19,12 +19,27 @@ from __future__ import annotations
 
 import re
 import unicodedata
+import uuid
 from dataclasses import dataclass
 
 from modules.ingestion.domain.entities import ProviderRefIndexEntry
 from modules.ingestion.domain.value_objects import EntityKind
 from modules.ingestion.ports.repositories import ProviderRefIndexRepositoryPort
+from modules.sports.domain.value_objects import TeamId
 from modules.sports.ports.provider_gateway import ProviderTeamRecord
+from modules.sports.ports.repositories import TeamRepositoryPort
+
+
+class UnknownTeamMappingTargetError(ValueError):
+    """Raised by `confirm_mappings` when a confirmed mapping's `titaniq_team_id` doesn't
+    correspond to a real, current `Team` row — real production incident (2026-08-30): this write
+    path previously trusted `titaniq_team_id` blindly, so a confirmed mapping whose target team
+    was later deleted (or was mistyped/stale to begin with) became a permanently dangling
+    `provider_ref_index` entry with no recurring sync to ever re-heal it (unlike every other
+    provider's team refs, which `EntityReconciliationService.reconcile_team` keeps self-healing on
+    every sync). `EntityReconciliationService._resolve_existing_team` now defends the *read* side
+    of this same gap; this defends the *write* side, so a bad mapping is never accepted in the
+    first place."""
 
 # Common club-name suffix noise that differs between how football-data.org and api-football
 # render the same real club (e.g. "Chelsea FC" vs "Chelsea") — stripping it before comparison
@@ -68,6 +83,7 @@ class ConfirmedTeamMapping:
 @dataclass
 class CrossProviderTeamMappingService:
     ref_index: ProviderRefIndexRepositoryPort
+    teams: TeamRepositoryPort
 
     def suggest_mappings(
         self, fd_teams: list[ProviderTeamRecord], existing_teams: list[ExistingTeamRef]
@@ -99,7 +115,18 @@ class CrossProviderTeamMappingService:
         pointing at the same internal ``Team`` id api-football's own ref already points to —
         ``provider_ref_index`` is unique on ``(provider, external_id, entity_kind)``, not on
         ``entity_id``, so this coexists with the existing api-football ref rather than replacing
-        it (see ``ProviderRefIndexEntry``'s docstring)."""
+        it (see ``ProviderRefIndexEntry``'s docstring).
+
+        Validates every ``titaniq_team_id`` against a real, current ``Team`` row before writing
+        anything — raises ``UnknownTeamMappingTargetError`` (never silently drops the mapping) if
+        any target doesn't exist, so a confirmed mapping can never become the dangling reference
+        that caused the 2026-08-30 incident."""
+        for mapping in mappings:
+            if await self.teams.get(TeamId(uuid.UUID(mapping.titaniq_team_id))) is None:
+                raise UnknownTeamMappingTargetError(
+                    f"cannot confirm football-data.org team {mapping.football_data_org_team_id!r} -> "
+                    f"titaniq_team_id {mapping.titaniq_team_id!r}: no such team exists"
+                )
         for mapping in mappings:
             await self.ref_index.upsert(
                 ProviderRefIndexEntry(

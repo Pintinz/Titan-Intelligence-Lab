@@ -433,6 +433,30 @@ def test_confirm_team_mappings_writes_ref_index_entry(client, db_session_factory
     assert asyncio.run(_resolved()) == team_id
 
 
+def test_confirm_team_mappings_rejects_a_nonexistent_target_team(client, db_session_factory):
+    """Real production incident (2026-08-30): confirming a mapping against a `titaniq_team_id`
+    that doesn't correspond to a real team used to write the ref_index entry anyway, creating a
+    permanently dangling reference — later surfacing as a raw Postgres ForeignKeyViolationError
+    when a fixture referenced it. Must reject up front instead."""
+    import uuid as _uuid
+
+    response = client.post(
+        "/api/v1/admin/providers/football-data-org/team-mappings",
+        json={"mappings": [{"football_data_org_team_id": "67", "titaniq_team_id": str(_uuid.uuid4())}]},
+    )
+
+    assert response.status_code == 404
+
+    async def _resolved():
+        from modules.ingestion.domain.value_objects import EntityKind
+        from modules.ingestion.infrastructure.persistence.repositories import SqlAlchemyProviderRefIndexRepository
+
+        async with db_session_factory() as session:
+            return await SqlAlchemyProviderRefIndexRepository(session=session).get("football_data_org", "67", EntityKind.TEAM)
+
+    assert asyncio.run(_resolved()) is None  # nothing was written
+
+
 def test_kg_node_read_returns_edges_after_sync(client, db_session_factory):
     asyncio.run(_seed_reconciled_sport(db_session_factory))
     client.post("/api/v1/admin/sync/football/teams/39", json={"force": False})

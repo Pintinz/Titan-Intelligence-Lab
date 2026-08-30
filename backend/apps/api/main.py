@@ -112,7 +112,11 @@ from modules.features.application.feature_registration_service import (
 )
 from modules.features.domain.entities import FeatureConsumer, FeatureDefinition, FeatureValidationReport
 from modules.features.domain.value_objects import EntityType, FeatureCategory, FeatureDataType, FeatureKey
-from modules.ingestion.application.cross_provider_team_mapping_service import ConfirmedTeamMapping, ExistingTeamRef
+from modules.ingestion.application.cross_provider_team_mapping_service import (
+    ConfirmedTeamMapping,
+    ExistingTeamRef,
+    UnknownTeamMappingTargetError,
+)
 from modules.ingestion.application.sync_orchestrator import NoFixtureSourcePreferenceError, SportNotReconciledError
 from modules.ingestion.domain.entities import CompetitionFixtureSourcePreference
 from modules.ingestion.domain.value_objects import EntityKind as IngestionEntityKind
@@ -1715,14 +1719,17 @@ async def confirm_football_data_org_team_mappings(
     `CrossProviderTeamMappingService.confirm_mappings`'s docstring. Never called automatically;
     always an explicit admin action confirming (possibly editing) the suggestions above."""
     service = build_cross_provider_team_mapping_service(session)
-    await service.confirm_mappings(
-        [
-            ConfirmedTeamMapping(
-                football_data_org_team_id=item.football_data_org_team_id, titaniq_team_id=item.titaniq_team_id
-            )
-            for item in body.mappings
-        ]
-    )
+    try:
+        await service.confirm_mappings(
+            [
+                ConfirmedTeamMapping(
+                    football_data_org_team_id=item.football_data_org_team_id, titaniq_team_id=item.titaniq_team_id
+                )
+                for item in body.mappings
+            ]
+        )
+    except UnknownTeamMappingTargetError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
     return envelope(data={"mapped": len(body.mappings)})
 
 

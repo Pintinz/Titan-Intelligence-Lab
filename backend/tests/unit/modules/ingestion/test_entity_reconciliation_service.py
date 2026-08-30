@@ -680,6 +680,42 @@ async def test_reconcile_fixture_raises_when_teams_unresolved(service, session):
 
 
 @pytest.mark.asyncio
+async def test_reconcile_fixture_raises_instead_of_using_a_dangling_team_reference(service, session):
+    """Real production incident (2026-08-30, fixture 560571): `provider_ref_index` had a live
+    entry for a team whose `teams` row no longer existed (deleted independently of the index) —
+    `reconcile_fixture` used to trust the index's non-null id directly, so the dangling id reached
+    the Postgres INSERT as a literal foreign-key value and surfaced as a raw
+    `ForeignKeyViolationError` instead of the honest `ReconciliationDependencyError` every other
+    unresolved-prerequisite case already gets. Simulates the dangling state by deleting the team
+    row directly (bypassing the port, matching how the real row went missing) while leaving its
+    `provider_ref_index` entry in place."""
+    from sqlalchemy import delete
+
+    from modules.sports.infrastructure.persistence.models import TeamModel
+
+    sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
+    await session.commit()
+    competition, _ = await service.reconcile_competition("39", "mock_football", sport.id, T0)
+    season, _ = await service.reconcile_season("39", "2026", "mock_football", competition.id, T0)
+    home, _ = await service.reconcile_team(_team_record("t1", "Arsenal"), sport.id, T0)
+    away, _ = await service.reconcile_team(_team_record("t2", "Chelsea"), sport.id, T0)
+    await session.commit()
+
+    await session.execute(delete(TeamModel).where(TeamModel.id == home.id.value))
+    await session.commit()
+
+    fixture_record = ProviderFixtureRecord(
+        external_ref=ProviderRef(provider="mock_football", external_id="fx1"),
+        home_team_ref=ProviderRef(provider="mock_football", external_id="t1"),
+        away_team_ref=ProviderRef(provider="mock_football", external_id="t2"),
+        scheduled_at=T0, competition_ref="39", season_label="2026",
+    )
+
+    with pytest.raises(ReconciliationDependencyError):
+        await service.reconcile_fixture(fixture_record, season.id, T0)
+
+
+@pytest.mark.asyncio
 async def test_reconcile_fixture_end_to_end_creates_and_updates(service, session):
     sport, _ = await service.reconcile_sport(SportCode.FOOTBALL, "Football", T0)
     await session.commit()

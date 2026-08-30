@@ -603,7 +603,10 @@ def build_competition_fixture_source_repository(session: AsyncSession) -> SqlAlc
 
 
 def build_cross_provider_team_mapping_service(session: AsyncSession) -> CrossProviderTeamMappingService:
-    return CrossProviderTeamMappingService(ref_index=SqlAlchemyProviderRefIndexRepository(session=session))
+    return CrossProviderTeamMappingService(
+        ref_index=SqlAlchemyProviderRefIndexRepository(session=session),
+        teams=SqlAlchemyTeamRepository(session=session),
+    )
 
 
 def build_sports_provider_router(session: AsyncSession) -> SportsProviderRouter:

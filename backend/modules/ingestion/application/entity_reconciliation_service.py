@@ -267,6 +267,22 @@ class EntityReconciliationService:
     async def _resolve(self, provider: str, external_id: str, kind: EntityKind) -> str | None:
         return await self.ref_index.get(provider, external_id, kind)
 
+    async def _resolve_existing_team(self, provider: str, external_id: str) -> str | None:
+        """Same defensive pattern `reconcile_team` already uses (`self.teams.get`, not just a
+        non-null ref-index hit) — a dangling `ref_index` entry (the index says "seen before" but
+        the team row it points at was deleted, or the row and the index write landed on different
+        sides of a rollback) must resolve as unseen, not as a real id. Real incident (2026-08-30,
+        fixture 560571): `reconcile_fixture` used to trust `_resolve()`'s non-None return
+        directly, so a dangling team reference reached the Postgres INSERT as a literal
+        foreign-key value — a raw `ForeignKeyViolationError` instead of the honest
+        `ReconciliationDependencyError` every other unresolved-prerequisite case already gets."""
+        team_id = await self._resolve(provider, external_id, EntityKind.TEAM)
+        if team_id is None:
+            return None
+        if await self.teams.get(TeamId(_as_uuid(team_id))) is None:
+            return None
+        return team_id
+
     async def _record_ref(self, provider: str, external_id: str, kind: EntityKind, entity_id: str) -> None:
         await self.ref_index.upsert(ProviderRefIndexEntry(provider, external_id, kind, entity_id))
 
@@ -414,7 +430,7 @@ class EntityReconciliationService:
     async def reconcile_player(
         self, record: ProviderPlayerRecord, sport_id: SportId, now: datetime
     ) -> tuple[Player, bool]:
-        team_id_str = await self._resolve(record.team_ref.provider, record.team_ref.external_id, EntityKind.TEAM)
+        team_id_str = await self._resolve_existing_team(record.team_ref.provider, record.team_ref.external_id)
         existing_id = await self._resolve(record.external_ref.provider, record.external_ref.external_id, EntityKind.PLAYER)
         existing = await self.players.get(PlayerId(_as_uuid(existing_id))) if existing_id else None
         created = existing is None
@@ -489,8 +505,8 @@ class EntityReconciliationService:
         sport_code: str | None = None, match_by_teams_and_date: bool = False, allow_skip_live: bool = False,
         preserve_existing_score: bool = False, feature_as_of: datetime | None = None,
     ) -> tuple[Fixture, bool]:
-        home_id = await self._resolve(record.home_team_ref.provider, record.home_team_ref.external_id, EntityKind.TEAM)
-        away_id = await self._resolve(record.away_team_ref.provider, record.away_team_ref.external_id, EntityKind.TEAM)
+        home_id = await self._resolve_existing_team(record.home_team_ref.provider, record.home_team_ref.external_id)
+        away_id = await self._resolve_existing_team(record.away_team_ref.provider, record.away_team_ref.external_id)
         if home_id is None or away_id is None:
             raise ReconciliationDependencyError(
                 f"fixture {record.external_ref.external_id} references teams not yet reconciled"
@@ -732,7 +748,7 @@ class EntityReconciliationService:
     async def reconcile_team_statistics(
         self, record: ProviderTeamStatisticsRecord, match_id: MatchId, now: datetime
     ) -> tuple[TeamStatistics, bool]:
-        team_id_str = await self._resolve(record.team_ref.provider, record.team_ref.external_id, EntityKind.TEAM)
+        team_id_str = await self._resolve_existing_team(record.team_ref.provider, record.team_ref.external_id)
         if team_id_str is None:
             raise ReconciliationDependencyError(f"team {record.team_ref.external_id} not yet reconciled")
         team_id = TeamId(_as_uuid(team_id_str))
@@ -777,7 +793,7 @@ class EntityReconciliationService:
         posture) let this method pick the right home/away `LineupContinuityCalculator` — needed
         because the feature is written under `EntityType.FIXTURE`, and this method otherwise only
         knows `match_id`, not the fixture or which side `team_id` resolves to."""
-        team_id_str = await self._resolve(record.team_ref.provider, record.team_ref.external_id, EntityKind.TEAM)
+        team_id_str = await self._resolve_existing_team(record.team_ref.provider, record.team_ref.external_id)
         if team_id_str is None:
             raise ReconciliationDependencyError(f"team {record.team_ref.external_id} not yet reconciled")
         team_id = TeamId(_as_uuid(team_id_str))
@@ -828,7 +844,7 @@ class EntityReconciliationService:
     ) -> Standing:
         """Standings are point-in-time snapshots — every call inserts a new row (the sync
         time IS the snapshot time), preserving history rather than overwriting in place."""
-        team_id_str = await self._resolve(record.team_ref.provider, record.team_ref.external_id, EntityKind.TEAM)
+        team_id_str = await self._resolve_existing_team(record.team_ref.provider, record.team_ref.external_id)
         if team_id_str is None:
             raise ReconciliationDependencyError(f"team {record.team_ref.external_id} not yet reconciled")
         team_id = TeamId(_as_uuid(team_id_str))
@@ -917,11 +933,11 @@ class EntityReconciliationService:
         )
         from_team_id = None
         if record.from_team_ref is not None:
-            from_team_id_str = await self._resolve(record.from_team_ref.provider, record.from_team_ref.external_id, EntityKind.TEAM)
+            from_team_id_str = await self._resolve_existing_team(record.from_team_ref.provider, record.from_team_ref.external_id)
             from_team_id = TeamId(_as_uuid(from_team_id_str)) if from_team_id_str else None
         to_team_id = None
         if record.to_team_ref is not None:
-            to_team_id_str = await self._resolve(record.to_team_ref.provider, record.to_team_ref.external_id, EntityKind.TEAM)
+            to_team_id_str = await self._resolve_existing_team(record.to_team_ref.provider, record.to_team_ref.external_id)
             to_team_id = TeamId(_as_uuid(to_team_id_str)) if to_team_id_str else None
 
         player_id_str = await self._resolve(record.player_ref.provider, record.player_ref.external_id, EntityKind.PLAYER)
@@ -956,7 +972,7 @@ class EntityReconciliationService:
         a *different* person, that row is closed (``valid_to`` set to ``now``) and a new row is
         created for the incoming person — history is never overwritten. If it's the same person,
         this is a no-op re-confirmation, not a new row."""
-        team_id_str = await self._resolve(record.team_ref.provider, record.team_ref.external_id, EntityKind.TEAM)
+        team_id_str = await self._resolve_existing_team(record.team_ref.provider, record.team_ref.external_id)
         if team_id_str is None:
             raise ReconciliationDependencyError(f"team {record.team_ref.external_id} not yet reconciled")
         team_id = TeamId(_as_uuid(team_id_str))
