@@ -436,10 +436,10 @@ def repair_correct_score_feature_requirements_task(self, now_iso: str | None = N
                 await ctx.session.execute(
                     text(
                         "SELECT f.id, f.home_team_id, f.away_team_id, f.season_id, c.sport_id "
-                        "FROM fixtures f "
-                        "JOIN seasons se ON f.season_id = se.id "
-                        "JOIN competitions c ON se.competition_id = c.id "
-                        "JOIN sports s ON c.sport_id = s.id "
+                        "FROM sports.fixtures f "
+                        "JOIN sports.seasons se ON f.season_id = se.id "
+                        "JOIN sports.competitions c ON se.competition_id = c.id "
+                        "JOIN sports.sports s ON c.sport_id = s.id "
                         "WHERE s.code = 'football' AND f.status != 'completed'"
                     )
                 )
