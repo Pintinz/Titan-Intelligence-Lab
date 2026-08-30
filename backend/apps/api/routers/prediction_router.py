@@ -379,12 +379,16 @@ async def get_prediction_entitlement(
     generating anything."""
     credit_service = build_prediction_credit_service(session)
     credit = await credit_service.get_entitlement(user.id.value, _now())
+    is_admin = user.role.at_least(Role.ADMINISTRATOR)
     return envelope(
         data={
             "available_predictions": credit.available_predictions,
             "initial_free_predictions": INITIAL_FREE_PREDICTIONS,
             "rewarded_predictions_granted": credit.rewarded_predictions_granted,
-            "requires_rewarded_ad": credit.available_predictions <= 0,
+            # Administrators never actually hit the gate at /generate (see the endpoint below) —
+            # reflected here too so the UI never prompts staff to watch a rewarded ad they'll
+            # never be asked for.
+            "requires_rewarded_ad": False if is_admin else credit.available_predictions <= 0,
         }
     )
 
@@ -453,22 +457,25 @@ async def generate_prediction(
     # concurrent requests; raising here (uncommitted) is what makes "don't consume a credit for a
     # failed generation" correct for every failure path below — `get_session()` only commits on a
     # clean return, so any exception past this point rolls the consume back too, automatically.
-    credit_service = build_prediction_credit_service(session)
-    try:
-        await credit_service.consume_for_generation(user.id.value, _now())
-    except PredictionCreditExhaustedError:
-        # `reason_code` (not `code`) matches `_blocked_detail`'s existing field name below, so
-        # the frontend's one shared ApiError parser (client.ts) already surfaces this correctly
-        # without a second, endpoint-specific parsing branch.
-        raise HTTPException(
-            status_code=402,
-            detail={
-                "reason_code": "PREDICTION_CREDIT_REQUIRED",
-                "message": "Watch a rewarded video to unlock 2 additional predictions.",
-                "available_predictions": 0,
-                "reward_amount": REWARDED_AD_CREDIT_GRANT,
-            },
-        ) from None
+    # Administrators (and above) never hit the credit gate at all — staff verifying/operating the
+    # platform shouldn't need to watch rewarded ads or hold a paid plan to generate a prediction.
+    if not user.role.at_least(Role.ADMINISTRATOR):
+        credit_service = build_prediction_credit_service(session)
+        try:
+            await credit_service.consume_for_generation(user.id.value, _now())
+        except PredictionCreditExhaustedError:
+            # `reason_code` (not `code`) matches `_blocked_detail`'s existing field name below, so
+            # the frontend's one shared ApiError parser (client.ts) already surfaces this correctly
+            # without a second, endpoint-specific parsing branch.
+            raise HTTPException(
+                status_code=402,
+                detail={
+                    "reason_code": "PREDICTION_CREDIT_REQUIRED",
+                    "message": "Watch a rewarded video to unlock 2 additional predictions.",
+                    "available_predictions": 0,
+                    "reward_amount": REWARDED_AD_CREDIT_GRANT,
+                },
+            ) from None
 
     service = build_prediction_cache_service(session)
     try:

@@ -758,7 +758,7 @@ def test_generate_prediction_football_explanation_carries_model_and_prediction_i
 
 
 # ---------------------------------------------------------------------------------------------
-# Mobile V1 monetization — server-side prediction credits (5 free lifetime, +2 per verified
+# Mobile V1 monetization — server-side prediction credits (10 free lifetime, +2 per verified
 # AdMob rewarded-ad completion). See modules/predictions/application/prediction_credit_service.py.
 # ---------------------------------------------------------------------------------------------
 
@@ -768,8 +768,8 @@ def test_new_user_receives_five_initial_prediction_credits(client):
     response = client.get("/api/v1/predictions/entitlement", headers=headers)
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["available_predictions"] == 5
-    assert data["initial_free_predictions"] == 5
+    assert data["available_predictions"] == 10
+    assert data["initial_free_predictions"] == 10
     assert data["rewarded_predictions_granted"] == 0
     assert data["requires_rewarded_ad"] is False
 
@@ -778,8 +778,8 @@ def test_initial_credits_are_not_granted_twice(client):
     headers = _auth_headers(client, email="credits-once@titaniq.test")
     first = client.get("/api/v1/predictions/entitlement", headers=headers).json()["data"]
     second = client.get("/api/v1/predictions/entitlement", headers=headers).json()["data"]
-    assert first["available_predictions"] == 5
-    assert second["available_predictions"] == 5  # not 10 — the lazy-init only ever fires once
+    assert first["available_predictions"] == 10
+    assert second["available_predictions"] == 10  # not 12 — the lazy-init only ever fires once
 
 
 def test_successful_generation_consumes_exactly_one_credit(client, db_session_factory):
@@ -788,7 +788,7 @@ def test_successful_generation_consumes_exactly_one_credit(client, db_session_fa
     headers = _auth_headers(client, email="credits-consume@titaniq.test")
     asyncio.run(_seed_production_market(db_session_factory, "football.credit_consume_market", "football.credit_consume_feature"))
 
-    client.get("/api/v1/predictions/entitlement", headers=headers)  # establish the initial 5
+    client.get("/api/v1/predictions/entitlement", headers=headers)  # establish the initial 10
     response = client.post(
         "/api/v1/predictions/generate",
         json={
@@ -802,7 +802,7 @@ def test_successful_generation_consumes_exactly_one_credit(client, db_session_fa
     assert response.status_code == 200
 
     entitlement = client.get("/api/v1/predictions/entitlement", headers=headers).json()["data"]
-    assert entitlement["available_predictions"] == 4
+    assert entitlement["available_predictions"] == 9
 
 
 def test_failed_generation_does_not_consume_a_credit(client, db_session_factory):
@@ -829,7 +829,7 @@ def test_failed_generation_does_not_consume_a_credit(client, db_session_factory)
 
     headers = _auth_headers(client, email="credits-failed-gen@titaniq.test")
     asyncio.run(_seed_market_without_model())
-    client.get("/api/v1/predictions/entitlement", headers=headers)  # establish the initial 5
+    client.get("/api/v1/predictions/entitlement", headers=headers)  # establish the initial 10
 
     response = client.post(
         "/api/v1/predictions/generate",
@@ -844,7 +844,7 @@ def test_failed_generation_does_not_consume_a_credit(client, db_session_factory)
     assert response.status_code == 409
 
     entitlement = client.get("/api/v1/predictions/entitlement", headers=headers).json()["data"]
-    assert entitlement["available_predictions"] == 5  # unchanged — the failed attempt refunded via rollback
+    assert entitlement["available_predictions"] == 10  # unchanged — the failed attempt refunded via rollback
 
 
 def test_unauthorized_generate_request_never_reaches_credit_logic(client):
@@ -861,7 +861,7 @@ def test_zero_credits_returns_prediction_credit_required_402(client, db_session_
     headers = _auth_headers(client, email="credits-exhausted@titaniq.test")
     asyncio.run(_seed_production_market(db_session_factory, "football.credit_exhaust_market", "football.credit_exhaust_feature"))
 
-    for _ in range(5):
+    for _ in range(10):
         response = client.post(
             "/api/v1/predictions/generate",
             json={
@@ -874,7 +874,7 @@ def test_zero_credits_returns_prediction_credit_required_402(client, db_session_
         )
         assert response.status_code == 200
 
-    sixth = client.post(
+    eleventh = client.post(
         "/api/v1/predictions/generate",
         json={
             "market_key": "football.credit_exhaust_market",
@@ -884,11 +884,39 @@ def test_zero_credits_returns_prediction_credit_required_402(client, db_session_
         },
         headers=headers,
     )
-    assert sixth.status_code == 402
-    body = sixth.json()["detail"]
+    assert eleventh.status_code == 402
+    body = eleventh.json()["detail"]
     assert body["reason_code"] == "PREDICTION_CREDIT_REQUIRED"
     assert body["available_predictions"] == 0
     assert body["reward_amount"] == 2
+
+
+def test_administrators_never_hit_the_credit_gate(client, db_session_factory):
+    """Staff verifying/operating the platform shouldn't need to watch rewarded ads or hold a paid
+    plan to generate a prediction — administrators bypass `consume_for_generation` entirely."""
+    import asyncio
+
+    headers = _admin_headers(client, db_session_factory, email="credits-admin@titaniq.test")
+    asyncio.run(_seed_production_market(db_session_factory, "football.credit_admin_market", "football.credit_admin_feature"))
+
+    # More than INITIAL_FREE_PREDICTIONS (10) generations — a non-admin would hit 402 on the 11th.
+    for _ in range(12):
+        response = client.post(
+            "/api/v1/predictions/generate",
+            json={
+                "market_key": "football.credit_admin_market",
+                "entity_type": "fixture",
+                "entity_id": "fixture-1",
+                "subject_ref": "fixture-1",
+            },
+            headers=headers,
+        )
+        assert response.status_code == 200
+
+    # The credit balance itself is untouched — admins never call consume_for_generation at all.
+    entitlement = client.get("/api/v1/predictions/entitlement", headers=headers).json()["data"]
+    assert entitlement["available_predictions"] == 10
+    assert entitlement["requires_rewarded_ad"] is False
 
 
 async def test_reward_grants_exactly_two_credits(db_session_factory):
@@ -908,7 +936,7 @@ async def test_reward_grants_exactly_two_credits(db_session_factory):
         await session.commit()
 
     assert granted is True
-    assert credit.available_predictions == 5 + 2  # lazily initialized to 5, then +2
+    assert credit.available_predictions == 10 + 2  # lazily initialized to 10, then +2
     assert credit.rewarded_predictions_granted == 2
     assert credit.rewarded_ads_completed == 1
 
@@ -937,7 +965,7 @@ async def test_duplicate_reward_event_does_not_grant_credits_twice(db_session_fa
 
     assert first_granted is True
     assert second_granted is False
-    assert first_credit.available_predictions == second_credit.available_predictions == 7
+    assert first_credit.available_predictions == second_credit.available_predictions == 12
 
 
 async def test_concurrent_prediction_requests_cannot_overspend_credits(db_session_factory):
@@ -1001,7 +1029,7 @@ async def test_concurrent_reward_requests_cannot_duplicate_credits(db_session_fa
         await session.commit()
 
     assert (first_granted, second_granted) == (True, False)
-    assert first_credit.available_predictions == second_credit.available_predictions == 5 + 2  # exactly one grant landed
+    assert first_credit.available_predictions == second_credit.available_predictions == 10 + 2  # exactly one grant landed
 
 
 def test_credits_persist_across_reauthenticated_sessions(client, db_session_factory):
@@ -1029,7 +1057,7 @@ def test_credits_persist_across_reauthenticated_sessions(client, db_session_fact
     login_2 = client.post("/api/v1/auth/login", json={"email": email, "password": "correct-horse-battery"})
     headers_2 = {"Authorization": f"Bearer {login_2.json()['data']['access_token']}"}
     entitlement = client.get("/api/v1/predictions/entitlement", headers=headers_2).json()["data"]
-    assert entitlement["available_predictions"] == 4
+    assert entitlement["available_predictions"] == 9
 
 
 def test_different_users_have_isolated_credit_balances(client, db_session_factory):
@@ -1052,8 +1080,8 @@ def test_different_users_have_isolated_credit_balances(client, db_session_factor
 
     balance_a = client.get("/api/v1/predictions/entitlement", headers=headers_a).json()["data"]
     balance_b = client.get("/api/v1/predictions/entitlement", headers=headers_b).json()["data"]
-    assert balance_a["available_predictions"] == 4
-    assert balance_b["available_predictions"] == 5  # untouched by A's consumption
+    assert balance_a["available_predictions"] == 9
+    assert balance_b["available_predictions"] == 10  # untouched by A's consumption
 
 
 def test_browsing_existing_predictions_does_not_require_or_consume_credits(client, db_session_factory):
@@ -1073,8 +1101,8 @@ def test_browsing_existing_predictions_does_not_require_or_consume_credits(clien
         headers=headers,
     ).json()["data"]
 
-    # Exhaust the remaining 4 credits so the balance is genuinely 0 before re-reading.
-    for _ in range(4):
+    # Exhaust the remaining 9 credits so the balance is genuinely 0 before re-reading.
+    for _ in range(9):
         client.post(
             "/api/v1/predictions/generate",
             json={

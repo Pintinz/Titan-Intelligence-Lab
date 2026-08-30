@@ -37,7 +37,7 @@ from modules.predictions.domain.value_objects import (
 # Mobile V1 monetization (AdMob rewarded-prediction unlock, no billing) — see
 # PredictionCreditService for the enforcement logic. Free-tier constants live here, not scattered
 # across the router/service, since both need the exact same numbers.
-INITIAL_FREE_PREDICTIONS = 5
+INITIAL_FREE_PREDICTIONS = 10
 REWARDED_AD_CREDIT_GRANT = 2
 
 
