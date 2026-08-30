@@ -49,12 +49,14 @@ class _FakeSession:
     rows: list
     committed: bool = False
     closed: bool = False
+    commit_count: int = 0
 
     async def execute(self, _stmt):
         return _FakeResult(self.rows)
 
     async def commit(self):
         self.committed = True
+        self.commit_count += 1
 
     async def close(self):
         self.closed = True
@@ -121,6 +123,31 @@ def test_backfills_every_completed_fixture_using_its_own_kickoff_as_cutoff(
     assert result["venue_strength_backfilled"] == len(completed_rows)
 
 
+def test_commits_in_batches_instead_of_only_once_at_the_end(fake_calculator):
+    """Real production incident (2026-08-30): the first live run of this task hit its own task
+    timeout with the single commit() still at the very end of the loop — every fixture computed
+    in that run was discarded uncommitted, and the autoretry that followed repeated the exact
+    same all-or-nothing failure from scratch. A single-batch row count must commit only once (at
+    the end); a row count spanning multiple batches must commit partway through too, so an
+    interruption anywhere in the loop keeps whatever full batches already completed."""
+    batch_size = tasks_module._VENUE_STRENGTH_BACKFILL_COMMIT_BATCH_SIZE
+    many_rows = [_completed_fixture_row() for _ in range(batch_size * 2 + 3)]
+    session = _FakeSession(rows=many_rows)
+
+    async def factory():
+        return tasks_module.MarketFeatureRepairContext(
+            seeder=None, mappings=None, venue_strength_calculator=fake_calculator, session=session,
+        )
+
+    tasks_module.set_market_feature_repair_context_factory(factory)
+
+    tasks_module.backfill_venue_strength_for_completed_fixtures_task.apply(kwargs={"now_iso": T0.isoformat()}).get()
+
+    # 2 mid-loop batch commits (after fixture 50 and fixture 100) + 1 final commit for the
+    # remaining partial batch (3 more fixtures) = 3 total, not 1.
+    assert session.commit_count == 3
+
+
 def test_a_fixture_the_calculator_cant_compute_for_is_not_counted_as_backfilled(fake_calculator, completed_rows):
     unwritable_id = completed_rows[0][0]
     fake_calculator.unwritable_fixture_ids = {unwritable_id}
@@ -172,7 +199,7 @@ class _HangingSession:
 
 
 def test_task_times_out_instead_of_hanging_forever(monkeypatch, fake_calculator):
-    monkeypatch.setattr(tasks_module, "_FEATURE_REPAIR_TASK_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(tasks_module, "_VENUE_STRENGTH_BACKFILL_TASK_TIMEOUT_SECONDS", 0.05)
 
     async def factory():
         return tasks_module.MarketFeatureRepairContext(

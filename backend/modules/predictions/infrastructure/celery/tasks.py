@@ -493,6 +493,14 @@ def repair_correct_score_feature_requirements_task(self, now_iso: str | None = N
     return asyncio.run(asyncio.wait_for(_do(), timeout=_FEATURE_REPAIR_TASK_TIMEOUT_SECONDS))
 
 
+_VENUE_STRENGTH_BACKFILL_TASK_TIMEOUT_SECONDS = 1800  # heavier than the sibling repair task's 900s
+# (see _FEATURE_REPAIR_TASK_TIMEOUT_SECONDS): compute_and_write does 5 real DB round-trips per
+# fixture (a league-baseline scan plus 4 team-venue-rate lookups), and this task runs it for every
+# completed fixture in a season (~800 for one EPL season), not just a handful of upcoming ones —
+# own constant, not the shared one, so a future change to one doesn't silently resize the other.
+_VENUE_STRENGTH_BACKFILL_COMMIT_BATCH_SIZE = 50
+
+
 @celery_app.task(name="predictions.backfill_venue_strength_for_completed_fixtures", bind=True, **_RETRY_KWARGS)
 @_logged("predictions.backfill_venue_strength_for_completed_fixtures")
 def backfill_venue_strength_for_completed_fixtures_task(self, now_iso: str | None = None) -> dict:
@@ -512,7 +520,14 @@ def backfill_venue_strength_for_completed_fixtures_task(self, now_iso: str | Non
     Point-in-time safety is the entire reason a completed fixture's own `scheduled_at` — never
     `now` — is the cutoff passed to `compute_and_write`: using `now` would let a team's later
     (even post-fixture) results leak into what must be a pre-match feature for that same fixture,
-    exactly the class of leakage this codebase tests against everywhere else."""
+    exactly the class of leakage this codebase tests against everywhere else.
+
+    Real production incident (2026-08-30, same day): the first live run of this task hit its
+    (then-shared, 900s) timeout with the single `session.commit()` still at the very end of the
+    loop — every fixture computed in that ~15 minutes was discarded uncommitted, and Celery's
+    autoretry then repeated the exact same all-or-nothing failure from scratch. Commits in batches
+    now, so a timeout (or any other interruption) keeps whatever full batches already completed
+    instead of losing all of it; a retry picks up mid-set rather than starting over."""
 
     async def _do() -> dict:
         async with _get_market_feature_repair_context() as ctx:
@@ -533,7 +548,7 @@ def backfill_venue_strength_for_completed_fixtures_task(self, now_iso: str | Non
             ).all()
 
             backfilled = 0
-            for raw_fixture_id, raw_home_team_id, raw_away_team_id, raw_season_id, raw_scheduled_at, raw_sport_id in rows:
+            for i, (raw_fixture_id, raw_home_team_id, raw_away_team_id, raw_season_id, raw_scheduled_at, raw_sport_id) in enumerate(rows, start=1):
                 cutoff = raw_scheduled_at if raw_scheduled_at.tzinfo else raw_scheduled_at.replace(tzinfo=timezone.utc)
                 home_value, *_rest = await ctx.venue_strength_calculator.compute_and_write(
                     str(UUID(str(raw_fixture_id))),
@@ -545,14 +560,16 @@ def backfill_venue_strength_for_completed_fixtures_task(self, now_iso: str | Non
                 )
                 if home_value is not None:
                     backfilled += 1
+                if i % _VENUE_STRENGTH_BACKFILL_COMMIT_BATCH_SIZE == 0:
+                    await ctx.session.commit()
 
-            await ctx.session.commit()
+            await ctx.session.commit()  # final, possibly-partial batch
             return {
                 "completed_football_fixtures_checked": len(rows),
                 "venue_strength_backfilled": backfilled,
             }
 
-    return asyncio.run(asyncio.wait_for(_do(), timeout=_FEATURE_REPAIR_TASK_TIMEOUT_SECONDS))
+    return asyncio.run(asyncio.wait_for(_do(), timeout=_VENUE_STRENGTH_BACKFILL_TASK_TIMEOUT_SECONDS))
 
 
 @celery_app.task(name="predictions.check_scheduled_calibration", bind=True, **_RETRY_KWARGS)
