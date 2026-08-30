@@ -2165,6 +2165,44 @@ async def task_result(task_id: str, _admin: _AuthUser = Depends(require_role(_Ro
     )
 
 
+@app.get("/api/v1/admin/system/queue-depth")
+async def queue_depth(_admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
+    """Direct Redis inspection of the Celery broker's own queue list — real need, 2026-08-30:
+    several admin-triggered tasks stayed PENDING for a very long time with no way to tell whether
+    they were genuinely queued-but-unconsumed (a worker-side problem) or never actually reached
+    the broker the worker listens on at all (a broker URL mismatch between the API and worker
+    services). `LLEN` on Celery's default queue key answers that directly, and a peek at the
+    oldest few entries' task names shows what's actually stuck at the front, without needing
+    redis-cli/dashboard access. Read-only — never pops/consumes anything."""
+    import json as _json
+
+    from redis import Redis as _SyncRedis
+
+    from modules.features.infrastructure.online.redis_feature_store import get_redis_settings
+
+    client = _SyncRedis.from_url(get_redis_settings().url, decode_responses=True)
+    length = client.llen("celery")
+
+    def _task_name(raw: str) -> str:
+        try:
+            envelope_ = _json.loads(raw)
+        except (ValueError, TypeError):
+            return "unparseable"
+        headers = envelope_.get("headers") if isinstance(envelope_, dict) else None
+        if isinstance(headers, dict) and headers.get("task"):
+            return headers["task"]
+        # Protocol v1 fallback — the task name lives inside the base64-free JSON body's own dict.
+        body = envelope_.get("body") if isinstance(envelope_, dict) else None
+        return str(body)[:120] if body else "unknown"
+
+    # Oldest-first (next to be consumed) — Celery's Redis transport LPUSHes new messages and
+    # BRPOPs from the same key, so the tail of the list is the front of the queue.
+    oldest_first = list(reversed(client.lrange("celery", -10, -1)))
+    sample = [_task_name(raw) for raw in oldest_first]
+
+    return envelope(data={"queue_length": length, "oldest_queued_tasks": sample})
+
+
 @app.post("/api/v1/admin/system/task-result/{task_id}/revoke")
 async def revoke_task(task_id: str, _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
     """Marks a task revoked so it will NOT execute the next time it's dispatched (a scheduled
