@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -69,6 +70,31 @@ async def _seed_outcomes(model_id, market_id, prediction_repo, prediction_outcom
                 actual_value="btts_yes", error=error_fn(i), evaluated_at=T0,
             )
         )
+
+
+@dataclass
+class _CallCountingPredictionRepo:
+    """Wraps a real `InMemoryPredictionRepository` to count calls — proves the fetch pattern
+    itself, not just the end result, since a broken N+1 loop can produce the same final samples
+    as a correctly batched one."""
+
+    inner: object
+    get_calls: int = field(default=0)
+    get_many_calls: int = field(default=0)
+
+    async def get(self, prediction_id):
+        self.get_calls += 1
+        return await self.inner.get(prediction_id)
+
+    async def get_many(self, prediction_ids):
+        self.get_many_calls += 1
+        return await self.inner.get_many(prediction_ids)
+
+    async def record(self, prediction):
+        return await self.inner.record(prediction)
+
+    async def update_status(self, prediction_id, status):
+        return await self.inner.update_status(prediction_id, status)
 
 
 @pytest.fixture
@@ -216,3 +242,28 @@ class TestCalibrationFittingService:
 
         assert results[0].sample_count == 0
         assert results[0].fitted is False
+
+    async def test_fetches_predictions_in_one_batch_not_one_call_per_outcome(
+        self, market_repo, model_repo, prediction_repo, prediction_outcome_repo, calibrator
+    ):
+        """Real production incident (2026-08-30): calling `predictions.get()` once per outcome —
+        up to 2000 per market — was an N+1 query pattern that alone accounted for
+        `check_scheduled_calibration` blowing past its 300s task timeout. Must go through
+        `get_many()` exactly once per market, and never call `get()` at all."""
+        market = await market_repo.upsert(_market())
+        champion = await model_repo.upsert(_champion_model(market.id))
+        await _seed_outcomes(
+            champion.id, market.id, prediction_repo, prediction_outcome_repo, n=40,
+            probability_fn=lambda i: 0.9, error_fn=lambda i: 0.0,
+        )
+        counting_repo = _CallCountingPredictionRepo(inner=prediction_repo)
+        service = CalibrationFittingService(
+            markets=market_repo, models=model_repo, predictions=counting_repo,
+            outcomes=prediction_outcome_repo, calibrator=calibrator, min_samples=20,
+        )
+
+        results = await service.fit_all_production_markets(T0)
+
+        assert results[0].sample_count == 40
+        assert counting_repo.get_calls == 0
+        assert counting_repo.get_many_calls == 1

@@ -232,6 +232,9 @@ class InMemoryPredictionRepository:
     async def get(self, prediction_id):
         return self.store.get(prediction_id)
 
+    async def get_many(self, prediction_ids):
+        return [self.store[p] for p in prediction_ids if p in self.store]
+
     async def record(self, prediction):
         self.store[prediction.id] = prediction
         self.by_subject.append(prediction)

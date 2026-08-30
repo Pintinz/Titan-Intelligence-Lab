@@ -193,6 +193,13 @@ class SqlAlchemyPredictionRepository:
         model = await self.session.get(PredictionModel, prediction_id.value)
         return mappers.prediction_to_domain(model) if model else None
 
+    async def get_many(self, prediction_ids: list[PredictionId]) -> list[Prediction]:
+        if not prediction_ids:
+            return []
+        stmt = select(PredictionModel).where(PredictionModel.id.in_({p.value for p in prediction_ids}))
+        result = await self.session.execute(stmt)
+        return [mappers.prediction_to_domain(row) for row in result.scalars().all()]
+
     async def record(self, prediction: Prediction) -> Prediction:
         model = mappers.prediction_to_model(prediction)
         self.session.add(model)

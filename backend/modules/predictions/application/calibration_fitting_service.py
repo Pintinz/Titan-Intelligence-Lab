@@ -96,9 +96,18 @@ class CalibrationFittingService:
             )
 
         recorded_outcomes = await self.outcomes.list_by_market(market.id, limit=2000)
+        # Real production incident (2026-08-30): one `predictions.get()` call per outcome here —
+        # up to 2000 individual DB round-trips per market, across every PRODUCTION market — was
+        # the actual cause of `check_scheduled_calibration` blowing past its 300s task timeout
+        # (an N+1 query pattern, not a slow query or a missing index). Batched into a single
+        # `get_many()` call instead.
+        predictions_by_id = {
+            prediction.id: prediction
+            for prediction in await self.predictions.get_many([outcome.prediction_id for outcome in recorded_outcomes])
+        }
         samples: list[tuple[float, bool]] = []
         for outcome in recorded_outcomes:
-            prediction = await self.predictions.get(outcome.prediction_id)
+            prediction = predictions_by_id.get(outcome.prediction_id)
             if prediction is None or prediction.model_id != champion.id:
                 continue
             is_positive = real_outcome_is_positive(market.market_key, prediction.value, outcome.error)
