@@ -174,6 +174,53 @@ async def test_masked_credentials_never_exposes_plaintext(service):
 
 
 @pytest.mark.asyncio
+async def test_masked_credentials_reports_an_undecryptable_row_instead_of_crashing(service, vault, monkeypatch):
+    """Real incident, 2026-08-29: TITANIQ_ENCRYPTION_KEY rotated at some point; every credential
+    encrypted under the old key raises on decrypt. This previously crashed the entire list for a
+    provider on its first undecryptable row — an admin couldn't even see a provider's credentials
+    to diagnose or clean one up. One bad row must never hide the rest."""
+    from modules.admin.infrastructure.vault import DecryptionError
+
+    provider = await service.register_provider("api_football", "API-Football", ProviderCategory.SPORTS_DATA)
+    await service.add_credential(provider.id, "old-broken", "sk-old", now=T0)
+    await service.add_credential(provider.id, "new-working", "sk-new-live-value1234", now=T0 + timedelta(days=1))
+
+    real_decrypt = vault.decrypt
+
+    def _decrypt_only_new(ciphertext: str) -> str:
+        plaintext = real_decrypt(ciphertext)
+        if plaintext == "sk-old":
+            raise DecryptionError("credential ciphertext is invalid or was encrypted with a different key")
+        return plaintext
+
+    monkeypatch.setattr(vault, "decrypt", _decrypt_only_new)
+
+    pairs = await service.masked_credentials(provider.id)
+
+    assert len(pairs) == 2
+    by_label = {c.label: masked for c, masked in pairs}
+    assert "undecryptable" in by_label["old-broken"]
+    assert by_label["new-working"] == mask_credential("sk-new-live-value1234")
+
+
+@pytest.mark.asyncio
+async def test_usable_credentials_prefers_the_most_recently_added_over_an_older_broken_one(service):
+    """Real incident, 2026-08-29: re-saving a credential after a key rotation added a new,
+    working row alongside the old, now-undecryptable one — but with no ordering, `[0]` kept
+    picking whichever the database happened to return first (in practice the oldest), so the
+    "fix" never actually took effect. Adding a fresh credential must mean using it, not needing
+    a separate manual cleanup step first."""
+    provider = await service.register_provider("api_football", "API-Football", ProviderCategory.SPORTS_DATA)
+    await service.add_credential(provider.id, "old", "sk-old", now=T0)
+    newest = await service.add_credential(provider.id, "new", "sk-new", now=T0 + timedelta(days=1))
+
+    usable = await service.usable_credentials(provider.id)
+
+    assert usable[0].id == newest.id
+    assert await service.reveal_plaintext(usable[0].id) == "sk-new"
+
+
+@pytest.mark.asyncio
 async def test_import_from_env_registers_and_credentials(service, monkeypatch):
     monkeypatch.setenv("TITANIQ_TEST_NEWSAPI_KEY", "sk-newsapi-realvalue1234")
 

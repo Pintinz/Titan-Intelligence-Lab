@@ -228,13 +228,16 @@ async def featured_intelligence(limit: int = Query(default=3, ge=1, le=6), sessi
     # Laboratory, Match Review, Team/Competition Intelligence).
     _HERO_EXCLUDED_MARKETS = {"football.correct_score"}
 
-    market_cache: dict[str, object] = {}
+    # Real production incident, 2026-08-29: this previously fetched each unique market with its
+    # own `.get()` call inside the loop below — deduplicated by market_id, but still up to ~50
+    # individual round-trips to a remote Postgres pooler (fast enough to hide on local SQLite,
+    # ~7.5s of real added latency on a cold cache in production). There are only a few dozen
+    # markets total, never growing per-fixture, so fetching all of them once is strictly cheaper
+    # than fetching even a handful of them one at a time over the network.
+    all_markets = {m.id: m for m in await market_service.markets.list_all()}
     picks = []
     for prediction in published:
-        market_key = str(prediction.market_id)
-        if market_key not in market_cache:
-            market_cache[market_key] = await market_service.markets.get(prediction.market_id)
-        market = market_cache[market_key]
+        market = all_markets.get(prediction.market_id)
         if market is not None and market.market_key not in _HERO_EXCLUDED_MARKETS:
             picks.append((prediction, market))
     picks.sort(key=lambda pm: pm[0].confidence.composite, reverse=True)
@@ -386,19 +389,25 @@ async def verified_intelligence(limit: int = Query(default=6, ge=1, le=12), sess
     recent = await prediction_service.predictions.list_recent(limit=500)
     published = [p for p in recent if p.status is PredictionStatus.PUBLISHED]
 
-    market_cache: dict[str, object] = {}
+    # Same real production incident as featured-intelligence's own fix above: markets fetched
+    # once in bulk rather than per-prediction. Fixtures are additionally deduplicated per distinct
+    # fixture id in the loop below (no bulk-fetch-by-id-list method exists on this repository, and
+    # the fixtures table is far larger than the market table, so "fetch every fixture up front"
+    # isn't the right fix here) — several published markets typically share the same fixture, so
+    # this alone cuts the round-trip count well below "one per prediction".
+    all_markets = {m.id: m for m in await market_service.markets.list_all()}
+    fixture_cache: dict[str, object] = {}
     candidates: list[tuple] = []
     for prediction in published:
-        market_key = str(prediction.market_id)
-        if market_key not in market_cache:
-            market_cache[market_key] = await market_service.markets.get(prediction.market_id)
-        market = market_cache[market_key]
+        market = all_markets.get(prediction.market_id)
         if market is None:
             continue
-        try:
-            fixture = await fixtures_repo.get(FixtureId(uuid.UUID(prediction.subject_ref)))
-        except ValueError:
-            fixture = None
+        if prediction.subject_ref not in fixture_cache:
+            try:
+                fixture_cache[prediction.subject_ref] = await fixtures_repo.get(FixtureId(uuid.UUID(prediction.subject_ref)))
+            except ValueError:
+                fixture_cache[prediction.subject_ref] = None
+        fixture = fixture_cache[prediction.subject_ref]
         if fixture is None or fixture.status.value != "completed":
             continue
         candidates.append((prediction, market, fixture))

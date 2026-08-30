@@ -82,6 +82,38 @@ async def test_credential_repository_round_trip(sqlite_session):
 
 
 @pytest.mark.asyncio
+async def test_credential_repository_lists_newest_first(sqlite_session):
+    """Real incident, 2026-08-29: no ORDER BY meant `list_by_provider` returned whatever order
+    the database happened to produce for a plain unordered scan — in practice the oldest row
+    first — so `usable_credentials()[0]` kept resolving to an old, undecryptable credential even
+    after a working one was added. Explicit `created_at DESC` is the fix."""
+    provider_repo = SqlAlchemyProviderRepository(session=sqlite_session)
+    credential_repo = SqlAlchemyCredentialRepository(session=sqlite_session)
+    provider = ProviderDefinition(
+        id=ProviderId(uuid.uuid4()), key="api_football", name="API-Football", category=ProviderCategory.SPORTS_DATA
+    )
+    await provider_repo.upsert(provider)
+
+    from datetime import timedelta
+
+    old = ProviderCredential(
+        id=CredentialId(uuid.uuid4()), provider_id=provider.id, label="old",
+        encrypted_value="old-ciphertext", created_at=T0,
+    )
+    new = ProviderCredential(
+        id=CredentialId(uuid.uuid4()), provider_id=provider.id, label="new",
+        encrypted_value="new-ciphertext", created_at=T0 + timedelta(days=1),
+    )
+    await credential_repo.upsert(old)
+    await credential_repo.upsert(new)
+    await sqlite_session.commit()
+
+    by_provider = await credential_repo.list_by_provider(provider.id)
+
+    assert [c.label for c in by_provider] == ["new", "old"]
+
+
+@pytest.mark.asyncio
 async def test_usage_repository_upsert_accumulates(sqlite_session):
     provider_repo = SqlAlchemyProviderRepository(session=sqlite_session)
     usage_repo = SqlAlchemyUsageRepository(session=sqlite_session)

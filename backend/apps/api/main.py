@@ -183,13 +183,34 @@ async def security_headers(request: Request, call_next):
     `/api/v1/admin` prefix — so a single path-prefix check here covers every one of them, rather
     than editing 30+ individual route signatures. `HTTPException` raised inside a
     `@app.middleware("http")` function is NOT caught by FastAPI's own exception handlers (they
-    sit closer to routing than this middleware layer), so the 429 is built directly here."""
+    sit closer to routing than this middleware layer), so the 429 is built directly here.
+
+    The `call_next()` try/except below exists for the same reason, a level deeper: a real
+    incident, 2026-08-29, found `@app.exception_handler(Exception)` registered on `app` does NOT
+    reliably catch an exception a route body raises when a `@app.middleware("http")` function
+    (this one — implemented via Starlette's `BaseHTTPMiddleware`) sits in the stack.
+    `BaseHTTPMiddleware.call_next()` re-raises a downstream exception as a plain Python exception
+    into THIS function's frame rather than letting FastAPI's exception-handling machinery convert
+    it to a response first — confirmed live: a bare route-body `raise RuntimeError(...)` propagated
+    straight past a registered `Exception` handler. Whatever escapes `call_next()` must be caught
+    right here, since this is the one place guaranteed to sit inside CORSMiddleware (registered
+    last in this file, deliberately outermost — see that middleware's own comment) regardless of
+    which layer originally raised."""
     if request.url.path.startswith(_ADMIN_PATH_PREFIX):
         try:
             await enforce_ip_rate_limit(request, "admin_api", limit=120, window_seconds=60)
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception:  # noqa: BLE001 — the whole point: convert ANY otherwise-unhandled exception
+        # into a real response that still passes back out through CORSMiddleware, rather than let
+        # it reach Starlette's bare ServerErrorMiddleware fallback (outside every user middleware,
+        # CORS included) and ship with no Access-Control-Allow-Origin header at all.
+        logger.error(
+            "unhandled_exception", extra={"path": request.url.path, "method": request.method}, exc_info=True
+        )
+        return JSONResponse(status_code=500, content=envelope(error={"detail": "internal server error"}))
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"

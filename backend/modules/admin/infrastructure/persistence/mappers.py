@@ -113,6 +113,13 @@ def credential_to_model(
     model.is_active = entity.is_active
     model.rotated_at = entity.rotated_at
     model.expires_at = entity.expires_at
+    # Previously dropped entirely — `add_credential`'s explicit `created_at=now` was silently
+    # discarded in favor of the column's own server_default(func.now()), which happened to (very
+    # nearly) tie two credentials added moments apart in the same request, undermining the
+    # `list_by_provider` ORDER BY created_at DESC fix this same incident needed. `is None` guard
+    # keeps the server-default behavior for any caller that genuinely never sets it.
+    if entity.created_at is not None:
+        model.created_at = entity.created_at
     return model
 
 

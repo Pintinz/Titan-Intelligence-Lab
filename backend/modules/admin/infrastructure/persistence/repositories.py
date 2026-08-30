@@ -73,8 +73,16 @@ class SqlAlchemyCredentialRepository:
         return mappers.credential_to_domain(model) if model else None
 
     async def list_by_provider(self, provider_id: ProviderId) -> list[ProviderCredential]:
+        # Real incident, 2026-08-29: with no ORDER BY, `usable_credentials()`'s `[0]` picked
+        # whichever row the database happened to return first — in practice the OLDEST one on a
+        # simple unordered scan. Re-saving a provider's credential after a TITANIQ_ENCRYPTION_KEY
+        # rotation added a new, working row alongside the old, now-undecryptable one, but the old
+        # row kept being the one actually used — the "fix" silently never took effect. Newest
+        # first makes "add a fresh credential" actually mean "use this one going forward".
         result = await self.session.execute(
-            select(ProviderCredentialModel).where(ProviderCredentialModel.provider_id == provider_id.value)
+            select(ProviderCredentialModel)
+            .where(ProviderCredentialModel.provider_id == provider_id.value)
+            .order_by(ProviderCredentialModel.created_at.desc())
         )
         return [mappers.credential_to_domain(row) for row in result.scalars().all()]
 

@@ -9,7 +9,7 @@ import os
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from modules.admin.domain.entities import ProviderCredential, ProviderDefinition
 from modules.admin.domain.value_objects import (
@@ -18,6 +18,7 @@ from modules.admin.domain.value_objects import (
     ProviderId,
     ProviderStatus,
 )
+from modules.admin.infrastructure.vault import DecryptionError
 from modules.admin.ports.repositories import CredentialRepositoryPort, ProviderRepositoryPort
 from modules.admin.ports.vault import CredentialVaultPort
 
@@ -189,13 +190,32 @@ class ProviderManagementService:
         return self.vault.decrypt(credential.encrypted_value)
 
     async def usable_credentials(self, provider_id: ProviderId) -> list[ProviderCredential]:
-        return [c for c in await self.credentials.list_by_provider(provider_id) if c.is_active]
+        # Newest first, enforced here rather than trusted to whatever order the repository
+        # happens to return — real incident, 2026-08-29: the SQL repository had no ORDER BY at
+        # all, so `usable[0]` (every caller's "the credential to actually use" pick) silently
+        # kept resolving to the OLDEST active row. Sorting explicitly at this layer means the
+        # right behavior doesn't depend on every repository implementation (SQL, in-memory test
+        # double, a future one) independently getting its own ordering right.
+        active = [c for c in await self.credentials.list_by_provider(provider_id) if c.is_active]
+        return sorted(active, key=lambda c: c.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
 
     async def masked_credentials(self, provider_id: ProviderId) -> list[tuple[ProviderCredential, str]]:
         """Every credential for a provider paired with a masked display value — the only form a
-        credential's value is ever allowed to leave this service in (docs/security.md §2)."""
+        credential's value is ever allowed to leave this service in (docs/security.md §2).
+
+        Real incident, 2026-08-29: a single undecryptable row (ciphertext encrypted under a
+        since-rotated TITANIQ_ENCRYPTION_KEY) previously crashed this whole list — an admin
+        couldn't even SEE a provider's credentials to diagnose or clean up the exact row causing
+        the problem. Degrades per-row instead: one bad credential is reported as such, never
+        hides the rest."""
         credentials = await self.credentials.list_by_provider(provider_id)
-        return [(c, mask_credential(self.vault.decrypt(c.encrypted_value))) for c in credentials]
+        results = []
+        for c in credentials:
+            try:
+                results.append((c, mask_credential(self.vault.decrypt(c.encrypted_value))))
+            except DecryptionError:
+                results.append((c, "⚠ undecryptable — re-save this credential"))
+        return results
 
     async def update_provider(
         self,
