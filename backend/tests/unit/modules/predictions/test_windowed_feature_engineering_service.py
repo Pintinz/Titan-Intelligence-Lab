@@ -18,12 +18,21 @@ from modules.predictions.application.windowed_feature_engineering_service import
     football_fixture_expected_goals_calculator,
     football_fixture_form_differential_calculator,
     football_fixture_stat_differential_calculators,
+    football_fixture_venue_strength_calculator,
     football_form_calculator,
     football_lineup_continuity_calculators,
     football_transfer_activity_calculators,
     table_tennis_form_calculator,
 )
-from modules.features.domain.value_objects import EntityType, FeatureKey
+from modules.features.domain.entities import FeatureDefinition
+from modules.features.domain.value_objects import (
+    EntityType,
+    FeatureCategory,
+    FeatureDataType,
+    FeatureDefinitionId,
+    FeatureKey,
+    FeatureStatus,
+)
 from modules.sports.domain.entities import Fixture, Lineup, LineupSlot, TeamStatistics, Transfer
 from modules.sports.domain.value_objects import (
     EntityId,
@@ -644,6 +653,66 @@ async def test_lineup_continuity_ensure_registered_is_idempotent(registration, s
     await home_calc.ensure_registered(T0)  # must not raise FeatureAlreadyRegisteredError
 
     definition = await registration.definitions.get(FeatureKey(home_calc.feature_key))
+    assert definition is not None
+    assert definition.is_consumable()
+
+
+@pytest.mark.asyncio
+async def test_venue_strength_ensure_registered_sets_pre_match_safe_leakage_classification(
+    registration, store, fixtures_repo
+):
+    calc = football_fixture_venue_strength_calculator(registration, store, fixtures_repo)
+
+    await calc.ensure_registered(T0)
+
+    for feature_key in (
+        calc.home_attack_feature_key, calc.home_defence_feature_key,
+        calc.away_attack_feature_key, calc.away_defence_feature_key,
+    ):
+        definition = await registration.definitions.get(FeatureKey(feature_key))
+        assert definition.leakage_classification == "PRE_MATCH_SAFE"
+        assert definition.is_consumable()
+
+
+@pytest.mark.asyncio
+async def test_venue_strength_ensure_registered_self_heals_a_stale_misclassified_row(
+    registration, store, fixtures_repo
+):
+    """Real production incident (2026-08-30): all four venue-strength features were first
+    registered a few hours before this calculator's own leakage_classification="PRE_MATCH_SAFE"
+    fix landed, leaving them on the UNKNOWN_PROVENANCE default forever — ensure_registered()'s
+    "already exists, skip" guard never revisited an existing row. Reproduces that exact stale
+    state (a pre-existing row with the wrong classification, seeded directly rather than through
+    register()) and proves a later ensure_registered() call now corrects it in place."""
+    calc = football_fixture_venue_strength_calculator(registration, store, fixtures_repo)
+    stale = FeatureDefinition(
+        id=FeatureDefinitionId(uuid4()), feature_key=FeatureKey(calc.home_attack_feature_key),
+        name="Home Attack Strength", description="stale pre-fix row", sport_code="football",
+        category=FeatureCategory.ENGINEERED, formula="team_venue_rate / league_venue_baseline",
+        data_type=FeatureDataType.FLOAT, owner="prediction-platform", entity_type=EntityType.FIXTURE,
+        status=FeatureStatus.ACTIVE, leakage_classification="UNKNOWN_PROVENANCE",
+    )
+    await registration.definitions.upsert(stale)
+
+    await calc.ensure_registered(T0)
+
+    healed = await registration.definitions.get(FeatureKey(calc.home_attack_feature_key))
+    assert healed.leakage_classification == "PRE_MATCH_SAFE"
+    assert healed.is_market_safe() is True
+    assert healed.version == stale.version  # metadata correction only, not a new version
+    # The other three (never stale in this test) still register cleanly alongside the healed one.
+    for feature_key in (calc.home_defence_feature_key, calc.away_attack_feature_key, calc.away_defence_feature_key):
+        assert (await registration.definitions.get(FeatureKey(feature_key))).leakage_classification == "PRE_MATCH_SAFE"
+
+
+@pytest.mark.asyncio
+async def test_venue_strength_ensure_registered_is_idempotent(registration, store, fixtures_repo):
+    calc = football_fixture_venue_strength_calculator(registration, store, fixtures_repo)
+
+    await calc.ensure_registered(T0)
+    await calc.ensure_registered(T0)  # must not raise FeatureAlreadyRegisteredError
+
+    definition = await registration.definitions.get(FeatureKey(calc.home_attack_feature_key))
     assert definition is not None
     assert definition.is_consumable()
 

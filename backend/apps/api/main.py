@@ -2331,6 +2331,23 @@ async def trigger_correct_score_feature_repair(_admin: _AuthUser = Depends(requi
     return envelope(data={"task_id": result.id, "status": "queued"})
 
 
+@app.post("/api/v1/admin/system/venue-strength-backfill/completed-fixtures")
+async def trigger_venue_strength_backfill_for_completed_fixtures(
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    """Enqueues `predictions.backfill_venue_strength_for_completed_fixtures` on the worker (same
+    delegate-to-worker shape as `trigger_correct_score_feature_repair` above). Real production
+    incident, 2026-08-30: `repair_correct_score_feature_requirements_task` only backfills
+    fixtures that haven't kicked off yet, so it does nothing for football.correct_score's actual
+    training data — every completed fixture a retrain's samples come from was reconciled before
+    `FixtureVenueStrengthCalculator` existed, so all four venue-strength features have 0%
+    coverage there. See the task's own docstring for the full trace."""
+    from modules.predictions.infrastructure.celery.tasks import backfill_venue_strength_for_completed_fixtures_task
+
+    result = backfill_venue_strength_for_completed_fixtures_task.delay(now_iso=_now().isoformat())
+    return envelope(data={"task_id": result.id, "status": "queued"})
+
+
 @app.post("/api/v1/admin/system/retraining/check-all")
 async def trigger_retraining_check_all(_admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
     """Runs `predictions.check_scheduled_retraining` on demand instead of waiting for its Beat

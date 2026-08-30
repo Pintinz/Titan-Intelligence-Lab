@@ -493,6 +493,68 @@ def repair_correct_score_feature_requirements_task(self, now_iso: str | None = N
     return asyncio.run(asyncio.wait_for(_do(), timeout=_FEATURE_REPAIR_TASK_TIMEOUT_SECONDS))
 
 
+@celery_app.task(name="predictions.backfill_venue_strength_for_completed_fixtures", bind=True, **_RETRY_KWARGS)
+@_logged("predictions.backfill_venue_strength_for_completed_fixtures")
+def backfill_venue_strength_for_completed_fixtures_task(self, now_iso: str | None = None) -> dict:
+    """On-demand only. `repair_correct_score_feature_requirements_task` above backfills
+    venue-strength features for fixtures that haven't kicked off yet (the live-prediction path)
+    — it deliberately excludes completed fixtures, so it does nothing for football.correct_score's
+    actual TRAINING data. Real production incident (2026-08-30): the ~800 real completed EPL
+    fixtures a retrain draws its samples from were all reconciled before
+    `FixtureVenueStrengthCalculator` existed, so every one of them has zero recorded values for
+    these four features — 0% coverage means a retrain can never learn from the signal even once
+    the feature-requirement mapping and leakage classification are both correct. This is the
+    historical-training-data counterpart, same shape as `scripts/
+    backfill_venue_strength_for_completed_fixtures.py` (a local dev-only script — this is the
+    production-safe version, running through the real deployed worker's own DB credentials rather
+    than requiring TITANIQ_DB_URL set locally).
+
+    Point-in-time safety is the entire reason a completed fixture's own `scheduled_at` — never
+    `now` — is the cutoff passed to `compute_and_write`: using `now` would let a team's later
+    (even post-fixture) results leak into what must be a pre-match feature for that same fixture,
+    exactly the class of leakage this codebase tests against everywhere else."""
+
+    async def _do() -> dict:
+        async with _get_market_feature_repair_context() as ctx:
+            now = datetime.fromisoformat(now_iso) if now_iso else datetime.now(timezone.utc)
+            await ctx.venue_strength_calculator.ensure_registered(now)
+
+            rows = (
+                await ctx.session.execute(
+                    text(
+                        "SELECT f.id, f.home_team_id, f.away_team_id, f.season_id, f.scheduled_at, c.sport_id "
+                        "FROM sports.fixtures f "
+                        "JOIN sports.seasons se ON f.season_id = se.id "
+                        "JOIN sports.competitions c ON se.competition_id = c.id "
+                        "JOIN sports.sports s ON c.sport_id = s.id "
+                        "WHERE s.code = 'football' AND f.status = 'completed' AND f.home_score IS NOT NULL"
+                    )
+                )
+            ).all()
+
+            backfilled = 0
+            for raw_fixture_id, raw_home_team_id, raw_away_team_id, raw_season_id, raw_scheduled_at, raw_sport_id in rows:
+                cutoff = raw_scheduled_at if raw_scheduled_at.tzinfo else raw_scheduled_at.replace(tzinfo=timezone.utc)
+                home_value, *_rest = await ctx.venue_strength_calculator.compute_and_write(
+                    str(UUID(str(raw_fixture_id))),
+                    TeamId(UUID(str(raw_home_team_id))),
+                    TeamId(UUID(str(raw_away_team_id))),
+                    SportId(UUID(str(raw_sport_id))),
+                    SeasonId(UUID(str(raw_season_id))),
+                    cutoff,
+                )
+                if home_value is not None:
+                    backfilled += 1
+
+            await ctx.session.commit()
+            return {
+                "completed_football_fixtures_checked": len(rows),
+                "venue_strength_backfilled": backfilled,
+            }
+
+    return asyncio.run(asyncio.wait_for(_do(), timeout=_FEATURE_REPAIR_TASK_TIMEOUT_SECONDS))
+
+
 @celery_app.task(name="predictions.check_scheduled_calibration", bind=True, **_RETRY_KWARGS)
 @_logged("predictions.check_scheduled_calibration")
 def check_scheduled_calibration_task(self, now_iso: str | None = None) -> dict:

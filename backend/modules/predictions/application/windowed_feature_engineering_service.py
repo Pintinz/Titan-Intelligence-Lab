@@ -326,7 +326,16 @@ class FixtureVenueStrengthCalculator:
     min_league_sample: int = 10
 
     async def ensure_registered(self, now: datetime) -> None:
-        """Idempotent — registers and approves all four features if they don't already exist."""
+        """Idempotent — registers and approves all four features if they don't already exist.
+
+        Real production incident (2026-08-30): all four were first registered a few hours before
+        this method's own `leakage_classification="PRE_MATCH_SAFE"` fix landed, so the
+        "already exists, skip" guard below left them on the UNKNOWN_PROVENANCE default forever —
+        the fix was correct for every subsequent fresh registration, but never retroactively
+        reached rows that predated it. Self-heals that specific gap now: an existing row whose
+        classification doesn't match what this calculator has always claimed gets corrected via
+        `reclassify_leakage` (metadata-only, no version bump — the computation itself was never
+        in question), so this can't silently recur for a future calculator with the same timing."""
         specs = (
             (self.home_attack_feature_key, "Home Attack Strength", "goals scored at home, vs. the league's own home-scoring average"),
             (self.home_defence_feature_key, "Home Defence Strength", "goals conceded at home, vs. the league's own away-scoring average"),
@@ -336,6 +345,8 @@ class FixtureVenueStrengthCalculator:
         for feature_key, label, description in specs:
             existing = await self.registration.definitions.get(FeatureKey(feature_key))
             if existing is not None:
+                if existing.leakage_classification != "PRE_MATCH_SAFE":
+                    await self.registration.reclassify_leakage(feature_key, "PRE_MATCH_SAFE", SYSTEM_REVIEWER, now)
                 continue
             try:
                 await self.registration.register(

@@ -175,6 +175,27 @@ class FeatureRegistrationService:
         definition.status = FeatureStatus.REMOVED
         return await self.definitions.upsert(definition)
 
+    async def reclassify_leakage(
+        self, feature_key: str, leakage_classification: str, reviewer: str, now: datetime
+    ) -> FeatureDefinition:
+        """Corrects a feature's recorded `leakage_classification` in place — no version bump, no
+        DRAFT reset, unlike `update_formula()`. This is deliberately narrower: the feature's
+        actual computation is unchanged (still the same, already-reviewed cutoff-respecting
+        code), only the metadata describing it was wrong. Real production incident (2026-08-30):
+        `FixtureVenueStrengthCalculator`'s four features were registered a few hours before the
+        forensic-audit fix that added `leakage_classification="PRE_MATCH_SAFE"` to its own
+        registration call landed, so `ensure_registered()`'s "already exists, skip" guard left
+        those already-created rows on the UNKNOWN_PROVENANCE default forever — the fix was real
+        and correct for every *new* registration, but never retroactively reached the four rows
+        that predated it. Reserved for exactly this: correcting an initial mis-registration, not
+        for reclassifying a feature whose leak-safety was ever genuinely in question."""
+        definition = await self._require(feature_key)
+        definition.leakage_classification = leakage_classification
+        definition.leakage_reviewed = True
+        definition.reviewed_by = reviewer
+        definition.reviewed_at = now
+        return await self.definitions.upsert(definition)
+
     async def update_formula(
         self, feature_key: str, new_formula: str, new_dependencies: tuple[str, ...], now: datetime
     ) -> FeatureDefinition:

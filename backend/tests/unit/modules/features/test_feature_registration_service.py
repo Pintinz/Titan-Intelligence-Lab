@@ -173,6 +173,30 @@ async def test_update_formula_snapshots_previous_version(service, version_repo):
 
 
 @pytest.mark.asyncio
+async def test_reclassify_leakage_corrects_classification_without_touching_version_or_status(service):
+    """Real production incident (2026-08-30): a calculator-registered feature can end up on the
+    UNKNOWN_PROVENANCE default if it was first registered before a fix adding an explicit
+    leakage_classification landed — reclassify_leakage corrects exactly that metadata, unlike
+    update_formula (which would wrongly reset an already-ACTIVE, never-actually-wrong-behavior
+    feature back to DRAFT for a change that never touched its formula)."""
+    definition = await _register(service)
+    await service.submit_for_review(definition.feature_key.value)
+    await service.approve(definition.feature_key.value, reviewer="alice", now=T0)
+    assert definition.leakage_classification == "UNKNOWN_PROVENANCE"
+
+    corrected = await service.reclassify_leakage(
+        definition.feature_key.value, "PRE_MATCH_SAFE", reviewer="prediction-platform", now=T0 + timedelta(hours=1)
+    )
+
+    assert corrected.leakage_classification == "PRE_MATCH_SAFE"
+    assert corrected.is_market_safe() is True
+    assert corrected.version == 1  # unchanged — this is a metadata correction, not a new version
+    assert corrected.status is FeatureStatus.ACTIVE  # unchanged — still consumable throughout
+    assert corrected.leakage_reviewed is True
+    assert corrected.reviewed_by == "prediction-platform"
+
+
+@pytest.mark.asyncio
 async def test_operations_on_unknown_feature_raise_not_found(service):
     with pytest.raises(FeatureNotFoundError):
         await service.submit_for_review("does.not.exist")
