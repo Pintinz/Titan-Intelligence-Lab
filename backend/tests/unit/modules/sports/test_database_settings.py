@@ -33,7 +33,19 @@ def test_postgres_engine_disables_the_asyncpg_statement_cache() -> None:
     settings = DatabaseSettings(url="postgresql://user:pass@host/db")
     with patch("modules.sports.infrastructure.persistence.database.create_async_engine") as mock_create:
         build_engine(settings)
-    assert mock_create.call_args.kwargs["connect_args"] == {"statement_cache_size": 0}
+    assert mock_create.call_args.kwargs["connect_args"]["statement_cache_size"] == 0
+
+
+def test_postgres_engine_sets_a_bounded_command_timeout() -> None:
+    """Real prod incident (2026-08-30): ingestion.sync_completed_fixtures runs sat in
+    SyncStatus.RUNNING for 20+ minutes, blowing straight through SyncOrchestrator's own 120s
+    asyncio.wait_for bound — reproduced through both the Celery worker and a direct API-triggered
+    run, narrowing it to a stalled DB call with no timeout of its own (asyncpg has none by
+    default), unlike every other I/O client in this codebase (httpx, Redis)."""
+    settings = DatabaseSettings(url="postgresql://user:pass@host/db")
+    with patch("modules.sports.infrastructure.persistence.database.create_async_engine") as mock_create:
+        build_engine(settings)
+    assert mock_create.call_args.kwargs["connect_args"]["command_timeout"] == 30
 
 
 def test_sqlite_engine_does_not_set_postgres_only_options() -> None:

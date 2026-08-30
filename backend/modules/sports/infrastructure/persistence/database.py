@@ -154,7 +154,24 @@ def build_engine(
             # transaction), so asyncpg's statement cache has to be disabled to be compatible with
             # it. Harmless on a direct (non-pooled) connection too, so this is safe regardless of
             # which port TITANIQ_DB_URL ends up using.
-            "connect_args": {"statement_cache_size": 0},
+            #
+            # `command_timeout` — real production incident (2026-08-30): `ingestion.
+            # sync_completed_fixtures` runs sat in SyncStatus.RUNNING for 20+ minutes, well past
+            # `SyncOrchestrator`'s own 120s `asyncio.wait_for` bound around the entire operation
+            # (sync_orchestrator.py DEFAULT_LOCK_TTL_SECONDS/FETCH_TIMEOUT_SECONDS) — reproduced
+            # live through both the Celery worker and a direct API-triggered run, ruling out a
+            # worker/solo-pool-specific cause. Every other I/O client in this codebase already
+            # carries an explicit timeout for exactly this reason (httpx.AsyncClient(timeout=10.0)
+            # in football_data_org_adapter.py, socket_timeout=2 on the shared Redis client in
+            # redis_feature_store.py) — asyncpg was the one remaining gap: it has NO default
+            # statement timeout, so a stalled query against a Supabase pooler connection (a silent
+            # half-open TCP state, no FIN/RST, the same class of network stall those other clients
+            # already guard against) blocks forever with nothing to catch it, regardless of any
+            # asyncio.wait_for wrapped around the caller — cancellation can only interrupt an
+            # awaited call at a yield point the driver actually reaches. Set comfortably below
+            # every caller's own outer bound (120s) so a genuine DB stall surfaces as a normal,
+            # loggable failure well before it looks like an unexplained hang.
+            "connect_args": {"statement_cache_size": 0, "command_timeout": 30},
         }
     if poolclass is not None:
         # NullPool (the one real caller of this override, the Celery worker) manages no pool at
