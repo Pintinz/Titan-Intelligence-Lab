@@ -2239,6 +2239,18 @@ async def trigger_champion_repair(_admin: _AuthUser = Depends(require_role(_Role
     return envelope(data={"task_id": result.id, "status": "queued"})
 
 
+@app.post("/api/v1/admin/system/model-health/repair/{market_key}")
+async def trigger_single_champion_repair(market_key: str, _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
+    """Enqueues `predictions.repair_one_champion` directly for one named market — the same unit of
+    work the full sweep above dispatches per broken market, without needing a fresh audit pass
+    first. For fixing one specific market on demand (e.g. a user-reported broken prediction)
+    without waiting on or being blocked by the full-sweep audit."""
+    from modules.predictions.infrastructure.celery.tasks import repair_one_champion_task
+
+    result = repair_one_champion_task.delay(market_key, now_iso=_now().isoformat())
+    return envelope(data={"task_id": result.id, "status": "queued"})
+
+
 @app.post("/api/v1/admin/system/correct-score-feature-repair")
 async def trigger_correct_score_feature_repair(_admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
     """Enqueues `predictions.repair_correct_score_feature_requirements` on the worker (same
