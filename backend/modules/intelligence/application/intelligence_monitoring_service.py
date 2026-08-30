@@ -46,6 +46,11 @@ class IntelligenceMetricsRecorder:
     # dashboard's one number silently mean "either provider," misleading whoever reads it during
     # exactly the kind of quota investigation that motivated adding a second provider at all.
     claude_call_count: int = 0
+    # 2026-08-30 — OpenAI promoted to real_adapter (primary); same "distinct counter, never
+    # folded into another provider's" reasoning as claude_call_count's own comment above, now
+    # more load-bearing than ever: this number is exactly what would have shown the Gemini quota
+    # exhaustion coming, had it existed before that incident.
+    openai_call_count: int = 0
     extraction_correct_count: int = 0
     extraction_total_count: int = 0
 
@@ -58,6 +63,9 @@ class IntelligenceMetricsRecorder:
 
     def record_claude_call(self, count: int = 1) -> None:
         self.claude_call_count += count
+
+    def record_openai_call(self, count: int = 1) -> None:
+        self.openai_call_count += count
 
     def record_extraction_outcome(self, was_correct: bool) -> None:
         self.extraction_total_count += 1
@@ -94,6 +102,7 @@ class IntelligenceMetricsSnapshot:
     avg_processing_seconds: float
     gemini_call_count: int
     claude_call_count: int
+    openai_call_count: int
     extraction_accuracy: float | None
     average_source_reliability: float | None
     community_post_count: int
@@ -165,6 +174,7 @@ class IntelligenceMonitoringService:
             avg_processing_seconds=self.recorder.avg_processing_seconds,
             gemini_call_count=self.recorder.gemini_call_count,
             claude_call_count=self.recorder.claude_call_count,
+            openai_call_count=self.recorder.openai_call_count,
             extraction_accuracy=self.recorder.extraction_accuracy,
             average_source_reliability=await self.average_source_reliability(),
             community_post_count=len(posts),

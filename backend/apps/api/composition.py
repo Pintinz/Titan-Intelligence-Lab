@@ -133,6 +133,7 @@ from modules.intelligence.application.source_reliability_service import SourceRe
 from modules.intelligence.application.summarization_service import SummarizationService
 from modules.intelligence.infrastructure.claude_adapter import ClaudeAdapter
 from modules.intelligence.infrastructure.gemini_adapter import GeminiAdapter
+from modules.intelligence.infrastructure.openai_adapter import OpenAIAdapter
 from modules.intelligence.infrastructure.mock_gemini_adapter import MockGeminiAdapter
 from modules.intelligence.infrastructure.providers.rss_news_provider import RssNewsProvider
 from modules.intelligence.infrastructure.text_intelligence_router import TextIntelligenceRouter
@@ -792,28 +793,36 @@ def build_alert_service(session: AsyncSession) -> AlertService:
 
 
 def get_text_intelligence_provider(session: AsyncSession) -> TextIntelligenceProviderPort:
-    """Real `GeminiAdapter` when an active, credentialed "gemini" provider is registered via the
+    """Real `OpenAIAdapter` when an active, credentialed "openai" provider is registered via the
     Provider Management System; `MockGeminiAdapter` otherwise — resolved per call by
     `TextIntelligenceRouter`, not once here, so a credential added/disabled after startup takes
     effect immediately (docs/decisions.md ADR-008 follow-up; previously hardcoded to the mock
     adapter permanently, even once a working key existed).
 
-    News Intelligence audit (2026-08-27): `ClaudeAdapter` is wired as a `fallback_adapters` entry
-    — tried only when Gemini fails or isn't credentialed (see `TextIntelligenceRouter`'s own
-    docstring for why: a live-observed Gemini quota exhaustion this session). Harmless when no
-    "claude" provider/credential has been registered yet (the router's own usability check skips
-    an adapter with nothing usable) — see `scripts/import_claude_credential_from_env.py` for how
-    an operator activates it."""
+    2026-08-30 — `OpenAIAdapter` promoted to `real_adapter` (primary), `ClaudeAdapter` and
+    `GeminiAdapter` both demoted to `fallback_adapters` (tried in that order), per an explicit
+    operator decision made the same day a live Gemini quota exhaustion (429s, "You exceeded your
+    current quota") stalled prediction-generation narration mid-sweep. Gemini kept as the final
+    fallback rather than removed outright — it may well have real capacity again once its quota
+    resets, and the router's own usability check means an unconfigured/exhausted provider costs
+    nothing to keep in the chain. Each entry is harmless when its own provider/credential hasn't
+    been registered yet (the router's own usability check skips an adapter with nothing usable)
+    — see `scripts/import_claude_credential_from_env.py` for the pattern an operator follows to
+    activate any of these three."""
     admin_service = build_provider_management_service(session)
     return TextIntelligenceRouter(
         admin_service=admin_service,
-        real_adapter=GeminiAdapter(
-            get_api_key=_make_api_key_getter(admin_service, GeminiAdapter.provider_key),
+        real_adapter=OpenAIAdapter(
+            get_api_key=_make_api_key_getter(admin_service, OpenAIAdapter.provider_key),
             metrics_recorder=get_intelligence_metrics_recorder(),
         ),
         fallback_adapters=(
             ClaudeAdapter(
                 get_api_key=_make_api_key_getter(admin_service, ClaudeAdapter.provider_key),
+                metrics_recorder=get_intelligence_metrics_recorder(),
+            ),
+            GeminiAdapter(
+                get_api_key=_make_api_key_getter(admin_service, GeminiAdapter.provider_key),
                 metrics_recorder=get_intelligence_metrics_recorder(),
             ),
         ),
