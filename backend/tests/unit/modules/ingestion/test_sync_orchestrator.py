@@ -1456,3 +1456,45 @@ async def test_sync_players_for_competition_does_not_leak_across_competitions(or
     assert synced_team_refs == {"epl-t1", "epl-t2"}
     assert "ll-t1" not in synced_team_refs
     assert "ll-t2" not in synced_team_refs
+
+
+@pytest.mark.asyncio
+async def test_a_hanging_process_one_times_out_instead_of_freezing_the_whole_run(monkeypatch, orchestrator, session):
+    """Real production incident, 2026-08-30: a solo-pool worker consumed one sync_live_fixtures
+    run, completed its fetch(), then went silent forever — no more log output, no next task ever
+    picked up, for 25+ minutes. Celery's own task_time_limit is confirmed not enforced under
+    --pool=solo, so an unbounded hang anywhere inside one record's process_one (fixture
+    reconciliation touches many downstream calculators, any one of which could have an unbounded
+    await) froze the entire worker indefinitely. This proves the fix directly against `_run_sync`
+    itself — the one shared loop every entity type funnels through — rather than against one
+    specific entity's reconciliation path."""
+    import asyncio
+
+    import modules.ingestion.application.sync_orchestrator as sync_orchestrator_module
+    from modules.ingestion.application.sync_orchestrator import RecordOutcome
+
+    monkeypatch.setattr(sync_orchestrator_module, "RECORD_PROCESSING_TIMEOUT_SECONDS", 0.05)
+
+    async def fetch():
+        return ["record-1", "record-2"]
+
+    calls = []
+
+    async def process_one(record):
+        calls.append(record)
+        if record == "record-1":
+            await asyncio.sleep(999)  # simulates the real incident: an unbounded hang
+        return RecordOutcome(created=True)
+
+    run = await orchestrator._run_sync(
+        "football", EntityKind.COUNTRY, "hang-test", SyncTrigger.SCHEDULED, T0,
+        fetch=fetch, process_one=process_one,
+    )
+    await session.commit()
+
+    # The hang didn't block record-2 from ever being attempted — that's the whole point.
+    assert calls == ["record-1", "record-2"]
+    assert run is not None
+    assert run.records_rejected == 1  # record-1's timeout counted as a rejection, not a crash
+    assert run.records_created == 1  # record-2 still succeeded normally
+    assert run.status is SyncStatus.PARTIAL  # the run still completes, honestly reflecting the one rejection

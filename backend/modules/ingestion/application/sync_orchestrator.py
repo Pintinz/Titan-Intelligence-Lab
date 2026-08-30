@@ -12,6 +12,7 @@ record — matching the same "shared machinery, explicit per-entity methods" sha
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -64,6 +65,19 @@ DEFAULT_LOCK_TTL_SECONDS = 120
 # observed run without weakening the lock for any other (fast, checkpoint-gated) sync path, which
 # still uses DEFAULT_LOCK_TTL_SECONDS unchanged.
 LIVE_FIXTURES_LOCK_TTL_SECONDS = 600
+# Live-verified production incident, 2026-08-30: a solo-pool worker consumed exactly one
+# sync_live_fixtures run, completed its fetch(), then went silent forever — no more log output,
+# no next task ever picked up, for 25+ minutes (far past the 277-300s worst-case a FULL run was
+# ever empirically observed to take — see LIVE_FIXTURES_LOCK_TTL_SECONDS's own comment above).
+# Celery's task_time_limit is confirmed NOT enforced under --pool=solo (this codebase's own
+# established finding — see beat_schedule.py/tasks.py comments), so a genuine hang anywhere
+# inside one record's `process_one` (fixture reconciliation touches many downstream
+# calculators — news/KG/feature writes — any one of which could have an unbounded await) freezes
+# the entire single-threaded worker indefinitely, with no automatic recovery. Bounding each
+# record's processing time here, in the one shared sync loop every entity type funnels through,
+# protects the whole ingestion pipeline against this failure class at once rather than chasing
+# down one specific downstream call.
+RECORD_PROCESSING_TIMEOUT_SECONDS = 60
 
 
 def _ensure_aware(dt: datetime, reference: datetime) -> datetime:
@@ -191,7 +205,20 @@ class SyncOrchestrator:
             run.records_fetched = len(records)
             issue_counts = {"missing": 0, "invalid": 0, "relationship": 0, "duplicate": 0}
             for record in records:
-                outcome = await process_one(record)
+                try:
+                    outcome = await asyncio.wait_for(process_one(record), timeout=RECORD_PROCESSING_TIMEOUT_SECONDS)
+                except TimeoutError:
+                    # Never silently swallowed — a hang here is exactly the class of incident
+                    # this timeout exists to catch, so it must be as visible as the fetch_failed
+                    # case above once it happens for real.
+                    logger.error(
+                        "sync_orchestrator.process_one_timed_out",
+                        extra={
+                            "sport_code": sport_code, "entity_kind": entity_kind.value, "scope_key": scope_key,
+                            "timeout_seconds": RECORD_PROCESSING_TIMEOUT_SECONDS,
+                        },
+                    )
+                    outcome = RecordOutcome(rejected=True)
                 if outcome.created:
                     run.records_created += 1
                 elif outcome.updated:
