@@ -2154,6 +2154,24 @@ async def trigger_champion_repair(_admin: _AuthUser = Depends(require_role(_Role
     return envelope(data={"task_id": result.id, "status": "queued"})
 
 
+@app.post("/api/v1/admin/system/correct-score-feature-repair")
+async def trigger_correct_score_feature_repair(_admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
+    """Enqueues `predictions.repair_correct_score_feature_requirements` on the worker (same
+    "delegate to the worker, return a task_id immediately" shape as `trigger_champion_repair`
+    above — re-seeding + a fixture-scoped backfill loop can run past a reasonable HTTP request
+    lifetime). Real production incident, 2026-08-30: `football.correct_score`'s live
+    required-feature mapping still pointed at the pre-2026-08-26 venue-blind expected-goals pair
+    (market_seeding.py's spec had already moved on to venue-strength features, but market seeding
+    only ever creates a mapping, never updates one that already exists — see the task's own
+    docstring for the full trace), so every real "Generate Intelligence" request for this market
+    failed with a MissingRequiredFeatureError even when the fixture's teams had abundant real
+    completed-match history."""
+    from modules.predictions.infrastructure.celery.tasks import repair_correct_score_feature_requirements_task
+
+    result = repair_correct_score_feature_requirements_task.delay(now_iso=_now().isoformat())
+    return envelope(data={"task_id": result.id, "status": "queued"})
+
+
 # Knowledge-graph single-entity lookup lives at GET /api/v1/graph/entities/{node_type}/{entity_ref}
 # (apps/api/routers/graph_router.py) — that endpoint now also returns edges_out/edges_in, so this
 # admin-only duplicate (which resolved the exact same kg.nodes.get_by_entity_ref() call under a

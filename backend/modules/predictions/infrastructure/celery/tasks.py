@@ -16,16 +16,25 @@ import functools
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import text
 
 from modules.ingestion.infrastructure.celery.celery_app import celery_app
 from modules.predictions.application.calibration_fitting_service import CalibrationFittingService
 from modules.predictions.application.calibration_validation_service import CalibrationValidationService
+from modules.predictions.application.feature_market_mapping_service import FeatureMarketMappingService
 from modules.predictions.application.model_health_audit_service import REPAIRABLE_STATUSES, ModelHealthAuditService
 from modules.predictions.application.scheduled_prediction_generation_orchestrator import (
     ScheduledPredictionGenerationOrchestrator,
 )
 from modules.predictions.application.scheduled_retraining_orchestrator import ScheduledRetrainingOrchestrator
+from modules.predictions.application.windowed_feature_engineering_service import FixtureVenueStrengthCalculator
+from modules.predictions.football.market_seeding import FootballMarketSeeder
+from modules.sports.domain.value_objects import SeasonId, SportId, TeamId
 
 logger = logging.getLogger("titaniq.predictions.tasks")
 
@@ -85,6 +94,47 @@ async def _get_retraining_orchestrator() -> AsyncIterator[ScheduledRetrainingOrc
         redis_client = getattr(orchestrator, "_worker_redis_client", None)
         if redis_client is not None:
             await redis_client.aclose()
+        await asyncio.sleep(0)
+
+
+@dataclass
+class MarketFeatureRepairContext:
+    """Bundles exactly the composed pieces `repair_correct_score_feature_requirements_task` needs
+    — the market seeder (re-applies market_seeding.py's current spec), the feature-market mapping
+    service (`set_required`, for demoting a mapping the seeder itself can only ever create, never
+    update), and the venue-strength calculator (for backfilling real values on upcoming fixtures)
+    — plus the raw session so `_get_market_feature_repair_context` can close it, same
+    `_worker_session` teardown shape every other factory-built object in this module uses."""
+
+    seeder: FootballMarketSeeder
+    mappings: FeatureMarketMappingService
+    venue_strength_calculator: FixtureVenueStrengthCalculator
+    session: Any
+
+
+_MarketFeatureRepairContextFactory = Callable[[], Awaitable[MarketFeatureRepairContext]]
+_market_feature_repair_context_factory: _MarketFeatureRepairContextFactory | None = None
+
+
+def set_market_feature_repair_context_factory(factory: _MarketFeatureRepairContextFactory) -> None:
+    global _market_feature_repair_context_factory
+    _market_feature_repair_context_factory = factory
+
+
+@asynccontextmanager
+async def _get_market_feature_repair_context() -> AsyncIterator[MarketFeatureRepairContext]:
+    """Milestone 24 §3/1(b): same session-closing rationale as `_get_retraining_orchestrator`
+    above."""
+    if _market_feature_repair_context_factory is None:
+        raise RuntimeError(
+            "market feature repair context factory not configured — call "
+            "set_market_feature_repair_context_factory() at worker startup"
+        )
+    context = await _market_feature_repair_context_factory()
+    try:
+        yield context
+    finally:
+        await context.session.close()
         await asyncio.sleep(0)
 
 
@@ -337,6 +387,86 @@ def repair_broken_champions_task(self, now_iso: str | None = None) -> dict:
             }
 
     return asyncio.run(asyncio.wait_for(_do(), timeout=_REPAIR_TASK_TIMEOUT_SECONDS))
+
+
+_FEATURE_REPAIR_TASK_TIMEOUT_SECONDS = 900
+
+# Correct Score forensic audit (2026-08-26, market_seeding.py) replaced these two with
+# `_VENUE_STRENGTH_FEATURES` as football.correct_score's real required expected-goals signal,
+# demoting the old pair to optional — but `_seed_market` only ever *adds* a mapping
+# (`except MappingAlreadyExistsError: continue`), so a spec change like this never reaches an
+# already-seeded market's persisted `is_required` flag on its own. `FeatureMarketMappingService.
+# set_required` exists for exactly this drift; nothing had ever called it for this one.
+_CORRECT_SCORE_STALE_REQUIRED_FEATURES = (
+    "football.fixture.expected_home_goals",
+    "football.fixture.expected_away_goals",
+)
+
+
+@celery_app.task(name="predictions.repair_correct_score_feature_requirements", bind=True, **_RETRY_KWARGS)
+@_logged("predictions.repair_correct_score_feature_requirements")
+def repair_correct_score_feature_requirements_task(self, now_iso: str | None = None) -> dict:
+    """On-demand only. Real production incident, 2026-08-30: football.correct_score's live
+    required-feature mapping in the database still pointed at the pre-2026-08-26 venue-blind
+    expected-goals pair, blocking every real "Generate Intelligence" request for this market with
+    a MissingRequiredFeatureError even for fixtures whose teams had abundant real completed-match
+    history (confirmed live against production before this fix — the venue-strength audit fix had
+    shipped in code but the DB mapping it depends on had never been re-seeded, and the four new
+    venue-strength mappings had never been created there either). Re-seeds football's market
+    catalog (idempotent — creates only what's missing), demotes the two stale expected-goals
+    mappings to optional, then backfills real venue-strength feature values for every football
+    fixture that hasn't kicked off yet, so an upcoming fixture doesn't have to wait for its next
+    reconciliation cycle to generate a real prediction."""
+
+    async def _do() -> dict:
+        async with _get_market_feature_repair_context() as ctx:
+            now = datetime.fromisoformat(now_iso) if now_iso else datetime.now(timezone.utc)
+
+            await ctx.seeder.seed(now)
+
+            demoted = []
+            for feature_key in _CORRECT_SCORE_STALE_REQUIRED_FEATURES:
+                try:
+                    await ctx.mappings.set_required("football.correct_score", feature_key, False)
+                    demoted.append(feature_key)
+                except KeyError:
+                    continue
+
+            rows = (
+                await ctx.session.execute(
+                    text(
+                        "SELECT f.id, f.home_team_id, f.away_team_id, f.season_id, c.sport_id "
+                        "FROM fixtures f "
+                        "JOIN seasons se ON f.season_id = se.id "
+                        "JOIN competitions c ON se.competition_id = c.id "
+                        "JOIN sports s ON c.sport_id = s.id "
+                        "WHERE s.code = 'football' AND f.status != 'completed'"
+                    )
+                )
+            ).all()
+
+            backfilled = 0
+            for raw_fixture_id, raw_home_team_id, raw_away_team_id, raw_season_id, raw_sport_id in rows:
+                home_value, *_rest = await ctx.venue_strength_calculator.compute_and_write(
+                    str(UUID(str(raw_fixture_id))),
+                    TeamId(UUID(str(raw_home_team_id))),
+                    TeamId(UUID(str(raw_away_team_id))),
+                    SportId(UUID(str(raw_sport_id))),
+                    SeasonId(UUID(str(raw_season_id))),
+                    now,
+                )
+                if home_value is not None:
+                    backfilled += 1
+
+            await ctx.session.commit()
+            return {
+                "seeded": True,
+                "demoted_to_optional": demoted,
+                "upcoming_football_fixtures_checked": len(rows),
+                "venue_strength_backfilled": backfilled,
+            }
+
+    return asyncio.run(asyncio.wait_for(_do(), timeout=_FEATURE_REPAIR_TASK_TIMEOUT_SECONDS))
 
 
 @celery_app.task(name="predictions.check_scheduled_calibration", bind=True, **_RETRY_KWARGS)

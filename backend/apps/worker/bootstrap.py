@@ -45,6 +45,9 @@ from apps.api.composition import (
     build_calibration_fitting_service,
     build_calibration_validation_service,
     build_engine,
+    build_feature_market_mapping_service,
+    build_football_market_seeder,
+    build_football_venue_strength_calculator,
     build_health_intelligence_engine,
     build_provider_management_service,
     build_scheduled_news_sync_service,
@@ -128,6 +131,11 @@ def _fresh_registry() -> dict[str, FactoryRecord]:
             name="retraining_orchestrator", module="modules.predictions.infrastructure.celery.tasks",
             service="ScheduledRetrainingOrchestrator",
             task_names=("predictions.check_scheduled_retraining", "predictions.repair_broken_champions"),
+        ),
+        "market_feature_repair": FactoryRecord(
+            name="market_feature_repair", module="modules.predictions.infrastructure.celery.tasks",
+            service="MarketFeatureRepairContext",
+            task_names=("predictions.repair_correct_score_feature_requirements",),
         ),
         "prediction_generation_orchestrator": FactoryRecord(
             name="prediction_generation_orchestrator", module="modules.predictions.infrastructure.celery.tasks",
@@ -228,7 +236,7 @@ def import_task_modules() -> tuple[str, ...]:
 
 
 def register_factories(session_factory: async_sessionmaker[AsyncSession]) -> None:
-    """Wires all 6 production factories to real, composed application services — one fresh
+    """Wires all 7 production factories to real, composed application services — one fresh
     session per task invocation (never a shared mutable session, never the FastAPI request-scoped
     one), built via the existing `apps.api.composition` builders. No task-module code changes."""
     from modules.admin.infrastructure.celery.tasks import set_admin_context_factory
@@ -238,8 +246,10 @@ def register_factories(session_factory: async_sessionmaker[AsyncSession]) -> Non
     )
     from modules.intelligence.infrastructure.celery.tasks import set_scheduled_news_sync_service_factory
     from modules.predictions.infrastructure.celery.tasks import (
+        MarketFeatureRepairContext,
         set_calibration_service_factory,
         set_calibration_validation_service_factory,
+        set_market_feature_repair_context_factory,
         set_prediction_generation_orchestrator_factory,
         set_retraining_orchestrator_factory,
     )
@@ -278,6 +288,17 @@ def register_factories(session_factory: async_sessionmaker[AsyncSession]) -> Non
         orchestrator._worker_session = session
         orchestrator._worker_redis_client = redis_client
         return orchestrator
+
+    async def market_feature_repair_context_factory():
+        # No redis client — MarketFeatureRepairContext's work (seeding, set_required, a plain
+        # SQL query + FixtureVenueStrengthCalculator.compute_and_write) touches only the DB.
+        session = session_factory()
+        return MarketFeatureRepairContext(
+            seeder=build_football_market_seeder(session),
+            mappings=build_feature_market_mapping_service(session),
+            venue_strength_calculator=build_football_venue_strength_calculator(session),
+            session=session,
+        )
 
     async def prediction_generation_orchestrator_factory():
         session = session_factory()
@@ -327,6 +348,9 @@ def register_factories(session_factory: async_sessionmaker[AsyncSession]) -> Non
 
     set_retraining_orchestrator_factory(retraining_orchestrator_factory)
     FACTORY_REGISTRY["retraining_orchestrator"].registered = True
+
+    set_market_feature_repair_context_factory(market_feature_repair_context_factory)
+    FACTORY_REGISTRY["market_feature_repair"].registered = True
 
     set_prediction_generation_orchestrator_factory(prediction_generation_orchestrator_factory)
     FACTORY_REGISTRY["prediction_generation_orchestrator"].registered = True

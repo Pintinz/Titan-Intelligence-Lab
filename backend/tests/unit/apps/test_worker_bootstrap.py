@@ -21,7 +21,7 @@ T0 = datetime(2026, 7, 26, tzinfo=timezone.utc)
 
 def _reset_all_factories() -> None:
     """Every factory setter accepts None to reset — same teardown shape the existing per-module
-    Celery test suites already establish (test_celery_tasks.py etc.), applied to all 8 here so no
+    Celery test suites already establish (test_celery_tasks.py etc.), applied to all 9 here so no
     state leaks between this file's tests or into other test modules."""
     from modules.admin.infrastructure.celery.tasks import set_admin_context_factory
     from modules.ingestion.infrastructure.celery.tasks import (
@@ -32,6 +32,7 @@ def _reset_all_factories() -> None:
     from modules.predictions.infrastructure.celery.tasks import (
         set_calibration_service_factory,
         set_calibration_validation_service_factory,
+        set_market_feature_repair_context_factory,
         set_prediction_generation_orchestrator_factory,
         set_retraining_orchestrator_factory,
     )
@@ -39,6 +40,7 @@ def _reset_all_factories() -> None:
     set_orchestrator_factory(None)
     set_admin_context_factory(None)
     set_retraining_orchestrator_factory(None)
+    set_market_feature_repair_context_factory(None)
     set_prediction_generation_orchestrator_factory(None)
     set_team_statistics_sync_orchestrator_factory(None)
     set_calibration_service_factory(None)
@@ -116,9 +118,9 @@ def test_fresh_registry_starts_entirely_unregistered():
 
     assert all(not record.registered for record in registry.values())
     assert set(registry.keys()) == {
-        "orchestrator", "admin_context", "retraining_orchestrator", "prediction_generation_orchestrator",
-        "team_statistics_sync_orchestrator", "calibration_service", "calibration_validation_service",
-        "scheduled_news_sync",
+        "orchestrator", "admin_context", "retraining_orchestrator", "market_feature_repair",
+        "prediction_generation_orchestrator", "team_statistics_sync_orchestrator", "calibration_service",
+        "calibration_validation_service", "scheduled_news_sync",
     }
 
 
@@ -208,6 +210,7 @@ def test_bootstrap_worker_runs_the_real_production_path_end_to_end(worker_env):
     from modules.predictions.infrastructure.celery.tasks import (
         _calibration_service_factory,
         _calibration_validation_service_factory,
+        _market_feature_repair_context_factory,
         _prediction_generation_orchestrator_factory,
         _retraining_orchestrator_factory,
     )
@@ -215,6 +218,7 @@ def test_bootstrap_worker_runs_the_real_production_path_end_to_end(worker_env):
     assert _orchestrator_factory is not None
     assert _admin_context_factory is not None
     assert _retraining_orchestrator_factory is not None
+    assert _market_feature_repair_context_factory is not None
     assert _prediction_generation_orchestrator_factory is not None
     assert _team_statistics_sync_orchestrator_factory is not None
     assert _calibration_service_factory is not None
