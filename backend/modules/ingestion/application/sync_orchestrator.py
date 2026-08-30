@@ -183,11 +183,13 @@ class SyncOrchestrator:
         if not await self.lock.acquire(lock_key, lock_ttl_seconds):
             return None  # another worker/process already syncing this exact scope
 
-        try:
-            run = SyncRun(
-                id=run_id or SyncRunId(uuid4()), sport_code=sport_code, entity_kind=entity_kind, scope_key=scope_key,
-                trigger=trigger, status=SyncStatus.RUNNING, started_at=now,
-            )
+        run = SyncRun(
+            id=run_id or SyncRunId(uuid4()), sport_code=sport_code, entity_kind=entity_kind, scope_key=scope_key,
+            trigger=trigger, status=SyncStatus.RUNNING, started_at=now,
+        )
+
+        async def _do_run() -> SyncRun:
+            nonlocal checkpoint  # reassigned below (checkpoint = checkpoint or SyncCheckpoint(...))
             await self.sync_runs.record(run)
             await self.timeline.record(
                 TimelineEvent(
@@ -266,6 +268,32 @@ class SyncOrchestrator:
                 )
             )
             return run
+
+        # Live-verified production incident, 2026-08-30: fetch() and process_one() are each
+        # individually bounded above, but a solo-pool worker still froze for over an hour with
+        # zero log output and zero automatic recovery (Render has no health-check/auto-restart
+        # for this background worker service) — the hang sat somewhere in the unprotected
+        # bookkeeping around them (lock acquisition, the post-loop checkpoint/quality-
+        # report/timeline writes). Rather than keep chasing individual sub-calls one at a time,
+        # bound the ENTIRE lock-held operation at once, using the lock's own TTL as the ceiling —
+        # that TTL already represents "how long this scope is allowed to be exclusively held," so
+        # enforcing it here closes the actual gap: nothing inside this critical section can ever
+        # hang past the point where another worker would have safely taken over anyway.
+        try:
+            try:
+                return await asyncio.wait_for(_do_run(), timeout=lock_ttl_seconds)
+            except TimeoutError:
+                logger.error(
+                    "sync_orchestrator.run_timed_out",
+                    extra={
+                        "sport_code": sport_code, "entity_kind": entity_kind.value, "scope_key": scope_key,
+                        "timeout_seconds": lock_ttl_seconds,
+                    },
+                )
+                return await self._fail(
+                    run, checkpoint, sport_code, entity_kind, scope_key, now,
+                    f"sync run timed out after {lock_ttl_seconds}s (lock TTL exceeded)",
+                )
         finally:
             await self.lock.release(lock_key)
 

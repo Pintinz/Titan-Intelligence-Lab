@@ -1533,3 +1533,41 @@ async def test_a_hanging_fetch_times_out_instead_of_freezing_the_worker_forever(
 
     checkpoint = await orchestrator.checkpoints.get("football", EntityKind.COUNTRY, "fetch-hang-test")
     assert checkpoint.consecutive_failures == 1  # a real failure, tracked like any other fetch error
+
+
+@pytest.mark.asyncio
+async def test_a_hang_in_unprotected_post_loop_bookkeeping_is_still_bounded_and_releases_the_lock(
+    monkeypatch, orchestrator, session, lock
+):
+    """The real gap neither of the two fixes above closed: live evidence showed a worker frozen
+    for over an hour with zero log output and zero automatic recovery (Render has no health-check
+    restart for this background worker service), even with both fetch() and process_one()
+    individually bounded — meaning the actual hang sat in the unprotected bookkeeping around them
+    (lock acquisition, or the post-loop checkpoint/quality-report/timeline writes). Simulates a
+    hang in generate_report specifically — a real unprotected call — and proves the outer,
+    lock-TTL-scoped timeout catches it, the run is marked failed (not left dangling), and,
+    critically, the lock is still released so the next attempt isn't permanently blocked either."""
+    import asyncio
+
+    async def fetch():
+        return []
+
+    async def process_one(record):
+        raise AssertionError("unreachable — fetch() returns no records")  # pragma: no cover
+
+    async def hanging_generate_report(*args, **kwargs):
+        await asyncio.sleep(999)  # simulates the real incident: an unbounded hang with no HTTP call involved at all
+
+    monkeypatch.setattr(orchestrator.quality, "generate_report", hanging_generate_report)
+
+    lock_key = "sync:football:country:bookkeeping-hang-test"
+    run = await orchestrator._run_sync(
+        "football", EntityKind.COUNTRY, "bookkeeping-hang-test", SyncTrigger.SCHEDULED, T0,
+        fetch=fetch, process_one=process_one, lock_ttl_seconds=0.05,
+    )
+    await session.commit()
+
+    assert run is not None
+    assert run.status is SyncStatus.FAILED
+    assert run.error_message is not None and "timed out" in run.error_message.lower()
+    assert lock_key not in lock.held  # the lock was released, not left stuck forever
