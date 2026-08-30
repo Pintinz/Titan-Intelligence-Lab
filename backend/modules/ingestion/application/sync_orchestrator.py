@@ -78,6 +78,15 @@ LIVE_FIXTURES_LOCK_TTL_SECONDS = 600
 # protects the whole ingestion pipeline against this failure class at once rather than chasing
 # down one specific downstream call.
 RECORD_PROCESSING_TIMEOUT_SECONDS = 60
+# Same incident as RECORD_PROCESSING_TIMEOUT_SECONDS above, refined once live evidence showed
+# exactly where this specific recurring hang sits: the SAME task_id (a poison-pill message,
+# `task_acks_late=True` meaning an unfinished task is never acked and keeps getting redelivered
+# to every fresh worker instance) got "received" and "started" on at least two separate worker
+# restarts hours apart, but never logged even the fetch's own HTTP request/response — meaning the
+# hang is inside `fetch()` itself (before any HTTP call is even made — e.g. resolving the
+# provider's decrypted API key, a DB call with no timeout of its own), not inside per-record
+# processing. Bounding fetch() the same way closes that gap.
+FETCH_TIMEOUT_SECONDS = 120
 
 
 def _ensure_aware(dt: datetime, reference: datetime) -> datetime:
@@ -188,8 +197,8 @@ class SyncOrchestrator:
             )
 
             try:
-                records = await fetch()
-            except Exception as exc:  # noqa: BLE001 — deliberately broad: any provider/transport failure is a sync failure
+                records = await asyncio.wait_for(fetch(), timeout=FETCH_TIMEOUT_SECONDS)
+            except Exception as exc:  # noqa: BLE001 — deliberately broad: any provider/transport failure (including a TimeoutError) is a sync failure
                 # Previously silent: `_fail` stores `str(exc)` only in the SyncRun row, never in the
                 # process log stream — a real production incident (2026-08-27) where every single
                 # sync attempt failed for days took a live DB/admin-panel investigation to diagnose
@@ -200,7 +209,12 @@ class SyncOrchestrator:
                     extra={"sport_code": sport_code, "entity_kind": entity_kind.value, "scope_key": scope_key},
                     exc_info=True,
                 )
-                return await self._fail(run, checkpoint, sport_code, entity_kind, scope_key, now, str(exc))
+                # asyncio.wait_for's TimeoutError carries no message of its own (str(exc) == "") —
+                # an admin reading the SyncRun row later would see a genuinely empty error_message,
+                # exactly the kind of unhelpful gap the 2026-08-27 incident above already fixed
+                # once for every OTHER exception type.
+                message = str(exc) or f"fetch() timed out after {FETCH_TIMEOUT_SECONDS}s"
+                return await self._fail(run, checkpoint, sport_code, entity_kind, scope_key, now, message)
 
             run.records_fetched = len(records)
             issue_counts = {"missing": 0, "invalid": 0, "relationship": 0, "duplicate": 0}

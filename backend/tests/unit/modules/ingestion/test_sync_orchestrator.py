@@ -1498,3 +1498,38 @@ async def test_a_hanging_process_one_times_out_instead_of_freezing_the_whole_run
     assert run.records_rejected == 1  # record-1's timeout counted as a rejection, not a crash
     assert run.records_created == 1  # record-2 still succeeded normally
     assert run.status is SyncStatus.PARTIAL  # the run still completes, honestly reflecting the one rejection
+
+
+@pytest.mark.asyncio
+async def test_a_hanging_fetch_times_out_instead_of_freezing_the_worker_forever(monkeypatch, orchestrator, session):
+    """Refinement of the incident above once live evidence (Render worker logs) showed exactly
+    where a real recurring hang sat: the SAME task_id got "received" and "started" across at
+    least two separate worker restarts hours apart, but never logged even the fetch's own HTTP
+    request — meaning the hang was inside fetch() itself (e.g. resolving the provider's decrypted
+    API key, a DB call with no timeout of its own), before any per-record processing could even
+    begin. This proves fetch() is bounded the same way process_one is."""
+    import asyncio
+
+    import modules.ingestion.application.sync_orchestrator as sync_orchestrator_module
+
+    monkeypatch.setattr(sync_orchestrator_module, "FETCH_TIMEOUT_SECONDS", 0.05)
+
+    async def fetch():
+        await asyncio.sleep(999)  # simulates the real incident: an unbounded hang before any fetch completes
+        return []  # pragma: no cover — unreachable, the timeout fires first
+
+    async def process_one(record):
+        raise AssertionError("must never be called — fetch() itself timed out first")  # pragma: no cover
+
+    run = await orchestrator._run_sync(
+        "football", EntityKind.COUNTRY, "fetch-hang-test", SyncTrigger.SCHEDULED, T0,
+        fetch=fetch, process_one=process_one,
+    )
+    await session.commit()
+
+    assert run is not None
+    assert run.status is SyncStatus.FAILED
+    assert run.error_message is not None and "timed out" in run.error_message.lower()
+
+    checkpoint = await orchestrator.checkpoints.get("football", EntityKind.COUNTRY, "fetch-hang-test")
+    assert checkpoint.consecutive_failures == 1  # a real failure, tracked like any other fetch error
