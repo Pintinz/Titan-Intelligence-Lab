@@ -281,7 +281,7 @@ from modules.watchlist.application.watchlist_service import WatchlistService
 from modules.watchlist.infrastructure.persistence.repositories import SqlAlchemyWatchlistRepository
 from modules.alerts.application.alert_service import AlertService
 from modules.alerts.infrastructure.persistence.repositories import SqlAlchemyAlertEventRepository
-from modules.sports.infrastructure.persistence.database import build_engine, build_session_factory
+from modules.sports.infrastructure.persistence.database import Environment, build_engine, build_session_factory, get_environment
 from modules.sports.infrastructure.persistence.repositories import (
     SqlAlchemyCoachingStaffRepository,
     SqlAlchemyCompetitionRepository,
@@ -1179,10 +1179,26 @@ def get_model_artifact_store() -> ModelArtifactStorePort:
     # durable adapter rather than an environment-name check, so any environment that has real
     # Supabase credentials wired (including a local run pointed at a real project) gets durable
     # storage, and any environment without them (unit tests, an offline dev box) keeps the local
-    # dev/offline-test adapter local_artifact_store.py's own docstring describes — never a hard
-    # failure at startup for not having this optional credential set.
+    # dev/offline-test adapter local_artifact_store.py's own docstring describes.
     if os.environ.get("TITANIQ_SUPABASE_SERVICE_ROLE_KEY"):
         return SupabaseStorageArtifactStore()
+
+    # Forensic audit finding #8 (2026-08-30): the credential-presence gate above is exactly how
+    # the 2026-08-23 incident happened — nothing stopped a production deploy with a missing/
+    # misconfigured `TITANIQ_SUPABASE_SERVICE_ROLE_KEY` from silently falling through to
+    # ephemeral local-disk storage instead of failing loudly. Local storage is only ever the
+    # right choice for unit tests and an offline dev box, i.e. `Environment.DEVELOPMENT` — fail
+    # fast at boot for anything else rather than let this exact incident recur unannounced.
+    environment = get_environment()
+    if environment is not Environment.DEVELOPMENT:
+        raise RuntimeError(
+            f"TITANIQ_ENVIRONMENT={environment.value!r} but TITANIQ_SUPABASE_SERVICE_ROLE_KEY is "
+            "not set — refusing to fall back to LocalFilesystemArtifactStore, which Render (and "
+            "most PaaS hosts) wipes on every deploy/restart. This is the exact misconfiguration "
+            "behind the 2026-08-23 incident (40/53 production markets lost their trained "
+            "Champion artifacts on the next deploy). Set TITANIQ_SUPABASE_SERVICE_ROLE_KEY, or "
+            "set TITANIQ_ENVIRONMENT=development if this really is a local/offline run."
+        )
     return LocalFilesystemArtifactStore()
 
 

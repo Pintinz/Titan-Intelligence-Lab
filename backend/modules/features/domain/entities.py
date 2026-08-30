@@ -57,9 +57,19 @@ class FeatureDefinition:
         return self.status is FeatureStatus.ACTIVE
 
     def is_market_safe(self) -> bool:
-        """POST_MATCH_ONLY features must never enter a market's live prediction/training feature
-        set (Milestone 4 Rule 8) — checked by `FeatureMarketMappingService.map_feature()`."""
-        return self.leakage_classification != "POST_MATCH_ONLY"
+        """Only an explicitly reviewed PRE_MATCH_SAFE classification may back a market's live
+        prediction/training feature set (Milestone 4 Rule 8, tightened 2026-08-30 forensic audit
+        finding #3) — checked by `FeatureMarketMappingService.map_feature()`/`reconcile_feature()`.
+
+        Previously this only excluded POST_MATCH_ONLY, which meant POINT_IN_TIME_REQUIRED and
+        UNKNOWN_PROVENANCE — the default for every feature nobody has explicitly classified —
+        both silently passed as safe. UNKNOWN_PROVENANCE is not a statement that a feature is
+        safe, it is a statement that nobody has checked; treating it as safe defeats the point of
+        having a classification at all. Fails closed now: a feature earns market-safe status by
+        being explicitly marked PRE_MATCH_SAFE at registration (see the six windowed calculators,
+        the news/manager-change features, and each sport's SINGLE_RECORD_FEATURES block), not by
+        default."""
+        return self.leakage_classification == "PRE_MATCH_SAFE"
 
 
 @dataclass

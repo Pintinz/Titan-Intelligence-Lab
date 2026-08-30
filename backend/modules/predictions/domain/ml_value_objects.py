@@ -57,6 +57,18 @@ class MLAlgorithm(str, Enum):
     # two real, independently-benchmarked Poisson variants is actually serving — see
     # `scheduled_retraining_orchestrator.py`'s `DIXON_COLES_ELIGIBLE_MARKETS`.
     POISSON_DIXON_COLES_MODEL = "poisson_dixon_coles_model"
+    # Forensic audit finding #7 (2026-08-30): plain Poisson assumes equidispersion (variance ==
+    # mean) unconditionally, with no goodness-of-fit check anywhere confirming real football goal
+    # counts actually satisfy that. The same FootballGoalsPoissonAdapter with a per-side
+    # dispersion parameter fit on top of its already-fitted Poisson means
+    # (`params={"negative_binomial": True}`) — variance = mean + alpha*mean^2, recovering plain
+    # Poisson exactly as alpha -> 0. Registered as its own algorithm for the same reason
+    # POISSON_DIXON_COLES_MODEL is: whichever variant actually wins a market's benchmark should
+    # be nameable, not silently conflated with the equidispersion baseline. This candidate IS the
+    # dispersion test this codebase runs — same "never assumed, always empirically benchmarked on
+    # real held-out log loss" posture as Dixon-Coles, deliberately not a separate unused
+    # diagnostic statistic nothing consumes.
+    NEGATIVE_BINOMIAL_GOALS_MODEL = "negative_binomial_goals_model"
 
 
 ALGORITHM_FRAMEWORK: dict[MLAlgorithm, MLFramework] = {

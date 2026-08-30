@@ -116,18 +116,14 @@ class NewsMarketImpactEngine:
                         owner=SYSTEM_REVIEWER,
                         entity_type=EntityType.FIXTURE,
                         online_ttl_seconds=ENGINEERED_FEATURE_TTL_SECONDS,
+                        # Every contributing event is required to be is_feature_eligible()
+                        # (VERIFIED_PRE_MATCH) before it can contribute anything.
+                        leakage_classification="PRE_MATCH_SAFE",
                     )
                 except FeatureAlreadyRegisteredError:
                     continue
                 await self.registration.submit_for_review(feature_key)
                 await self.registration.approve(feature_key, SYSTEM_REVIEWER, now)
-                # Milestone 4 leakage classification: every contributing event is required to be
-                # is_feature_eligible() (VERIFIED_PRE_MATCH) before it can contribute anything —
-                # earns PRE_MATCH_SAFE for the same reason every other gated M6-M8 feature does.
-                definition = await self.registration.definitions.get(FeatureKey(feature_key))
-                if definition is not None:
-                    definition.leakage_classification = "PRE_MATCH_SAFE"
-                    await self.registration.definitions.upsert(definition)
 
     async def _resolve_roster(
         self, team_id: TeamId, historical_reference_time: datetime | None,

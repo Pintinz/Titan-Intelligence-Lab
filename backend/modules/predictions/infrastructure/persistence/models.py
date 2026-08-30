@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, MetaData, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, MetaData, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 metadata = MetaData(schema="predictions")
@@ -65,7 +65,24 @@ class FeatureMarketMappingModel(Base):
 
 class ModelDefinitionModel(Base):
     __tablename__ = "models"
-    __table_args__ = (UniqueConstraint("model_key", "version", name="uq_model_key_version"),)
+    __table_args__ = (
+        UniqueConstraint("model_key", "version", name="uq_model_key_version"),
+        # Forensic audit finding #6 (2026-08-30): "exactly one CHAMPION per market" was enforced
+        # only by ModelRegistryService's own promote/retire sequencing — nothing at the DB layer
+        # stopped two CHAMPION rows for the same market from ever coexisting under a race or a
+        # bypassed service call; the only visible symptom would have been
+        # `ModelRepositoryPort.get_champion`'s `scalar_one_or_none()` raising `MultipleResultsFound`
+        # well after the fact. This partial unique index makes the invariant structural instead of
+        # a promise: Postgres/SQLite both refuse a second 'champion' row for the same market_id
+        # outright, at insert/update time, not at read time.
+        Index(
+            "uq_models_one_champion_per_market",
+            "market_id",
+            unique=True,
+            postgresql_where=text("status = 'champion'"),
+            sqlite_where=text("status = 'champion'"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     market_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("prediction_markets.id"), index=True)

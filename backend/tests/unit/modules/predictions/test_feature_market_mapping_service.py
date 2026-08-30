@@ -14,6 +14,7 @@ from modules.features.domain.value_objects import (
     FeatureStatus,
 )
 from modules.predictions.application.feature_market_mapping_service import (
+    FeatureLeakageRiskError,
     FeatureMarketMappingService,
     FeatureNotApprovedError,
     MappingAlreadyExistsError,
@@ -47,7 +48,9 @@ async def _market(registry, key="football.match_result"):
     )
 
 
-async def _active_feature(feature_definition_repo, key="football.team.form_index_last5"):
+async def _active_feature(
+    feature_definition_repo, key="football.team.form_index_last5", leakage_classification="PRE_MATCH_SAFE"
+):
     definition = FeatureDefinition(
         id=FeatureDefinitionId(uuid4()),
         feature_key=FeatureKey(key),
@@ -60,6 +63,7 @@ async def _active_feature(feature_definition_repo, key="football.team.form_index
         owner="data-team",
         entity_type=EntityType.TEAM,
         status=FeatureStatus.ACTIVE,
+        leakage_classification=leakage_classification,
     )
     await feature_definition_repo.upsert(definition)
     return definition
@@ -146,3 +150,70 @@ async def test_resolve_feature_snapshot_allows_missing_optional_feature(service,
     snapshot = await service.resolve_feature_snapshot(market.market_key, {})
 
     assert snapshot == {}
+
+
+@pytest.mark.asyncio
+async def test_map_feature_rejects_unreviewed_feature_by_default(service, registry, feature_definition_repo):
+    """Forensic audit finding #3 (2026-08-30): UNKNOWN_PROVENANCE — the default classification
+    for every feature nobody has explicitly reviewed — must fail closed, not silently pass as
+    market-safe. Only an explicit PRE_MATCH_SAFE classification may back a market."""
+    market = await _market(registry)
+    definition = await _active_feature(feature_definition_repo, leakage_classification="UNKNOWN_PROVENANCE")
+
+    with pytest.raises(FeatureLeakageRiskError):
+        await service.map_feature(market_key=market.market_key, feature_key=str(definition.feature_key))
+
+
+@pytest.mark.asyncio
+async def test_map_feature_rejects_point_in_time_required_feature(service, registry, feature_definition_repo):
+    market = await _market(registry)
+    definition = await _active_feature(feature_definition_repo, leakage_classification="POINT_IN_TIME_REQUIRED")
+
+    with pytest.raises(FeatureLeakageRiskError):
+        await service.map_feature(market_key=market.market_key, feature_key=str(definition.feature_key))
+
+
+@pytest.mark.asyncio
+async def test_reconcile_feature_creates_a_new_mapping(service, registry, feature_definition_repo):
+    market = await _market(registry)
+    definition = await _active_feature(feature_definition_repo)
+
+    mapping = await service.reconcile_feature(
+        market_key=market.market_key, feature_key=str(definition.feature_key), is_required=True, weight=2.0
+    )
+
+    assert mapping.market_id == market.id
+    assert mapping.weight == 2.0
+    assert mapping.is_required is True
+
+
+@pytest.mark.asyncio
+async def test_reconcile_feature_updates_an_existing_mapping_in_place(service, registry, feature_definition_repo):
+    """The whole point of reconcile_feature over map_feature: re-running a market's seeder after
+    a spec change (is_required flips, or a reweight) must reach an already-seeded market, not
+    silently no-op like the old create-only `except MappingAlreadyExistsError: continue` did —
+    see forensic audit finding #1."""
+    market = await _market(registry)
+    definition = await _active_feature(feature_definition_repo)
+    first = await service.reconcile_feature(
+        market_key=market.market_key, feature_key=str(definition.feature_key), is_required=True, weight=1.0
+    )
+
+    updated = await service.reconcile_feature(
+        market_key=market.market_key, feature_key=str(definition.feature_key), is_required=False, weight=0.25
+    )
+
+    assert updated.id == first.id
+    assert updated.is_required is False
+    assert updated.weight == 0.25
+    all_mappings = await service.list_for_market(market.market_key)
+    assert len(all_mappings) == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_feature_rejects_unreviewed_feature(service, registry, feature_definition_repo):
+    market = await _market(registry)
+    definition = await _active_feature(feature_definition_repo, leakage_classification="UNKNOWN_PROVENANCE")
+
+    with pytest.raises(FeatureLeakageRiskError):
+        await service.reconcile_feature(market_key=market.market_key, feature_key=str(definition.feature_key))

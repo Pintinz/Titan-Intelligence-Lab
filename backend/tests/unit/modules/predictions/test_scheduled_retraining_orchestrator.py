@@ -15,6 +15,7 @@ from modules.predictions.application.model_selection_service import AutomaticMod
 from modules.predictions.application.scheduled_retraining_orchestrator import (
     DIXON_COLES_ELIGIBLE_MARKETS,
     MIN_TRAINING_POOL_AFTER_HOLDOUT,
+    NEGATIVE_BINOMIAL_ELIGIBLE_MARKETS,
     POISSON_ELIGIBLE_MARKETS,
     SYSTEM_APPROVER,
     ScheduledRetrainingOrchestrator,
@@ -578,6 +579,82 @@ class TestDixonColesEligibleMarketWiring:
             )
 
         outcomes = await orchestrator.run(T0)  # candidates=None -> real default + both Poisson candidates
+
+        assert len(outcomes) == 1
+        assert outcomes[0].skipped_reason is None
+
+
+class TestNegativeBinomialEligibleMarketWiring:
+    """Forensic audit finding #7 (2026-08-30) — `NEGATIVE_BINOMIAL_ELIGIBLE_MARKETS` layers a
+    third Poisson-family candidate onto every market `POISSON_ELIGIBLE_MARKETS` covers, additive
+    to that injection (and to `DIXON_COLES_ELIGIBLE_MARKETS`'s own, on `correct_score`)."""
+
+    def test_covers_exactly_the_same_twelve_markets_as_the_plain_poisson_candidate(self):
+        assert set(NEGATIVE_BINOMIAL_ELIGIBLE_MARKETS.keys()) == set(POISSON_ELIGIBLE_MARKETS.keys())
+
+    def test_every_entry_is_a_distinct_algorithm_on_the_same_framework_marked_baseline(self):
+        for market_key, spec in NEGATIVE_BINOMIAL_ELIGIBLE_MARKETS.items():
+            assert spec.framework is MLFramework.POISSON_GOALS
+            assert spec.algorithm is MLAlgorithm.NEGATIVE_BINOMIAL_GOALS_MODEL
+            assert spec.algorithm is not MLAlgorithm.POISSON_GOALS_MODEL  # never conflated with the plain baseline
+            assert spec.is_baseline is True
+
+    def test_every_entry_carries_the_same_market_shape_line_and_team_as_the_plain_candidate(self):
+        """Derived from POISSON_ELIGIBLE_MARKETS' own params rather than hand-copied — this is the
+        regression test for that: a market_shape/line/team edit to the plain candidate must reach
+        this one automatically, never silently drift apart."""
+        for market_key, poisson_spec in POISSON_ELIGIBLE_MARKETS.items():
+            nb_spec = NEGATIVE_BINOMIAL_ELIGIBLE_MARKETS[market_key]
+            assert nb_spec.params["market_shape"] == poisson_spec.params["market_shape"]
+            assert nb_spec.params.get("line") == poisson_spec.params.get("line")
+            assert nb_spec.params.get("team") == poisson_spec.params.get("team")
+
+    def test_every_entry_enables_negative_binomial(self):
+        for spec in NEGATIVE_BINOMIAL_ELIGIBLE_MARKETS.values():
+            assert spec.params["negative_binomial"] is True
+
+    async def test_correct_score_bootstrap_does_not_error_with_all_three_poisson_candidates_injected(
+        self, orchestrator, market_repo, dataset_repo, prediction_repo, prediction_outcome_repo
+    ):
+        """The real regression risk: does injecting a 14th candidate (plain Poisson + Dixon-Coles
+        + Negative-Binomial, on top of the 11 default) break the sweep for the one market that
+        gets all three?"""
+        market = await market_repo.upsert(_market(market_key="football.correct_score"))
+        await dataset_repo.upsert(_fresh_dataset(market.id, T0))
+        labels_cycle = [("1-0", 1, 0), ("0-0", 0, 0), ("2-1", 2, 1), ("1-1", 1, 1), ("0-1", 0, 1)]
+        for i in range(60):
+            actual_label, home_goals, away_goals = labels_cycle[i % len(labels_cycle)]
+            prediction = Prediction(
+                id=PredictionId(uuid4()), market_id=market.id, model_id=ModelId(uuid4()), subject_ref=f"fx-{i}",
+                value=actual_label, probability=0.2, confidence=CONFIDENCE, explanation=ExplanationBundle(),
+                feature_snapshot={"feature_a": float(i % 20), "feature_b": float((i * 3) % 17)},
+                model_version="1", status=PredictionStatus.PUBLISHED, generated_at=T0,
+            )
+            await prediction_repo.record(prediction)
+            await prediction_outcome_repo.record(
+                PredictionOutcome(
+                    id=PredictionOutcomeId(uuid4()), prediction_id=prediction.id,
+                    actual_value=actual_label, error=0.0, evaluated_at=T0,
+                    raw_home_goals=home_goals, raw_away_goals=away_goals,
+                )
+            )
+
+        outcomes = await orchestrator.run(T0)  # candidates=None -> real default + all three Poisson-family candidates
+
+        assert len(outcomes) == 1
+        assert outcomes[0].skipped_reason is None
+
+    async def test_a_total_threshold_market_bootstraps_with_plain_and_negative_binomial_candidates(
+        self, orchestrator, market_repo, dataset_repo, prediction_repo, prediction_outcome_repo
+    ):
+        """Unlike Dixon-Coles (scoped to correct_score only), Negative-Binomial is injected for
+        every POISSON_ELIGIBLE_MARKETS entry — covered here with a market shape Dixon-Coles never
+        touches, to prove the injection genuinely reaches markets beyond correct_score."""
+        market = await market_repo.upsert(_market(market_key="football.total_goals_over_under"))
+        await dataset_repo.upsert(_fresh_dataset(market.id, T0))
+        await _seed_outcomes(market, prediction_repo, prediction_outcome_repo, n=60)
+
+        outcomes = await orchestrator.run(T0)
 
         assert len(outcomes) == 1
         assert outcomes[0].skipped_reason is None

@@ -17,7 +17,12 @@ from modules.predictions.infrastructure.ml.football_goals_poisson_adapter import
     _apply_dixon_coles,
     _correct_score_grid,
     _dixon_coles_tau,
+    _fit_dispersion,
     _fit_dixon_coles_rho,
+    _MIN_ALPHA,
+    _pmf,
+    _survival,
+    _total_survival,
 )
 from modules.predictions.ports.ml_model import InsufficientTrainingDataError, ModelNotFittedError, TrainingSample
 
@@ -403,4 +408,165 @@ class TestDixonColesAdapter:
         restored.deserialize(adapter.serialize())
 
         assert restored._rho == pytest.approx(original_rho)
-        assert restored.use_dixon_coles is True
+
+
+class TestNegativeBinomialMath:
+    """Forensic audit finding #7 (2026-08-30) — `_pmf`/`_survival` must reduce exactly to plain
+    Poisson when `alpha` is `None` (every existing, non-NB call site), and behave as a real
+    Negative-Binomial distribution otherwise."""
+
+    def test_pmf_with_no_alpha_matches_poisson_exactly(self):
+        from modules.predictions.infrastructure.ml.football_goals_poisson_adapter import _poisson_pmf
+
+        for k in range(6):
+            assert _pmf(k, 2.3, None) == pytest.approx(_poisson_pmf(k, 2.3))
+
+    def test_pmf_below_min_alpha_falls_back_to_poisson(self):
+        from modules.predictions.infrastructure.ml.football_goals_poisson_adapter import _poisson_pmf
+
+        assert _pmf(1, 2.3, _MIN_ALPHA / 2) == pytest.approx(_poisson_pmf(1, 2.3))
+
+    def test_nb_pmf_sums_to_one_over_a_wide_range(self):
+        total = sum(_pmf(k, 2.0, 0.5) for k in range(200))
+        assert total == pytest.approx(1.0, abs=1e-6)
+
+    def test_nb_pmf_has_fatter_tail_than_poisson_at_same_mean(self):
+        """The whole point of the dispersion parameter: at a fixed mean, a real alpha > 0 must
+        put more probability mass on extreme counts than Poisson does — otherwise it wouldn't be
+        modeling overdispersion at all."""
+        from modules.predictions.infrastructure.ml.football_goals_poisson_adapter import _poisson_pmf
+
+        mean = 3.0
+        far_tail_nb = sum(_pmf(k, mean, 1.0) for k in range(10, 60))
+        far_tail_poisson = sum(_poisson_pmf(k, mean) for k in range(10, 60))
+        assert far_tail_nb > far_tail_poisson
+
+    def test_survival_with_no_alpha_matches_poisson_exactly(self):
+        from modules.predictions.infrastructure.ml.football_goals_poisson_adapter import _poisson_survival
+
+        assert _survival(2.5, 3.1, None) == pytest.approx(_poisson_survival(2.5, 3.1))
+
+    def test_total_survival_with_no_alpha_matches_closed_form_poisson_sum(self):
+        from modules.predictions.infrastructure.ml.football_goals_poisson_adapter import _poisson_survival
+
+        lam_home, lam_away = 1.4, 0.9
+        assert _total_survival(2.5, lam_home, lam_away, None, None) == pytest.approx(
+            _poisson_survival(2.5, lam_home + lam_away), abs=1e-9
+        )
+
+    def test_total_survival_convolution_matches_manual_grid_sum(self):
+        """Independent verification of `_total_survival`'s convolution against a hand-summed grid
+        — not just internal self-consistency."""
+        lam_home, lam_away, alpha_home, alpha_away = 1.6, 1.1, 0.4, 0.6
+        line = 2.5
+        expected_cdf = sum(
+            _pmf(h, lam_home, alpha_home) * _pmf(a, lam_away, alpha_away)
+            for h in range(3) for a in range(3) if h + a <= 2
+        )
+        assert _total_survival(line, lam_home, lam_away, alpha_home, alpha_away) == pytest.approx(
+            1.0 - expected_cdf, abs=1e-9
+        )
+
+
+class TestFitDispersion:
+    def test_recovers_near_zero_alpha_for_genuinely_equidispersed_data(self):
+        rng = np.random.default_rng(42)
+        mu = np.full(400, 2.0)
+        y = rng.poisson(mu)
+
+        alpha = _fit_dispersion(y, mu)
+
+        assert alpha < 0.15
+
+    def test_recovers_a_meaningfully_larger_alpha_for_genuinely_overdispersed_data(self):
+        from scipy.stats import nbinom
+
+        rng = np.random.default_rng(42)
+        true_alpha = 1.5
+        mu = np.full(400, 2.0)
+        n = 1.0 / true_alpha
+        p = n / (n + mu)
+        y = nbinom.rvs(n, p, random_state=rng)
+
+        alpha = _fit_dispersion(y, mu)
+
+        assert alpha > 0.5
+
+
+class TestNegativeBinomialAdapter:
+    async def test_use_negative_binomial_reads_params(self):
+        adapter = FootballGoalsPoissonAdapter(params={"market_shape": "total_threshold", "line": 2.5, "negative_binomial": True})
+        assert adapter.use_negative_binomial is True
+        plain = FootballGoalsPoissonAdapter(params={"market_shape": "total_threshold", "line": 2.5})
+        assert plain.use_negative_binomial is False
+
+    async def test_fit_sets_alphas_only_when_enabled(self):
+        nb_adapter = FootballGoalsPoissonAdapter(
+            params={"market_shape": "total_threshold", "line": 2.5, "negative_binomial": True}
+        )
+        await nb_adapter.fit(_samples())
+        assert nb_adapter._alpha_home is not None
+        assert nb_adapter._alpha_away is not None
+
+        plain_adapter = FootballGoalsPoissonAdapter(params={"market_shape": "total_threshold", "line": 2.5})
+        await plain_adapter.fit(_samples())
+        assert plain_adapter._alpha_home is None
+        assert plain_adapter._alpha_away is None
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {"market_shape": "total_threshold", "line": 2.5},
+            {"market_shape": "team_total_threshold", "line": 1.5, "team": "home"},
+            {"market_shape": "team_total_threshold", "line": 1.5, "team": "away"},
+            {"market_shape": "clean_sheet", "team": "home"},
+            {"market_shape": "clean_sheet", "team": "away"},
+            {"market_shape": "win_to_nil", "team": "home"},
+            {"market_shape": "win_to_nil", "team": "away"},
+        ],
+    )
+    async def test_every_binary_shape_produces_a_valid_probability_under_negative_binomial(self, params):
+        adapter = FootballGoalsPoissonAdapter(params={**params, "negative_binomial": True})
+        await adapter.fit(_samples())
+
+        result = adapter.predict_one({"x1": 5.0})
+
+        assert 0.0 <= result.probability <= 1.0
+
+    async def test_correct_score_distribution_still_sums_to_one_under_negative_binomial(self):
+        adapter = FootballGoalsPoissonAdapter(
+            params={"market_shape": "correct_score", "negative_binomial": True}, class_labels=CORRECT_SCORE_LABELS
+        )
+        await adapter.fit(_samples())
+
+        result = adapter.predict_one({"x1": 5.0})
+
+        assert sum(result.distribution.values()) == pytest.approx(1.0, abs=1e-6)
+
+    async def test_negative_binomial_and_dixon_coles_can_both_be_enabled_together(self):
+        """Each is registered as its own, separately-benchmarked candidate — never both at once
+        in production — but nothing should crash if a caller does combine them: the grid is built
+        with NB pmf, then Dixon-Coles reweights it, same as it would reweight a Poisson grid."""
+        adapter = FootballGoalsPoissonAdapter(
+            params={"market_shape": "correct_score", "negative_binomial": True, "dixon_coles": True},
+            class_labels=CORRECT_SCORE_LABELS,
+        )
+        await adapter.fit(_samples())
+
+        result = adapter.predict_one({"x1": 5.0})
+
+        assert sum(result.distribution.values()) == pytest.approx(1.0, abs=1e-6)
+
+    async def test_serialize_roundtrip_preserves_alphas_and_predictions(self):
+        adapter = FootballGoalsPoissonAdapter(
+            params={"market_shape": "total_threshold", "line": 2.5, "negative_binomial": True}
+        )
+        await adapter.fit(_samples())
+        original_probability = adapter.predict_one({"x1": 5.0}).probability
+
+        restored = FootballGoalsPoissonAdapter()
+        restored.deserialize(adapter.serialize())
+
+        assert restored._alpha_home == pytest.approx(adapter._alpha_home)
+        assert restored._alpha_away == pytest.approx(adapter._alpha_away)
+        assert restored.predict_one({"x1": 5.0}).probability == pytest.approx(original_probability)

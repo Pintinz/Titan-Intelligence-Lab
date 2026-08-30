@@ -98,6 +98,7 @@ async def _seed_active_feature(db_session_factory, feature_key: str) -> None:
                 owner="test",
                 entity_type=EntityType.FIXTURE,
                 status=FeatureStatus.ACTIVE,
+                leakage_classification="PRE_MATCH_SAFE",
             )
         )
         await session.commit()

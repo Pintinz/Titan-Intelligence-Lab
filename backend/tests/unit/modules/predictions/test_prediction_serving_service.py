@@ -146,6 +146,7 @@ async def _setup_production_market(
         owner="data-team",
         entity_type=EntityType.FIXTURE,
         status=FeatureStatus.ACTIVE,
+        leakage_classification="PRE_MATCH_SAFE",
     )
     await feature_definition_repo.upsert(definition)
     await mapping_service.map_feature(market_key=key, feature_key=str(definition.feature_key), is_required=True)

@@ -118,6 +118,33 @@ async def test_train_produces_fitted_model_and_metrics(service):
     assert result.selected_features == ("x1", "x2")
 
 
+async def test_train_defaults_to_mean_imputation_not_zero(service, monkeypatch):
+    """Forensic audit finding #4 (2026-08-30): no real production caller ever overrode
+    `impute_strategy`, so the silent default is what every model has actually trained against.
+    Zero was a uniquely bad default — it collides with a real, valid measurement for features
+    whose true range includes 0.0 (an implied-probability feature, a stat differential) — and
+    "mean" was already fully implemented, just never the default. Spies on `impute_missing` to
+    confirm the strategy `train()` actually passes, not just the parameter's declared default."""
+    import modules.predictions.application.training_pipeline_service as tps_module
+
+    captured = {}
+    real_impute_missing = tps_module.impute_missing
+
+    def spy(samples, feature_order, strategy="zero"):
+        captured["strategy"] = strategy
+        return real_impute_missing(samples, feature_order, strategy=strategy)
+
+    monkeypatch.setattr(tps_module, "impute_missing", spy)
+
+    market_id = MarketId(uuid4())
+    dataset = _classification_dataset(market_id)
+    model = SklearnAdapter(algorithm=MLAlgorithm.RANDOM_FOREST, target_type=TargetType.CLASSIFICATION)
+
+    await service.train(model, dataset, split_strategy=SplitStrategy.TRAIN_TEST, test_ratio=0.25)
+
+    assert captured["strategy"] == "mean"
+
+
 async def test_train_rejects_non_approved_dataset(service):
     market_id = MarketId(uuid4())
     dataset = _classification_dataset(market_id, status=DatasetStatus.DRAFT)

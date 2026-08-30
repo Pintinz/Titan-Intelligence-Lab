@@ -199,10 +199,20 @@ class SqlAlchemyPredictionRepository:
         await self.session.flush()
         return mappers.prediction_to_domain(model)
 
-    async def update(self, prediction: Prediction) -> Prediction:
-        existing = await self.session.get(PredictionModel, prediction.id.value)
-        model = mappers.prediction_to_model(prediction, existing)
-        self.session.add(model)
+    async def update_status(self, prediction_id: PredictionId, status: PredictionStatus) -> Prediction:
+        """The only mutation this repository allows once a prediction has been `record()`ed —
+        forensic audit finding #10 (2026-08-30). The generic `update(prediction)` this replaced
+        could silently overwrite ANY field, including `value`/`probability`/`feature_snapshot`,
+        even though every real caller (`PredictionCacheService.approve`/`reject`/`void`/the
+        supersede step in `_persist_new_version`) only ever changed `status`. That was an
+        application-layer convention, not something the repository enforced — restricting the
+        port to a status-only method makes it structural: there is no longer a method available
+        to change a served prediction's numbers after the fact. A new prediction is always a new
+        `record()`ed row; the prior one is marked SUPERSEDED, never rewritten."""
+        model = await self.session.get(PredictionModel, prediction_id.value)
+        if model is None:
+            raise KeyError(str(prediction_id))
+        model.status = status.value
         await self.session.flush()
         return mappers.prediction_to_domain(model)
 

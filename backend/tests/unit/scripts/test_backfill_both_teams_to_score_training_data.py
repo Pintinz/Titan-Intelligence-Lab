@@ -271,14 +271,30 @@ async def test_10_unresolved_membership_excludes_player_from_reconstruction(regi
 
 
 def test_11_script_wires_news_keys_as_optional_never_required():
-    """Structural: the two BTTS news feature keys the script reads must be exactly the ones
-    `NewsMarketImpactEngine` actually writes for this market's `btts_impact` dimension, and must
-    live in OPTIONAL_FEATURES only — REQUIRED would skip every fixture today, since zero eligible
-    historical news exists anywhere yet (Milestone 15 audit §8/§10)."""
+    """Structural: the two BTTS news feature keys the script reads (for its own reconstruction-
+    trigger check, not the required/optional feature snapshot — see forensic audit finding #2,
+    2026-08-30) must be exactly the ones `NewsMarketImpactEngine` actually writes for this
+    market's `btts_impact` dimension.
+
+    Required/optional now comes from the live `FeatureMarketMappingService` mapping rather than a
+    static module constant the script used to hardcode (that duplication — a spec change in
+    market_seeding.py never reaching this script — is exactly what finding #2 fixed), so the
+    "these two keys must be optional, never required" invariant this test used to check directly
+    against the script now lives in market_seeding.py's own spec instead — see
+    test_football_market_seeding.py for that coverage."""
     script = _load_script()
     assert script.NEWS_BTTS_IMPACT_FEATURES == ("news.football.home_btts_impact", "news.football.away_btts_impact")
-    assert set(script.NEWS_BTTS_IMPACT_FEATURES).issubset(set(script.OPTIONAL_FEATURES))
-    assert not set(script.NEWS_BTTS_IMPACT_FEATURES) & set(script.REQUIRED_FEATURES)
+
+    from modules.predictions.football.market_seeding import MARKETS
+
+    btts_spec = next(spec for spec in MARKETS if spec["market_key"] == "football.both_teams_to_score")
+    market_optional_features = set(btts_spec.get("optional_features", ()))
+    # Mirrors `FootballMarketSeeder._seed_market`'s own is_required computation: a feature_key
+    # present in `optional_features` is never actually required, regardless of also appearing in
+    # the raw `required_features` tuple (that tuple just lists every feature_key to map at all).
+    actually_required = {fk for fk in btts_spec["required_features"] if fk not in market_optional_features}
+    assert set(script.NEWS_BTTS_IMPACT_FEATURES).issubset(market_optional_features)
+    assert not set(script.NEWS_BTTS_IMPACT_FEATURES) & actually_required
 
 
 # ================================================================================================

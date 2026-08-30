@@ -237,8 +237,9 @@ class InMemoryPredictionRepository:
         self.by_subject.append(prediction)
         return prediction
 
-    async def update(self, prediction):
-        self.store[prediction.id] = prediction
+    async def update_status(self, prediction_id, status):
+        prediction = self.store[prediction_id]
+        prediction.status = status
         return prediction
 
     async def list_by_subject(self, subject_ref, market_id=None):

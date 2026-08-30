@@ -25,10 +25,7 @@ from modules.features.application.feature_registration_service import (
     FeatureRegistrationService,
 )
 from modules.features.domain.value_objects import EntityType, FeatureCategory, FeatureDataType, FeatureKey
-from modules.predictions.application.feature_market_mapping_service import (
-    FeatureMarketMappingService,
-    MappingAlreadyExistsError,
-)
+from modules.predictions.application.feature_market_mapping_service import FeatureMarketMappingService
 from modules.predictions.application.market_registry_service import MarketAlreadyRegisteredError, MarketRegistryService
 from modules.predictions.application.windowed_feature_engineering_service import RollingTeamStatAverageCalculator
 from modules.predictions.domain.value_objects import MarketKind, MarketStatus, TargetType
@@ -133,6 +130,7 @@ class TableTennisMarketSeeder:
                     data_type=FeatureDataType.FLOAT,
                     owner=SYSTEM_REVIEWER,
                     entity_type=entity_type,
+                    leakage_classification="PRE_MATCH_SAFE",
                 )
             except FeatureAlreadyRegisteredError:
                 continue
@@ -155,10 +153,7 @@ class TableTennisMarketSeeder:
             pass
 
         for feature_key in spec["required_features"]:
-            try:
-                await self.mappings.map_feature(spec["market_key"], feature_key, is_required=True)
-            except MappingAlreadyExistsError:
-                continue
+            await self.mappings.reconcile_feature(spec["market_key"], feature_key, is_required=True)
 
         market = await self.markets.markets.get_by_key(spec["market_key"])
         if market.status is MarketStatus.DRAFT:

@@ -25,6 +25,20 @@ held-out log-loss inside `AutomaticModelSelectionService` — a genuinely differ
 mechanism, satisfying the same "one real trained model per market, never a fabricated placeholder"
 rule the removal enforced rather than conflicting with it.
 
+Forensic audit finding #7 (2026-08-30): optional Negative-Binomial dispersion fit
+(`params={"negative_binomial": True}`) — plain Poisson assumes equidispersion (variance == mean)
+unconditionally; nothing previously checked whether real football goal counts actually satisfy
+that. Fits one dispersion parameter alpha per side (`_fit_dispersion`) via MLE on top of the
+already-fitted `PoissonRegressor` means — the same "reuse the already-fixed GLM mean, fit only
+the new parameter on top" pattern the Dixon-Coles rho fit below already established — using
+`variance = mean + alpha*mean^2` (recovering Poisson exactly as alpha -> 0). Registered as its
+own `MLAlgorithm.NEGATIVE_BINOMIAL_GOALS_MODEL` candidate
+(`scheduled_retraining_orchestrator.NEGATIVE_BINOMIAL_ELIGIBLE_MARKETS`), benchmarked against the
+plain Poisson candidate on real held-out log loss — never assumed better. This candidate itself
+IS the dispersion test: whether the equidispersion assumption actually holds for a given market's
+real data is answered empirically by which of the two wins, not by a separate unused diagnostic
+statistic.
+
 Correct Score forensic audit (2026-08-27): optional Dixon & Coles (1997) low-score correlation
 adjustment for the `correct_score` shape only (`params={"dixon_coles": True}`, `use_dixon_coles`,
 `_fit_dixon_coles_rho`/`_apply_dixon_coles`) — a plain, dependency-free grid search over the single
@@ -48,6 +62,8 @@ import pickle
 from dataclasses import dataclass, field
 
 import numpy as np
+from scipy.optimize import minimize_scalar
+from scipy.stats import nbinom
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.linear_model import PoissonRegressor
 
@@ -82,16 +98,87 @@ def _poisson_survival(line: float, lam: float) -> float:
     return max(0.0, min(1.0, 1.0 - cdf))
 
 
-def _correct_score_grid(lam_home: float, lam_away: float) -> dict[str, float]:
-    """The independent-Poisson `{"h-a": probability}` grid for one fixture's fitted rate pair,
-    plus the honest model-implied `OTHER` remainder (Poisson has infinite support, never a
-    hardcoded 0) — factored out of `_predict_correct_score` so `predict_class_distribution` below
-    can reuse the exact same math instead of duplicating it."""
+_MIN_ALPHA = 1e-6  # below this, treated as equidispersed — avoids a numerically degenerate n=1/alpha
+
+
+def _pmf(k: int, mean: float, alpha: float | None) -> float:
+    """P(X = k) for X ~ Poisson(mean) when `alpha` is `None`/below `_MIN_ALPHA`, or
+    Negative-Binomial(mean, alpha) otherwise (`variance = mean + alpha*mean^2`, the standard NB2
+    parameterization) — recovers Poisson exactly as alpha -> 0, so every call site that doesn't
+    opt into `use_negative_binomial` is completely unaffected."""
+    if alpha is None or alpha < _MIN_ALPHA:
+        return _poisson_pmf(k, mean)
+    n = 1.0 / alpha
+    p = n / (n + mean)
+    return float(nbinom.pmf(k, n, p))
+
+
+def _survival(line: float, mean: float, alpha: float | None) -> float:
+    """P(X > line) for the same Poisson/Negative-Binomial choice `_pmf` makes."""
+    if alpha is None or alpha < _MIN_ALPHA:
+        return _poisson_survival(line, mean)
+    k_max = int(math.floor(line))
+    n = 1.0 / alpha
+    p = n / (n + mean)
+    cdf = float(nbinom.cdf(k_max, n, p))
+    return max(0.0, min(1.0, 1.0 - cdf))
+
+
+def _nb_negative_log_likelihood(alpha: float, y: np.ndarray, mu: np.ndarray) -> float:
+    alpha = max(float(alpha), _MIN_ALPHA)
+    n = 1.0 / alpha
+    p = n / (n + mu)
+    return -float(np.sum(nbinom.logpmf(y, n, p)))
+
+
+def _fit_dispersion(y: np.ndarray, mu: np.ndarray) -> float:
+    """MLE fit of the single Negative-Binomial dispersion parameter alpha given already-fixed
+    per-sample means from the independently-fitted `PoissonRegressor` — the same "reuse the
+    already-fitted GLM mean, fit only the new parameter on top" pattern `_fit_dixon_coles_rho`
+    below already established for rho, applied here to test the Poisson equidispersion assumption
+    itself rather than the low-score correlation. Bounded 1-D search: alpha=0 is exactly the
+    Poisson null hypothesis this fit is testing against; real football goal-count dispersion is
+    not going to plausibly exceed the upper bound."""
+    result = minimize_scalar(_nb_negative_log_likelihood, args=(y, mu), bounds=(_MIN_ALPHA, 10.0), method="bounded")
+    return float(result.x)
+
+
+def _total_survival(
+    line: float, mean_home: float, mean_away: float, alpha_home: float | None, alpha_away: float | None,
+    max_total: int = 12,
+) -> float:
+    """P(home + away > line) for the sum of two independent count variables — Poisson when both
+    alphas are `None`/negligible, Negative-Binomial otherwise. Computed by exact discrete
+    convolution rather than a closed form: unlike Poisson (closed under summation), two
+    Negative-Binomials with different dispersion parameters don't generally sum to another
+    Negative-Binomial, so `_threshold_probability`'s Poisson fast path (`lam_home + lam_away`)
+    isn't valid once `use_negative_binomial` is on. Truncated at `max_total` combined goals — the
+    remaining tail is negligible for any realistic football scoreline, the same posture every
+    other pmf/survival helper in this module already takes."""
+    k_max = int(math.floor(line))
+    if k_max >= max_total:
+        return 0.0
+    cdf = 0.0
+    for total in range(k_max + 1):
+        for home in range(total + 1):
+            away = total - home
+            cdf += _pmf(home, mean_home, alpha_home) * _pmf(away, mean_away, alpha_away)
+    return max(0.0, min(1.0, 1.0 - cdf))
+
+
+def _correct_score_grid(
+    lam_home: float, lam_away: float, alpha_home: float | None = None, alpha_away: float | None = None
+) -> dict[str, float]:
+    """The independent-Poisson (or, with `alpha_home`/`alpha_away` set, independent-Negative-
+    Binomial) `{"h-a": probability}` grid for one fixture's fitted rate pair, plus the honest
+    model-implied `OTHER` remainder (both distributions have infinite support, never a hardcoded
+    0) — factored out of `_predict_correct_score` so `predict_class_distribution` below can reuse
+    the exact same math instead of duplicating it."""
     grid: dict[str, float] = {}
     grid_total = 0.0
     for home in range(_CORRECT_SCORE_MAX_GOALS + 1):
         for away in range(_CORRECT_SCORE_MAX_GOALS + 1):
-            p = _poisson_pmf(home, lam_home) * _poisson_pmf(away, lam_away)
+            p = _pmf(home, lam_home, alpha_home) * _pmf(away, lam_away, alpha_away)
             grid[f"{home}-{away}"] = p
             grid_total += p
     grid["OTHER"] = max(0.0, 1.0 - grid_total)
@@ -200,6 +287,8 @@ class FootballGoalsPoissonAdapter:
     _home_model: object | None = field(default=None, repr=False)
     _away_model: object | None = field(default=None, repr=False)
     _rho: float | None = field(default=None, repr=False)
+    _alpha_home: float | None = field(default=None, repr=False)
+    _alpha_away: float | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.target_type is not TargetType.CLASSIFICATION:
@@ -231,6 +320,16 @@ class FootballGoalsPoissonAdapter:
         never assumed better, always compared."""
         return bool(self.params.get("dixon_coles", False))
 
+    @property
+    def use_negative_binomial(self) -> bool:
+        """Forensic audit finding #7 (2026-08-30) — a second, distinct `CandidateSpec`
+        (`NEGATIVE_BINOMIAL_ELIGIBLE_MARKETS`, `scheduled_retraining_orchestrator.py`) registers
+        this adapter with `params={"negative_binomial": True}` for every market
+        `POISSON_ELIGIBLE_MARKETS` covers, empirically benchmarked against the plain
+        equidispersed-Poisson candidate on real held-out log loss — never assumed better, always
+        compared, same posture `use_dixon_coles` already established."""
+        return bool(self.params.get("negative_binomial", False))
+
     async def fit(
         self, samples: list[TrainingSample], validation_samples: list[TrainingSample] | None = None
     ) -> TrainingMetrics:
@@ -260,6 +359,12 @@ class FootballGoalsPoissonAdapter:
             # `market_shape` would be wasted computation with zero effect on that shape's
             # marginal-only `_threshold_probability`, so it's skipped rather than silently unused.
             self._rho = _fit_dixon_coles_rho(y_home, y_away, home_pred, away_pred)
+
+        if self.use_negative_binomial:
+            # Two independent alphas, matching the two independently-fitted mean models — home
+            # and away goal counts have no reason to share one dispersion parameter.
+            self._alpha_home = _fit_dispersion(y_home, home_pred)
+            self._alpha_away = _fit_dispersion(y_away, away_pred)
 
         mae = float(np.mean(np.abs(home_pred - y_home)) + np.mean(np.abs(away_pred - y_away))) / 2.0
         return TrainingMetrics(sample_count=len(usable), metric_name="train_mae", metric_value=mae)
@@ -297,21 +402,32 @@ class FootballGoalsPoissonAdapter:
 
     def _threshold_probability(self, lam_home: float, lam_away: float) -> float:
         shape = self.market_shape
+        alpha_home = self._alpha_home if self.use_negative_binomial else None
+        alpha_away = self._alpha_away if self.use_negative_binomial else None
         if shape == "total_threshold":
-            return _poisson_survival(self.line, lam_home + lam_away)
+            if alpha_home is None and alpha_away is None:
+                # Closed-form fast path: sum of two independent Poissons is itself Poisson.
+                return _poisson_survival(self.line, lam_home + lam_away)
+            # No such closed form for two Negative-Binomials with different dispersion — exact
+            # discrete convolution instead (see `_total_survival`'s own docstring).
+            return _total_survival(self.line, lam_home, lam_away, alpha_home, alpha_away)
         if shape == "team_total_threshold":
             lam = lam_home if self.team == "home" else lam_away
-            return _poisson_survival(self.line, lam)
+            alpha = alpha_home if self.team == "home" else alpha_away
+            return _survival(self.line, lam, alpha)
         if shape == "clean_sheet":
             # A team keeps a clean sheet iff its opponent scores 0.
             lam_opponent = lam_away if self.team == "home" else lam_home
-            return _poisson_pmf(0, lam_opponent)
+            alpha_opponent = alpha_away if self.team == "home" else alpha_home
+            return _pmf(0, lam_opponent, alpha_opponent)
         if shape == "win_to_nil":
-            # Team wins AND opponent scores 0 — independent-Poisson assumption, same posture as
-            # every other shape here.
+            # Team wins AND opponent scores 0 — independence between the two sides' own counts is
+            # still assumed either way (only each side's own marginal distribution changes).
             lam_team = lam_home if self.team == "home" else lam_away
             lam_opponent = lam_away if self.team == "home" else lam_home
-            return _poisson_pmf(0, lam_opponent) * (1.0 - _poisson_pmf(0, lam_team))
+            alpha_team = alpha_home if self.team == "home" else alpha_away
+            alpha_opponent = alpha_away if self.team == "home" else alpha_home
+            return _pmf(0, lam_opponent, alpha_opponent) * (1.0 - _pmf(0, lam_team, alpha_team))
         raise ValueError(f"FootballGoalsPoissonAdapter: unknown market_shape {shape!r}")
 
     def _predict_correct_score(self, lam_home: float, lam_away: float) -> ModelPrediction:
@@ -323,7 +439,9 @@ class FootballGoalsPoissonAdapter:
         )
 
     def _class_distribution_from_lambdas(self, lam_home: float, lam_away: float) -> dict[str, float]:
-        grid = _correct_score_grid(lam_home, lam_away)
+        alpha_home = self._alpha_home if self.use_negative_binomial else None
+        alpha_away = self._alpha_away if self.use_negative_binomial else None
+        grid = _correct_score_grid(lam_home, lam_away, alpha_home, alpha_away)
         if self._rho is not None:
             grid = _apply_dixon_coles(grid, lam_home, lam_away, self._rho)
         labels = self.class_labels or tuple(grid.keys())
@@ -382,6 +500,8 @@ class FootballGoalsPoissonAdapter:
                 "params": self.params,
                 "class_labels": self.class_labels,
                 "rho": self._rho,
+                "alpha_home": self._alpha_home,
+                "alpha_away": self._alpha_away,
             }
         )
 
@@ -394,6 +514,8 @@ class FootballGoalsPoissonAdapter:
         self.params = state.get("params", {})
         self.class_labels = state.get("class_labels", ())
         self._rho = state.get("rho")
+        self._alpha_home = state.get("alpha_home")
+        self._alpha_away = state.get("alpha_away")
 
 
 @dataclass

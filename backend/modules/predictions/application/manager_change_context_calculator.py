@@ -83,17 +83,14 @@ class ManagerChangeContextCalculator:
                     owner=SYSTEM_REVIEWER,
                     entity_type=EntityType.FIXTURE,
                     online_ttl_seconds=ENGINEERED_FEATURE_TTL_SECONDS,
+                    # Same gating every other is_feature_eligible() (VERIFIED_PRE_MATCH) feature
+                    # earns — see news_market_impact_engine.py's own comment.
+                    leakage_classification="PRE_MATCH_SAFE",
                 )
             except FeatureAlreadyRegisteredError:
                 continue
             await self.registration.submit_for_review(feature_key)
             await self.registration.approve(feature_key, SYSTEM_REVIEWER, now)
-            definition = await self.registration.definitions.get(FeatureKey(feature_key))
-            if definition is not None:
-                # Same leakage classification every other feature gated on is_feature_eligible()
-                # (VERIFIED_PRE_MATCH) already earns — see news_market_impact_engine.py's own comment.
-                definition.leakage_classification = "PRE_MATCH_SAFE"
-                await self.registration.definitions.upsert(definition)
 
     async def _most_recent_manager_change(
         self, team_id: TeamId, now: datetime, kickoff: datetime | None,

@@ -107,6 +107,9 @@ class RollingTeamStatAverageCalculator:
                 owner=SYSTEM_REVIEWER,
                 entity_type=EntityType.TEAM,
                 online_ttl_seconds=ENGINEERED_FEATURE_TTL_SECONDS,
+                # Strictly bounded by `before=now` in compute_and_write below — no completed
+                # match after the cutoff can ever contribute. See forensic audit finding #3.
+                leakage_classification="PRE_MATCH_SAFE",
             )
         except FeatureAlreadyRegisteredError:
             return
@@ -159,6 +162,9 @@ class FixtureFormDifferentialCalculator:
                 owner=SYSTEM_REVIEWER,
                 entity_type=EntityType.FIXTURE,
                 online_ttl_seconds=ENGINEERED_FEATURE_TTL_SECONDS,
+                # Both sides drawn via the same strictly-bounded `before=now` read as the
+                # calculator above. See forensic audit finding #3.
+                leakage_classification="PRE_MATCH_SAFE",
             )
         except FeatureAlreadyRegisteredError:
             return
@@ -224,6 +230,9 @@ class FixtureExpectedGoalsCalculator:
                     owner=SYSTEM_REVIEWER,
                     entity_type=EntityType.FIXTURE,
                     online_ttl_seconds=ENGINEERED_FEATURE_TTL_SECONDS,
+                    # `_team_average_goals_scored` only reads fixtures via `before=now`. See
+                    # forensic audit finding #3.
+                    leakage_classification="PRE_MATCH_SAFE",
                 )
             except FeatureAlreadyRegisteredError:
                 continue
@@ -342,6 +351,9 @@ class FixtureVenueStrengthCalculator:
                     owner=SYSTEM_REVIEWER,
                     entity_type=EntityType.FIXTURE,
                     online_ttl_seconds=ENGINEERED_FEATURE_TTL_SECONDS,
+                    # `_league_venue_baseline`/`_team_venue_rate` both filter strictly before
+                    # `now`. See forensic audit finding #3.
+                    leakage_classification="PRE_MATCH_SAFE",
                 )
             except FeatureAlreadyRegisteredError:
                 continue
@@ -471,18 +483,13 @@ class LineupContinuityCalculator:
                 owner=SYSTEM_REVIEWER,
                 entity_type=EntityType.FIXTURE,
                 online_ttl_seconds=ENGINEERED_FEATURE_TTL_SECONDS,
+                # Only ever written from a VERIFIED_PRE_MATCH lineup (see class docstring).
+                leakage_classification="PRE_MATCH_SAFE",
             )
         except FeatureAlreadyRegisteredError:
             return
         await self.registration.submit_for_review(self.feature_key)
         await self.registration.approve(self.feature_key, SYSTEM_REVIEWER, now)
-        # Milestone 4 leakage classification: this feature is only ever written from a
-        # VERIFIED_PRE_MATCH lineup (see class docstring), so it earns PRE_MATCH_SAFE — set
-        # directly on the freshly-registered definition since `register()` has no such parameter.
-        definition = await self.registration.definitions.get(FeatureKey(self.feature_key))
-        if definition is not None:
-            definition.leakage_classification = "PRE_MATCH_SAFE"
-            await self.registration.definitions.upsert(definition)
 
     @staticmethod
     def _continuity_ratio(current: Lineup, previous: Lineup | None) -> float | None:
@@ -687,18 +694,13 @@ class TransferActivityCalculator:
                 owner=SYSTEM_REVIEWER,
                 entity_type=EntityType.FIXTURE,
                 online_ttl_seconds=ENGINEERED_FEATURE_TTL_SECONDS,
+                # Only ever counts VERIFIED_PRE_MATCH transfer records (see class docstring).
+                leakage_classification="PRE_MATCH_SAFE",
             )
         except FeatureAlreadyRegisteredError:
             return
         await self.registration.submit_for_review(self.feature_key)
         await self.registration.approve(self.feature_key, SYSTEM_REVIEWER, now)
-        # Milestone 4 leakage classification: this feature only ever counts VERIFIED_PRE_MATCH
-        # transfer records (see class docstring), so it earns PRE_MATCH_SAFE — set directly on
-        # the freshly-registered definition since `register()` has no such parameter.
-        definition = await self.registration.definitions.get(FeatureKey(self.feature_key))
-        if definition is not None:
-            definition.leakage_classification = "PRE_MATCH_SAFE"
-            await self.registration.definitions.upsert(definition)
 
     def _count_recent_verified(self, records: list[Transfer], now: datetime) -> float | None:
         verified = [r for r in records if r.availability_classification == "VERIFIED_PRE_MATCH"]

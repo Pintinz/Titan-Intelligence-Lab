@@ -91,6 +91,7 @@ async def _active_feature(feature_definition_repo, key: str, online_ttl_seconds:
         entity_type=EntityType.FIXTURE,
         status=FeatureStatus.ACTIVE,
         online_ttl_seconds=online_ttl_seconds,
+        leakage_classification="PRE_MATCH_SAFE",
     )
     await feature_definition_repo.upsert(definition)
     return definition

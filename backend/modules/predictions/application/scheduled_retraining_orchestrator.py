@@ -163,6 +163,27 @@ DIXON_COLES_ELIGIBLE_MARKETS: dict[str, CandidateSpec] = {
     ),
 }
 
+# Forensic audit finding #7 (2026-08-30) — a second, additive-only Poisson-family candidate for
+# every market `POISSON_ELIGIBLE_MARKETS` covers (unlike Dixon-Coles: a dispersion fit changes
+# every shape's own marginal distribution, not just the correct-score grid, so this isn't scoped
+# to one market). Derived directly from `POISSON_ELIGIBLE_MARKETS`' own `market_shape`/`line`/
+# `team` params rather than duplicated by hand, so the two specs can never silently drift apart —
+# only the algorithm and the `negative_binomial` flag actually differ. Registered as its own
+# `MLAlgorithm.NEGATIVE_BINOMIAL_GOALS_MODEL` so a won comparison honestly names which real,
+# independently-benchmarked Poisson-family variant is actually serving. Never assumed better than
+# the plain equidispersed-Poisson candidate — both are benchmarked together against the same
+# held-out log loss inside `AutomaticModelSelectionService`, the same empirical-comparison
+# mechanism every other candidate in this codebase goes through; see
+# `MLAlgorithm.NEGATIVE_BINOMIAL_GOALS_MODEL`'s own comment for why this candidate is itself the
+# dispersion test, not a separate diagnostic statistic nothing consumes.
+NEGATIVE_BINOMIAL_ELIGIBLE_MARKETS: dict[str, CandidateSpec] = {
+    market_key: CandidateSpec(
+        MLAlgorithm.NEGATIVE_BINOMIAL_GOALS_MODEL, MLFramework.POISSON_GOALS,
+        params={**spec.params, "negative_binomial": True}, is_baseline=True,
+    )
+    for market_key, spec in POISSON_ELIGIBLE_MARKETS.items()
+}
+
 # A comparison holdout is only carved off when doing so still leaves the Challenger's own training
 # comfortably above `MIN_TRAINING_SAMPLES` (30) after `TrainingPipelineService`'s own internal
 # 80/20 split — 45 remaining samples clears that with real margin. Below this, skip the comparison
@@ -286,13 +307,16 @@ class ScheduledRetrainingOrchestrator:
         # Additive-only Poisson injection (see `POISSON_ELIGIBLE_MARKETS`'s own comment) — only
         # when the caller left `candidates` at its default, never overriding an explicit roster.
         # `DIXON_COLES_ELIGIBLE_MARKETS` layers on a second Poisson-family candidate for the one
-        # market it actually affects (see its own comment) — additive to the additive injection,
-        # every other market's roster is completely unaffected either way.
+        # market it actually affects, and `NEGATIVE_BINOMIAL_ELIGIBLE_MARKETS` a third for every
+        # market `POISSON_ELIGIBLE_MARKETS` covers (see each one's own comment) — additive to the
+        # additive injection, every other market's roster is completely unaffected either way.
         effective_candidates = candidates
         if candidates is None and market.market_key in POISSON_ELIGIBLE_MARKETS:
             effective_candidates = DEFAULT_CLASSIFICATION_CANDIDATES + (POISSON_ELIGIBLE_MARKETS[market.market_key],)
             if market.market_key in DIXON_COLES_ELIGIBLE_MARKETS:
                 effective_candidates = effective_candidates + (DIXON_COLES_ELIGIBLE_MARKETS[market.market_key],)
+            if market.market_key in NEGATIVE_BINOMIAL_ELIGIBLE_MARKETS:
+                effective_candidates = effective_candidates + (NEGATIVE_BINOMIAL_ELIGIBLE_MARKETS[market.market_key],)
 
         try:
             next_model_version = await self._next_model_version(market)
@@ -386,6 +410,8 @@ class ScheduledRetrainingOrchestrator:
             effective_candidates = DEFAULT_CLASSIFICATION_CANDIDATES + (POISSON_ELIGIBLE_MARKETS[market.market_key],)
             if market.market_key in DIXON_COLES_ELIGIBLE_MARKETS:
                 effective_candidates = effective_candidates + (DIXON_COLES_ELIGIBLE_MARKETS[market.market_key],)
+            if market.market_key in NEGATIVE_BINOMIAL_ELIGIBLE_MARKETS:
+                effective_candidates = effective_candidates + (NEGATIVE_BINOMIAL_ELIGIBLE_MARKETS[market.market_key],)
 
         try:
             next_version = await self._next_model_version(market)

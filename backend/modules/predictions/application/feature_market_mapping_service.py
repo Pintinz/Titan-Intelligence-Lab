@@ -94,10 +94,9 @@ class FeatureMarketMappingService:
     async def set_required(self, market_key: str, feature_key: str, is_required: bool) -> FeatureMarketMapping:
         """Updates an existing (market, feature) mapping's `is_required` flag in place — the
         update counterpart `map_feature` deliberately lacks (it only ever creates, raising
-        `MappingAlreadyExistsError` on a duplicate). Needed because `_seed_market`'s own
-        create-only `except MappingAlreadyExistsError: continue` means a market_seeding.py spec
-        change never retroactively reaches an already-seeded market's persisted mapping — see
-        docs/post_m24_phase17_football_prediction_recovery_report.md."""
+        `MappingAlreadyExistsError` on a duplicate). Superseded as the default reconciliation
+        path by `reconcile_feature` below (forensic audit finding #1) — kept for callers that
+        want to flip just this one flag without restating a mapping's other fields."""
         market = await self._require_market(market_key)
         fkey = _as_key(feature_key)
         existing = await self.mappings.list_by_market(market.id)
@@ -114,6 +113,55 @@ class FeatureMarketMappingService:
             weight=mapping.weight,
         )
         return await self.mappings.upsert(updated)
+
+    async def reconcile_feature(
+        self,
+        market_key: str,
+        feature_key: str,
+        is_required: bool = True,
+        importance: float = 0.0,
+        confidence_contribution: float = 0.0,
+        weight: float = 1.0,
+    ) -> FeatureMarketMapping:
+        """Create-or-update — the default path for seeding a market's feature contract (forensic
+        audit finding #1, 2026-08-30). `map_feature` is create-only and raises
+        `MappingAlreadyExistsError` on a duplicate; every market seeder used to swallow that
+        error and move on (`except MappingAlreadyExistsError: continue`), which meant a real spec
+        change in market_seeding.py — a feature moving required<->optional, or a reweight —
+        never reached a market that had already been seeded once. `football.correct_score`
+        carried two stale, undeclared required mappings for exactly this reason until manually
+        patched via `set_required` (see docs/post_m24_phase17_football_prediction_recovery_report.md).
+        `reconcile_feature` closes that gap structurally: every seeding run brings the mapping's
+        `is_required`/`importance`/`confidence_contribution`/`weight` in line with the spec being
+        seeded, whether the mapping already existed or not, so drift can't silently accumulate
+        between spec changes and already-seeded markets again."""
+        market = await self._require_market(market_key)
+
+        fkey = _as_key(feature_key)
+        definition = await self.feature_definitions.get(fkey)
+        if definition is None or not definition.is_consumable():
+            raise FeatureNotApprovedError(
+                f"feature '{feature_key}' is not an ACTIVE registered feature — cannot map it to a market"
+            )
+        if not definition.is_market_safe():
+            raise FeatureLeakageRiskError(
+                f"feature '{feature_key}' is classified {definition.leakage_classification} — "
+                "only an explicitly reviewed PRE_MATCH_SAFE feature can back a prediction/training "
+                "feature set"
+            )
+
+        existing = await self.mappings.list_by_market(market.id)
+        current = next((m for m in existing if m.feature_key == str(fkey)), None)
+        mapping = FeatureMarketMapping(
+            id=current.id if current is not None else FeatureMarketMappingId(uuid4()),
+            market_id=market.id,
+            feature_key=str(fkey),
+            is_required=is_required,
+            importance=importance,
+            confidence_contribution=confidence_contribution,
+            weight=weight,
+        )
+        return await self.mappings.upsert(mapping)
 
     async def list_for_market(self, market_key: str) -> list[FeatureMarketMapping]:
         market = await self._require_market(market_key)

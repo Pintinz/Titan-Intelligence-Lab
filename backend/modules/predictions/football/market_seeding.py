@@ -47,10 +47,7 @@ from modules.features.application.feature_registration_service import (
     FeatureRegistrationService,
 )
 from modules.features.domain.value_objects import EntityType, FeatureCategory, FeatureDataType, FeatureKey
-from modules.predictions.application.feature_market_mapping_service import (
-    FeatureMarketMappingService,
-    MappingAlreadyExistsError,
-)
+from modules.predictions.application.feature_market_mapping_service import FeatureMarketMappingService
 from modules.predictions.application.market_registry_service import MarketAlreadyRegisteredError, MarketRegistryService
 from modules.predictions.application.manager_change_context_calculator import ManagerChangeContextCalculator
 from modules.predictions.application.news_market_impact_engine import NewsMarketImpactEngine
@@ -597,6 +594,9 @@ class FootballMarketSeeder:
                     data_type=FeatureDataType.FLOAT,
                     owner=SYSTEM_REVIEWER,
                     entity_type=entity_type,
+                    # Live pre-match odds/kickoff-timing derivations — nothing here can ever
+                    # reflect a post-match fact. See forensic audit finding #3.
+                    leakage_classification="PRE_MATCH_SAFE",
                 )
             except FeatureAlreadyRegisteredError:
                 continue
@@ -635,28 +635,29 @@ class FootballMarketSeeder:
         market_optional_features = spec.get("optional_features", ())
 
         for feature_key in spec["required_features"]:
-            try:
-                await self.mappings.map_feature(
-                    spec["market_key"], feature_key,
-                    # The five new stat-differential features (2026-08-03) are optional, not
-                    # required: a rolling average needs 5 prior matches of TeamStatistics history
-                    # for *both* teams, and cards specifically has none at all for any fixture
-                    # whose team_statistics were synced before _STAT_TYPE_MAP started mapping it
-                    # (an absent stat_set key, not a zero value) — genuinely missing for a real,
-                    # unpredictable subset of fixtures. Blocking generation on that would defeat
-                    # the entire "fine-tune when available" point of adding them;
-                    # resolve_feature_snapshot already silently omits a missing optional feature
-                    # rather than raising, exactly the behavior these need.
-                    is_required=(
-                        feature_key not in _NEW_STAT_DIFFERENTIAL_FEATURES
-                        and feature_key not in market_optional_features
-                    ),
-                    weight=NEW_STAT_FEATURE_WEIGHTS.get(
-                        feature_key, STRUCTURED_INTEL_OPTIONAL_WEIGHTS.get(feature_key, 1.0)
-                    ),
-                )
-            except MappingAlreadyExistsError:
-                continue
+            # reconcile_feature (create-or-update) rather than map_feature (create-only) — a
+            # required_features spec change above must reach an already-seeded market's
+            # persisted mapping every time this seeder runs, not just the first time. See
+            # FeatureMarketMappingService.reconcile_feature's docstring (forensic audit finding #1).
+            await self.mappings.reconcile_feature(
+                spec["market_key"], feature_key,
+                # The five new stat-differential features (2026-08-03) are optional, not
+                # required: a rolling average needs 5 prior matches of TeamStatistics history
+                # for *both* teams, and cards specifically has none at all for any fixture
+                # whose team_statistics were synced before _STAT_TYPE_MAP started mapping it
+                # (an absent stat_set key, not a zero value) — genuinely missing for a real,
+                # unpredictable subset of fixtures. Blocking generation on that would defeat
+                # the entire "fine-tune when available" point of adding them;
+                # resolve_feature_snapshot already silently omits a missing optional feature
+                # rather than raising, exactly the behavior these need.
+                is_required=(
+                    feature_key not in _NEW_STAT_DIFFERENTIAL_FEATURES
+                    and feature_key not in market_optional_features
+                ),
+                weight=NEW_STAT_FEATURE_WEIGHTS.get(
+                    feature_key, STRUCTURED_INTEL_OPTIONAL_WEIGHTS.get(feature_key, 1.0)
+                ),
+            )
 
         market = await self.markets.markets.get_by_key(spec["market_key"])
         if market.status is MarketStatus.DRAFT:

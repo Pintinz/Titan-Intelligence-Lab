@@ -136,7 +136,25 @@ class TrainingPipelineService:
         model: PredictionModelPort,
         dataset: Dataset,
         split_strategy: SplitStrategy = SplitStrategy.TRAIN_TEST,
-        impute_strategy: str = "zero",
+        # Forensic audit finding #4 (2026-08-30): no real caller (AutomaticModelSelectionService,
+        # the only production caller of `train()`) ever overrode this — every model this platform
+        # has ever trained was silently zero-imputed. Zero is a uniquely bad default for feature
+        # ranges where 0.0 is also a real, valid measurement (an implied-probability feature's
+        # true range is 0..1; a stat-differential's real range is roughly -30..30) — imputing
+        # "missing" and "measured zero" to the identical value means the model is trained as if
+        # they were the same thing, when they aren't. "mean" imputation (already fully
+        # implemented in `impute_missing`, just never defaulted to) is a strictly less biased
+        # choice for the same Missing-At-Random data this pipeline actually has, at zero cost:
+        # it doesn't change `feature_order`'s shape, so it can't affect artifact compatibility
+        # for any model already trained and serving — only future retraining runs use it.
+        #
+        # This does not fully close the gap: the model still can't distinguish "measured zero"
+        # from "imputed mean" as a genuinely separate signal — that needs a missingness-indicator
+        # feature, which changes `feature_order`'s dimensionality and must be versioned per-model
+        # (`ModelDefinition.feature_versions`) so it can't silently break an already-trained
+        # Champion's expected input shape. Deliberately out of scope for this fix; flagged for a
+        # dedicated pass rather than rushed in alongside a default-value change.
+        impute_strategy: str = "mean",
         outlier_z_threshold: float | None = 3.0,
         feature_selection_top_k: int | None = None,
         feature_selection_method: str = "correlation",

@@ -530,7 +530,7 @@ async def test_prediction_repository_update_list_by_market_and_list_recent(sqlit
     await sqlite_session.commit()
 
     prediction.status = PredictionStatus.PUBLISHED
-    updated = await predictions.update(prediction)
+    updated = await predictions.update_status(prediction.id, prediction.status)
     await sqlite_session.commit()
 
     by_market_published = await predictions.list_by_market(market.id, status=PredictionStatus.PUBLISHED)
@@ -541,6 +541,40 @@ async def test_prediction_repository_update_list_by_market_and_list_recent(sqlit
     assert len(by_market_published) == 1
     assert len(by_market_draft) == 0
     assert len(recent) == 1
+
+
+@pytest.mark.asyncio
+async def test_prediction_repository_update_status_cannot_touch_value_or_probability(sqlite_session):
+    """Forensic audit finding #10 (2026-08-30): the repository must structurally prevent a
+    served prediction's numbers from being overwritten after the fact. `update_status` only
+    takes a status, not a full `Prediction` — there is no argument through which a caller could
+    even attempt to change `value`/`probability`/`feature_snapshot`."""
+    markets = SqlAlchemyMarketRepository(session=sqlite_session)
+    models = SqlAlchemyModelRepository(session=sqlite_session)
+    predictions = SqlAlchemyPredictionRepository(session=sqlite_session)
+    market = _market()
+    model = ModelDefinition(id=ModelId(uuid4()), market_id=market.id, model_key="m1", version=1, algorithm="heuristic_logistic_v1")
+    await markets.upsert(market)
+    await models.upsert(model)
+    prediction = Prediction(
+        id=PredictionId(uuid4()), market_id=market.id, model_id=model.id, subject_ref="fixture-1", value="positive",
+        probability=0.6, confidence=ConfidenceBreakdown(*([0.5] * 9)), explanation=ExplanationBundle(),
+        feature_snapshot={"a": 1.0}, model_version="1", status=PredictionStatus.DRAFT, generated_at=T0,
+    )
+    await predictions.record(prediction)
+    await sqlite_session.commit()
+
+    updated = await predictions.update_status(prediction.id, PredictionStatus.PUBLISHED)
+    await sqlite_session.commit()
+    refetched = await predictions.get(prediction.id)
+
+    assert updated.value == "positive"
+    assert updated.probability == 0.6
+    assert updated.feature_snapshot == {"a": 1.0}
+    assert refetched.value == "positive"
+    assert refetched.probability == 0.6
+    assert refetched.feature_snapshot == {"a": 1.0}
+    assert refetched.status is PredictionStatus.PUBLISHED
 
 
 @pytest.mark.asyncio

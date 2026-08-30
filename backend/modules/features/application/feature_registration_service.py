@@ -1,10 +1,25 @@
-"""Feature registration workflow with a human-gated leakage-review checkpoint
-(docs/feature_catalog.md §1, §6). Lifecycle: DRAFT -> IN_REVIEW -> ACTIVE -> DEPRECATED, with
-REMOVED as a terminal end-of-life state. Only ACTIVE features are consumable
-(FeatureDefinition.is_consumable) — nothing here auto-approves a feature into ACTIVE; that
-always requires an explicit `approve()` call naming a human reviewer, mirroring the
-Champion/Challenger human-gated promotion pattern used for models (docs/architecture.md
-"AI Governance").
+"""Feature registration workflow (docs/feature_catalog.md §1, §6). Lifecycle: DRAFT -> IN_REVIEW
+-> ACTIVE -> DEPRECATED, with REMOVED as a terminal end-of-life state. Only ACTIVE features are
+consumable (FeatureDefinition.is_consumable) — nothing here auto-approves a feature into ACTIVE;
+that always requires an explicit `approve(feature_key, reviewer, now)` call naming a reviewer.
+
+Corrected 2026-08-30 (forensic audit finding #5): this docstring used to describe `approve()` as
+a "human-gated leakage-review checkpoint," but every real calculator in
+`windowed_feature_engineering_service.py`/`news_market_impact_engine.py`/
+`manager_change_context_calculator.py`, plus each sport's `market_seeding.py`, calls
+`approve(feature_key, SYSTEM_REVIEWER, now)` — SYSTEM_REVIEWER = "prediction-platform" — inside
+its own `ensure_registered()`, immediately after registering. No human is actually in that loop,
+and describing it as if one were was misleading. That is the correct behavior for those callers,
+not a bug: leakage safety for a calculator-registered feature is enforced in code, not by
+approval — `register(..., leakage_classification=...)` is set explicitly at registration time
+only for calculators whose cutoff-respecting behavior was itself reviewed (see each one's own
+docstring), and `FeatureMarketMappingService.map_feature`/`reconcile_feature` refuse anything
+short of an explicit PRE_MATCH_SAFE classification regardless of who or what approved the
+DRAFT->ACTIVE transition. `approve()` remains available for a genuinely manual registration path
+(an admin registering a new feature type through its own review flow) — the reviewer identity
+passed there should be a real person, not SYSTEM_REVIEWER, and nothing here enforces that
+distinction beyond convention; `reviewed_by` is always visible on the definition either way, so
+which path produced a given ACTIVE feature is auditable, not hidden.
 """
 
 from __future__ import annotations
@@ -69,6 +84,7 @@ class FeatureRegistrationService:
         online_ttl_seconds: int = 3600,
         source_provider_key: str | None = None,
         dependencies: tuple[str, ...] = (),
+        leakage_classification: str = "UNKNOWN_PROVENANCE",
     ) -> FeatureDefinition:
         key = _as_key(feature_key)
         if await self.definitions.get(key) is not None:
@@ -100,6 +116,7 @@ class FeatureRegistrationService:
             dependencies=dep_keys,
             status=FeatureStatus.DRAFT,
             version=1,
+            leakage_classification=leakage_classification,
         )
         await self.definitions.upsert(definition)
         await self.lineage.record_dependencies(key, dep_keys)

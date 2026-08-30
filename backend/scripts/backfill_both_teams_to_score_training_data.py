@@ -48,12 +48,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from apps.api.composition import build_historical_feature_reconstruction_service, get_engine
 from scripts.production_safety_guard import require_confirmation_outside_development
+from modules.predictions.application.feature_market_mapping_service import FeatureMarketMappingService
 from modules.predictions.application.model_registry_service import ModelAlreadyRegisteredError, ModelRegistryService
 from modules.predictions.application.outcome_label_mapper import MARKET_OUTCOME_LABELS
 from modules.predictions.application.outcome_resolution_service import MARKET_OUTCOME_RESOLVERS, MatchResult
 from modules.predictions.domain.entities import ConfidenceBreakdown, ExplanationBundle, Prediction, PredictionOutcome
 from modules.predictions.domain.value_objects import PredictionId, PredictionOutcomeId, PredictionStatus
 from modules.predictions.infrastructure.persistence.repositories import (
+    SqlAlchemyFeatureMarketMappingRepository,
     SqlAlchemyMarketRepository,
     SqlAlchemyModelRepository,
     SqlAlchemyPredictionOutcomeRepository,
@@ -61,19 +63,16 @@ from modules.predictions.infrastructure.persistence.repositories import (
 )
 from modules.sports.domain.value_objects import FixtureId, TeamId
 from modules.features.domain.value_objects import EntityType, FeatureKey
-from modules.features.infrastructure.persistence.repositories import SqlAlchemyFeatureValueRepository
+from modules.features.infrastructure.persistence.repositories import (
+    SqlAlchemyFeatureDefinitionRepository,
+    SqlAlchemyFeatureValueRepository,
+)
 
 MARKET_KEY = "football.both_teams_to_score"
-REQUIRED_FEATURES = ("football.market.overround", "football.fixture.form_shots_on_target_diff_last5")
+# The two feature keys `historical_service.publish_for_fixture` below knows how to reconstruct —
+# not a duplicate of the market's required/optional feature set (that now comes from the live
+# mapping, see main()), just the specific keys this script's reconstruction step targets.
 NEWS_BTTS_IMPACT_FEATURES = ("news.football.home_btts_impact", "news.football.away_btts_impact")
-OPTIONAL_FEATURES = (
-    "football.fixture.form_possession_pct_diff_last5",
-    "football.fixture.form_shots_total_diff_last5",
-    "football.fixture.form_corners_diff_last5",
-    "football.fixture.form_fouls_diff_last5",
-    "football.fixture.form_cards_yellow_diff_last5",
-    *NEWS_BTTS_IMPACT_FEATURES,
-)
 _INERT_CONFIDENCE = ConfidenceBreakdown(
     feature_quality=0.0, feature_freshness=0.0, historical_accuracy=0.0, knowledge_graph_completeness=0.0,
     news_reliability=0.0, community_reliability=0.0, data_completeness=0.0, model_reliability=0.0,
@@ -118,6 +117,17 @@ async def main() -> None:
         market = await markets_repo.get_by_key(MARKET_KEY)
         if market is None:
             raise RuntimeError(f"market '{MARKET_KEY}' not found")
+
+        # Forensic audit finding #2 (2026-08-30) — see backfill_match_winner_training_data.py's
+        # identical comment for the full rationale.
+        mapping_service = FeatureMarketMappingService(
+            mappings=SqlAlchemyFeatureMarketMappingRepository(session=session),
+            markets=markets_repo,
+            feature_definitions=SqlAlchemyFeatureDefinitionRepository(session=session),
+        )
+        mappings = await mapping_service.list_for_market(MARKET_KEY)
+        required_features = tuple(m.feature_key for m in mappings if m.is_required)
+        optional_features = tuple(m.feature_key for m in mappings if not m.is_required)
 
         champion = await model_registry.models.get_champion(market.id)
         if champion is not None and champion.status.value == "champion":
@@ -180,7 +190,7 @@ async def main() -> None:
 
             feature_snapshot: dict[str, float] = {}
             missing_required = False
-            for key in REQUIRED_FEATURES:
+            for key in required_features:
                 value = await _feature_value_as_of(session, key, dashed, kickoff)
                 if value is None:
                     missing_required = True
@@ -189,7 +199,7 @@ async def main() -> None:
             if missing_required:
                 skipped_missing_required += 1
                 continue
-            for key in OPTIONAL_FEATURES:
+            for key in optional_features:
                 value = await _feature_value_as_of(session, key, dashed, kickoff)
                 if value is not None:
                     feature_snapshot[key] = value

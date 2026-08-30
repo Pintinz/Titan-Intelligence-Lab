@@ -111,7 +111,7 @@ class PredictionCacheService:
                 f"cannot approve prediction from status {prediction.status.value}"
             )
         prediction.status = PredictionStatus.PUBLISHED
-        await self.predictions.update(prediction)
+        await self.predictions.update_status(prediction.id, prediction.status)
         await self._audit(AuditAction.APPROVED, actor, now, prediction)
         return prediction
 
@@ -121,13 +121,13 @@ class PredictionCacheService:
                 f"cannot reject prediction from status {prediction.status.value} — must be DRAFT"
             )
         prediction.status = PredictionStatus.VOIDED
-        await self.predictions.update(prediction)
+        await self.predictions.update_status(prediction.id, prediction.status)
         await self._audit(AuditAction.REJECTED, actor, now, prediction, details={"reason": reason})
         return prediction
 
     async def void(self, prediction: Prediction, actor: str, now: datetime, reason: str = "") -> Prediction:
         prediction.status = PredictionStatus.VOIDED
-        await self.predictions.update(prediction)
+        await self.predictions.update_status(prediction.id, prediction.status)
         await self._audit(AuditAction.ARCHIVED, actor, now, prediction, details={"reason": reason})
         return prediction
 
@@ -138,7 +138,7 @@ class PredictionCacheService:
         was_published = previous is not None and previous.status is PredictionStatus.PUBLISHED
         if was_published:
             previous.status = PredictionStatus.SUPERSEDED
-            await self.predictions.update(previous)
+            await self.predictions.update_status(previous.id, previous.status)
 
         if prediction.confidence.composite >= confidence_threshold:
             prediction.status = PredictionStatus.PUBLISHED
