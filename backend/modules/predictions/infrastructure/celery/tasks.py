@@ -265,10 +265,12 @@ _CALIBRATION_VALIDATION_TASK_TIMEOUT_SECONDS = 1800  # heavy: comparably costly 
 # this is generously long relative to the real expected cost), and `beat_schedule.py`'s own
 # SCHEDULED_PREDICTION_GENERATION_INTERVAL_SECONDS (1 hour) leaves 4x headroom over it.
 _PREDICTION_GENERATION_TASK_TIMEOUT_SECONDS = 900
-# On-demand only (see repair_broken_champions_task) — a full sweep can cover every PRODUCTION
-# market unconditionally (no staleness gate narrows it, unlike the regular retraining task above),
-# so it's sized generously rather than against a Beat cadence it doesn't have.
-_REPAIR_TASK_TIMEOUT_SECONDS = 3600
+# On-demand only (see repair_broken_champions_task). 2026-08-30 reliability fix: this task is now
+# audit-only (read-only artifact-loadability checks over every PRODUCTION market, each bounded by
+# the artifact store's own 30s HTTP timeout) plus dispatching one small task per broken market —
+# the actual repair work (dataset build + training) moved to repair_one_champion_task's own
+# smaller budget below, so this no longer needs the hour-long ceiling a full inline sweep did.
+_AUDIT_ONLY_TIMEOUT_SECONDS = 1800
 
 
 @celery_app.task(name="predictions.check_scheduled_prediction_generation", bind=True, **_RETRY_KWARGS)
@@ -340,11 +342,17 @@ def check_scheduled_retraining_task(self, now_iso: str | None = None) -> dict:
 def repair_broken_champions_task(self, now_iso: str | None = None) -> dict:
     """On-demand only — not on Beat's schedule. Real production incident, 2026-08-29:
     `GET /api/v1/admin/system/model-health` found 40 of 53 PRODUCTION markets' registered
-    Champions pointed at artifacts that were never actually durable. Audits every PRODUCTION
-    market fresh (never trusts a prior run's result), then repairs only what's still actually
-    broken via `ScheduledRetrainingOrchestrator.repair_broken_champion` — already-healthy markets
-    are never touched, so a retry after a partial run or a timeout is safe and cheap, not a
-    wasteful full re-run."""
+    Champions pointed at artifacts that were never actually durable.
+
+    Reliability fix, 2026-08-30: this used to repair every broken market inline, in one task, with
+    a 1-hour budget — on this deployment's single-threaded `--pool=solo` worker, a single stalled
+    market (or an unrelated hung ingestion task sharing the same process) blocked the ENTIRE sweep
+    with zero visibility, confirmed live (a 6-minute worker stall on one hung provider HTTP call
+    froze everything behind it). Now this task only *audits* (fast, read-only) and dispatches one
+    `repair_one_champion_task` per broken market — each with its own bounded timeout, independent
+    retry budget, and independently visible in `model-health` the moment it lands, so one market's
+    trouble can never block another's, and progress is observable market-by-market rather than
+    all-or-nothing."""
 
     async def _do() -> dict:
         async with _get_retraining_orchestrator() as orchestrator:
@@ -356,37 +364,53 @@ def repair_broken_champions_task(self, now_iso: str | None = None) -> dict:
             entries = await audit_service.audit_all_production_markets()
             broken = [e for e in entries if e.status in REPAIRABLE_STATUSES]
 
-            results = []
+            dispatched = []
             for entry in broken:
-                try:
-                    outcome = await orchestrator.repair_broken_champion(entry.market, now)
-                except Exception as exc:  # noqa: BLE001 — one market's failure must never stop the batch
-                    results.append(
-                        {"market_key": entry.market.market_key, "was_status": entry.status, "repaired": False, "error": str(exc)}
-                    )
-                    continue
-                results.append(
-                    {
-                        "market_key": entry.market.market_key,
-                        "was_status": entry.status,
-                        "repaired": outcome.skipped_reason is None,
-                        "skipped_reason": outcome.skipped_reason,
-                        "new_champion_model_key": (
-                            outcome.challenger.model_key if outcome.skipped_reason is None and outcome.challenger else None
-                        ),
-                    }
-                )
+                result = repair_one_champion_task.delay(entry.market.market_key, now_iso=now.isoformat())
+                dispatched.append({"market_key": entry.market.market_key, "was_status": entry.status, "task_id": result.id})
 
             return {
                 "total_production_markets": len(entries),
                 "already_healthy": sum(1 for e in entries if e.status == "HEALTHY"),
-                "attempted_repairs": len(broken),
-                "repaired": sum(1 for r in results if r["repaired"]),
-                "failed": sum(1 for r in results if not r["repaired"]),
-                "results": results,
+                "dispatched_repairs": len(dispatched),
+                "results": dispatched,
             }
 
-    return asyncio.run(asyncio.wait_for(_do(), timeout=_REPAIR_TASK_TIMEOUT_SECONDS))
+    return asyncio.run(asyncio.wait_for(_do(), timeout=_AUDIT_ONLY_TIMEOUT_SECONDS))
+
+
+_REPAIR_ONE_MARKET_TIMEOUT_SECONDS = 300  # one market's dataset build + candidate training
+
+
+@celery_app.task(name="predictions.repair_one_champion", bind=True, **_RETRY_KWARGS)
+@_logged("predictions.repair_one_champion")
+def repair_one_champion_task(self, market_key: str, now_iso: str | None = None) -> dict:
+    """The per-market unit of work `repair_broken_champions_task` dispatches — see that task's
+    docstring for why this is split out rather than inline. Fetches the market fresh (never
+    trusts the dispatcher's stale snapshot) and repairs it via
+    `ScheduledRetrainingOrchestrator.repair_broken_champion`, same repair logic as before, just
+    scoped to one market per task invocation."""
+
+    async def _do() -> dict:
+        async with _get_retraining_orchestrator() as orchestrator:
+            now = datetime.fromisoformat(now_iso) if now_iso else datetime.now(timezone.utc)
+            market = await orchestrator.markets.get_by_key(market_key)
+            if market is None:
+                return {"market_key": market_key, "repaired": False, "error": "market no longer exists"}
+            try:
+                outcome = await orchestrator.repair_broken_champion(market, now)
+            except Exception as exc:  # noqa: BLE001 — reported, not swallowed; this task's own failure must not crash the caller
+                return {"market_key": market_key, "repaired": False, "error": str(exc)}
+            return {
+                "market_key": market_key,
+                "repaired": outcome.skipped_reason is None,
+                "skipped_reason": outcome.skipped_reason,
+                "new_champion_model_key": (
+                    outcome.challenger.model_key if outcome.skipped_reason is None and outcome.challenger else None
+                ),
+            }
+
+    return asyncio.run(asyncio.wait_for(_do(), timeout=_REPAIR_ONE_MARKET_TIMEOUT_SECONDS))
 
 
 _FEATURE_REPAIR_TASK_TIMEOUT_SECONDS = 900

@@ -41,6 +41,12 @@ celery_app.conf.update(
     task_acks_late=True,  # a task lost mid-execution (worker crash) is redelivered, not dropped
     worker_prefetch_multiplier=1,  # don't let one worker hoard tasks other workers could run
     task_time_limit=600,
+    # Without this, AsyncResult.state stays "PENDING" for the task's ENTIRE run — indistinguishable
+    # from "never received at all" (real production pain, 2026-08-30: an admin-triggered repair
+    # sweep looked identically "stuck" whether it was genuinely running or had silently vanished,
+    # with no way to tell short of grepping worker logs for a `received` line). "STARTED" now shows
+    # as soon as a worker actually picks the task up.
+    task_track_started=True,
     # Milestone 24: previously routed ingestion.*/admin.* to separate "live"/"default" queues, but
     # no production worker invocation ever consumed them (confirmed by repo-wide search — the only
     # consumer was a one-off manual `-Q celery,live,default` launch in M23). That silently stranded

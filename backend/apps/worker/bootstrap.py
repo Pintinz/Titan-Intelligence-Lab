@@ -133,7 +133,10 @@ def _fresh_registry() -> dict[str, FactoryRecord]:
         "retraining_orchestrator": FactoryRecord(
             name="retraining_orchestrator", module="modules.predictions.infrastructure.celery.tasks",
             service="ScheduledRetrainingOrchestrator",
-            task_names=("predictions.check_scheduled_retraining", "predictions.repair_broken_champions"),
+            task_names=(
+                "predictions.check_scheduled_retraining", "predictions.repair_broken_champions",
+                "predictions.repair_one_champion",
+            ),
         ),
         "market_feature_repair": FactoryRecord(
             name="market_feature_repair", module="modules.predictions.infrastructure.celery.tasks",

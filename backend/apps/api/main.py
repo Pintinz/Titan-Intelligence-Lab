@@ -2225,13 +2225,14 @@ async def model_health(session: AsyncSession = Depends(get_session), _admin: _Au
 
 @app.post("/api/v1/admin/system/model-health/repair")
 async def trigger_champion_repair(_admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
-    """Enqueues `predictions.repair_broken_champions` on the worker rather than running it inline
-    — a real repair sweep can cover every PRODUCTION market unconditionally and take well past any
-    reasonable HTTP request lifetime (Production Integrity Hardening, 2026-08-29: 40+ markets,
-    full candidate-roster training each). Returns immediately with a Celery task_id; poll
-    `GET /api/v1/admin/system/model-health` again afterward to see which markets moved to HEALTHY
-    — this is the first admin-triggered task enqueued rather than run inline in this file, so
-    there's no existing `AsyncResult`-polling endpoint to reuse yet."""
+    """Enqueues `predictions.repair_broken_champions` on the worker rather than running it inline.
+    That task only audits (fast, read-only) then dispatches one `repair_one_champion_task` per
+    broken market (reliability fix, 2026-08-30 — see that task's docstring: a single inline sweep
+    over 40+ markets let one stalled market or an unrelated hung task freeze the entire
+    single-threaded worker with zero visibility). Poll this endpoint's returned task_id via
+    `GET /api/v1/admin/system/task-result/{task_id}` for the dispatch summary (each dispatched
+    task_id can be polled the same way), or just re-check `GET /api/v1/admin/system/model-health`
+    afterward to see which markets moved to HEALTHY."""
     from modules.predictions.infrastructure.celery.tasks import repair_broken_champions_task
 
     result = repair_broken_champions_task.delay(now_iso=_now().isoformat())

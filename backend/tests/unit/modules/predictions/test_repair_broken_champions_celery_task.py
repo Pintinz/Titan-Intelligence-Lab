@@ -52,6 +52,9 @@ class _FakeMarketRepo:
     async def list_by_status(self, status):
         return self.markets
 
+    async def get_by_key(self, market_key):
+        return next((m for m in self.markets if m.market_key == market_key), None)
+
 
 @dataclass
 class _FakeModelRepo:
@@ -124,64 +127,63 @@ def wire_factory(fake_orchestrator):
     tasks_module.set_retraining_orchestrator_factory(None)
 
 
-def test_repairs_every_broken_market_and_summarizes_results(fake_orchestrator, broken_market, no_champion_market):
+# --- Dispatcher (predictions.repair_broken_champions): audits and fans out, never repairs inline ---
+
+
+class _FakeDispatchResult:
+    def __init__(self, task_id: str):
+        self.id = task_id
+
+
+def test_dispatcher_audits_and_dispatches_one_task_per_broken_market(
+    monkeypatch, fake_orchestrator, broken_market, no_champion_market
+):
+    # The dispatcher's own job is audit + call .delay() with the right market_key — the actual
+    # repair logic is covered separately by the repair_one_champion_task tests below. Monkeypatched
+    # rather than left to really fire: under task_always_eager, .delay() runs the per-market task
+    # SYNCHRONOUSLY inside the dispatcher's own asyncio.run() call, which is a real
+    # "asyncio.run() cannot be called from a running event loop" error — a test-harness artifact of
+    # eager mode (a genuine `.delay()` in production just publishes and returns immediately), not a
+    # production bug, but it means this test must isolate dispatch from execution to be valid.
+    dispatch_calls = []
+
+    def fake_delay(market_key, now_iso=None):
+        dispatch_calls.append((market_key, now_iso))
+        return _FakeDispatchResult(task_id=f"task-for-{market_key}")
+
+    monkeypatch.setattr(tasks_module.repair_one_champion_task, "delay", fake_delay)
+
     result = tasks_module.repair_broken_champions_task.apply(kwargs={"now_iso": T0.isoformat()}).get()
 
     assert result["total_production_markets"] == 2
     assert result["already_healthy"] == 0
-    assert result["attempted_repairs"] == 2
-    assert result["repaired"] == 2
-    assert result["failed"] == 0
-    assert set(fake_orchestrator.repair_calls) == {broken_market.market_key, no_champion_market.market_key}
-
-    entry = next(r for r in result["results"] if r["market_key"] == broken_market.market_key)
-    assert entry["was_status"] == "MISSING_ARTIFACT"
-    assert entry["repaired"] is True
-    assert entry["new_champion_model_key"] == f"{broken_market.market_key}.logistic_regression"
-
-    entry2 = next(r for r in result["results"] if r["market_key"] == no_champion_market.market_key)
-    assert entry2["was_status"] == "NO_CHAMPION"
+    assert result["dispatched_repairs"] == 2
+    dispatched_keys = {r["market_key"] for r in result["results"]}
+    assert dispatched_keys == {broken_market.market_key, no_champion_market.market_key}
+    for entry in result["results"]:
+        assert entry["task_id"] == f"task-for-{entry['market_key']}"
+    assert {key for key, _ in dispatch_calls} == {broken_market.market_key, no_champion_market.market_key}
+    # The orchestrator's real repair method was never called by the dispatcher itself.
+    assert fake_orchestrator.repair_calls == []
 
 
-def test_one_market_failing_to_repair_never_blocks_the_rest(fake_orchestrator, broken_market, no_champion_market):
-    fake_orchestrator.raise_for = {broken_market.market_key: RuntimeError("dataset build failed")}
+def test_dispatcher_defaults_now_to_current_time_when_not_supplied(monkeypatch, fake_orchestrator):
+    dispatch_calls = []
+    monkeypatch.setattr(
+        tasks_module.repair_one_champion_task, "delay",
+        lambda market_key, now_iso=None: dispatch_calls.append(market_key) or _FakeDispatchResult(task_id="x"),
+    )
 
-    result = tasks_module.repair_broken_champions_task.apply(kwargs={"now_iso": T0.isoformat()}).get()
-
-    assert result["attempted_repairs"] == 2
-    assert result["repaired"] == 1
-    assert result["failed"] == 1
-    failed_entry = next(r for r in result["results"] if r["market_key"] == broken_market.market_key)
-    assert failed_entry["repaired"] is False
-    assert "dataset build failed" in failed_entry["error"]
-    # The other market still got a real attempt, unaffected by the first one's crash.
-    assert no_champion_market.market_key in fake_orchestrator.repair_calls
-
-
-def test_a_repair_that_returns_a_skipped_reason_is_not_counted_as_repaired(fake_orchestrator, broken_market, no_champion_market):
-    fake_orchestrator.repair_outcomes = {
-        broken_market.market_key: RetrainingOutcome(
-            market_key=broken_market.market_key, should_retrain=True, reason="artifact repair",
-            skipped_reason="preflight failed — insufficient data",
-        )
-    }
-
-    result = tasks_module.repair_broken_champions_task.apply(kwargs={"now_iso": T0.isoformat()}).get()
-
-    entry = next(r for r in result["results"] if r["market_key"] == broken_market.market_key)
-    assert entry["repaired"] is False
-    assert entry["skipped_reason"] == "preflight failed — insufficient data"
-
-
-def test_task_defaults_now_to_current_time_when_not_supplied(fake_orchestrator):
     tasks_module.repair_broken_champions_task.apply(kwargs={}).get()
-    assert len(fake_orchestrator.repair_calls) == 2
+
+    assert len(dispatch_calls) == 2
 
 
 class _HangingRepairOrchestrator:
-    """Simulates a stuck audit/repair (mirrors test_scheduled_retraining_celery_task.py's own
-    equivalent) — proves the overall asyncio.wait_for() bound around the whole batch actually
-    fires rather than just existing in the source."""
+    """Simulates a stuck audit (mirrors test_scheduled_retraining_celery_task.py's own
+    equivalent) — proves the dispatcher's own asyncio.wait_for() bound actually fires rather than
+    just existing in the source. The dispatcher is audit-only now, so this only needs to hang the
+    audit's own list_by_status call, not a full repair loop."""
 
     class markets:
         @staticmethod
@@ -193,8 +195,8 @@ class _HangingRepairOrchestrator:
     model_selection = _FakeModelSelection(artifact_store=_AlwaysMissingArtifactStore())
 
 
-def test_task_times_out_instead_of_hanging_forever(monkeypatch):
-    monkeypatch.setattr(tasks_module, "_REPAIR_TASK_TIMEOUT_SECONDS", 0.05)
+def test_dispatcher_times_out_instead_of_hanging_forever(monkeypatch):
+    monkeypatch.setattr(tasks_module, "_AUDIT_ONLY_TIMEOUT_SECONDS", 0.05)
 
     async def factory():
         return _HangingRepairOrchestrator()
@@ -203,6 +205,98 @@ def test_task_times_out_instead_of_hanging_forever(monkeypatch):
 
     with pytest.raises(Exception) as exc_info:
         tasks_module.repair_broken_champions_task.apply(kwargs={"now_iso": T0.isoformat()}).get()
+    causes = []
+    err = exc_info.value
+    while err is not None and err not in causes:
+        causes.append(err)
+        err = getattr(err, "exc", None) or err.__cause__
+    assert any(isinstance(c, TimeoutError) for c in causes), f"expected a TimeoutError in {causes!r}"
+
+
+# --- Per-market unit of work (predictions.repair_one_champion) --------------------------------
+
+
+def test_repair_one_champion_repairs_the_named_market(fake_orchestrator, broken_market):
+    result = tasks_module.repair_one_champion_task.apply(
+        kwargs={"market_key": broken_market.market_key, "now_iso": T0.isoformat()}
+    ).get()
+
+    assert result["market_key"] == broken_market.market_key
+    assert result["repaired"] is True
+    assert result["new_champion_model_key"] == f"{broken_market.market_key}.logistic_regression"
+    assert fake_orchestrator.repair_calls == [broken_market.market_key]
+
+
+def test_repair_one_champion_reports_a_raised_error_without_crashing(fake_orchestrator, broken_market):
+    fake_orchestrator.raise_for = {broken_market.market_key: RuntimeError("dataset build failed")}
+
+    result = tasks_module.repair_one_champion_task.apply(
+        kwargs={"market_key": broken_market.market_key, "now_iso": T0.isoformat()}
+    ).get()
+
+    assert result["repaired"] is False
+    assert "dataset build failed" in result["error"]
+
+
+def test_repair_one_champion_with_a_skipped_reason_is_not_counted_as_repaired(fake_orchestrator, broken_market):
+    fake_orchestrator.repair_outcomes = {
+        broken_market.market_key: RetrainingOutcome(
+            market_key=broken_market.market_key, should_retrain=True, reason="artifact repair",
+            skipped_reason="preflight failed — insufficient data",
+        )
+    }
+
+    result = tasks_module.repair_one_champion_task.apply(
+        kwargs={"market_key": broken_market.market_key, "now_iso": T0.isoformat()}
+    ).get()
+
+    assert result["repaired"] is False
+    assert result["skipped_reason"] == "preflight failed — insufficient data"
+
+
+def test_repair_one_champion_for_a_market_that_no_longer_exists_reports_honestly(fake_orchestrator):
+    result = tasks_module.repair_one_champion_task.apply(
+        kwargs={"market_key": "football.deleted_market", "now_iso": T0.isoformat()}
+    ).get()
+
+    assert result["repaired"] is False
+    assert "no longer exists" in result["error"]
+    assert fake_orchestrator.repair_calls == []
+
+
+def test_one_markets_failure_never_reaches_the_others_separate_invocation(fake_orchestrator, broken_market, no_champion_market):
+    """The whole point of the dispatch split — each market is its own task invocation, so one
+    market raising can never affect another's, unlike the old inline-loop shape."""
+    fake_orchestrator.raise_for = {broken_market.market_key: RuntimeError("dataset build failed")}
+
+    failed = tasks_module.repair_one_champion_task.apply(
+        kwargs={"market_key": broken_market.market_key, "now_iso": T0.isoformat()}
+    ).get()
+    healthy_attempt = tasks_module.repair_one_champion_task.apply(
+        kwargs={"market_key": no_champion_market.market_key, "now_iso": T0.isoformat()}
+    ).get()
+
+    assert failed["repaired"] is False
+    assert healthy_attempt["repaired"] is True
+
+
+def test_repair_one_champion_times_out_instead_of_hanging_forever(monkeypatch):
+    monkeypatch.setattr(tasks_module, "_REPAIR_ONE_MARKET_TIMEOUT_SECONDS", 0.05)
+
+    class _HangingOneMarketOrchestrator:
+        class markets:
+            @staticmethod
+            async def get_by_key(market_key):
+                await asyncio.sleep(3600)
+                return None  # pragma: no cover — unreachable, the timeout fires first
+
+    async def factory():
+        return _HangingOneMarketOrchestrator()
+
+    tasks_module.set_retraining_orchestrator_factory(factory)
+
+    with pytest.raises(Exception) as exc_info:
+        tasks_module.repair_one_champion_task.apply(kwargs={"market_key": "football.x", "now_iso": T0.isoformat()}).get()
     causes = []
     err = exc_info.value
     while err is not None and err not in causes:
