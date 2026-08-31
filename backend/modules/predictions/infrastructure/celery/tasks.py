@@ -504,7 +504,7 @@ _VENUE_STRENGTH_BACKFILL_COMMIT_BATCH_SIZE = 50
 
 @celery_app.task(name="predictions.backfill_venue_strength_for_completed_fixtures", bind=True, **_RETRY_KWARGS)
 @_logged("predictions.backfill_venue_strength_for_completed_fixtures")
-def backfill_venue_strength_for_completed_fixtures_task(self, now_iso: str | None = None) -> dict:
+def backfill_venue_strength_for_completed_fixtures_task(self, now_iso: str | None = None, force: bool = False) -> dict:
     """On-demand only. `repair_correct_score_feature_requirements_task` above backfills
     venue-strength features for fixtures that haven't kicked off yet (the live-prediction path)
     — it deliberately excludes completed fixtures, so it does nothing for football.correct_score's
@@ -528,13 +528,33 @@ def backfill_venue_strength_for_completed_fixtures_task(self, now_iso: str | Non
     loop — every fixture computed in that ~15 minutes was discarded uncommitted, and Celery's
     autoretry then repeated the exact same all-or-nothing failure from scratch. Commits in batches
     now, so a timeout (or any other interruption) keeps whatever full batches already completed
-    instead of losing all of it; a retry picks up mid-set rather than starting over."""
+    instead of losing all of it; a retry picks up mid-set rather than starting over.
+
+    Real production incident (2026-08-31, following day): even with batched commits, repeated
+    runs against the real ~2380-fixture dataset showed zero net coverage gain for 9+ minutes
+    straight — the discovery query has no ORDER BY and no already-covered filter, so every run
+    re-scanned and re-computed the same first ~1000 already-backfilled fixtures before ever
+    reaching new ground, live-verified by watching `SELECT count(DISTINCT entity_id) ...` sit
+    unchanged across an entire run. Excludes fixtures that already have `home_attack_strength`
+    recorded by default now, so a run's own 1800s budget is spent entirely on fixtures that
+    still need it — `force=True` (e.g. after a genuine re-registration change) reprocesses
+    everything again, matching every other repair task's own `force` escape hatch."""
 
     async def _do() -> dict:
         async with _get_market_feature_repair_context() as ctx:
             now = datetime.fromisoformat(now_iso) if now_iso else datetime.now(timezone.utc)
             await ctx.venue_strength_calculator.ensure_registered(now)
 
+            already_covered_clause = (
+                ""
+                if force
+                else (
+                    "AND NOT EXISTS ("
+                    "SELECT 1 FROM features.feature_values_offline v "
+                    "WHERE v.feature_key = 'football.fixture.home_attack_strength' AND v.entity_id = f.id::text"
+                    ") "
+                )
+            )
             rows = (
                 await ctx.session.execute(
                     text(
@@ -543,7 +563,8 @@ def backfill_venue_strength_for_completed_fixtures_task(self, now_iso: str | Non
                         "JOIN sports.seasons se ON f.season_id = se.id "
                         "JOIN sports.competitions c ON se.competition_id = c.id "
                         "JOIN sports.sports s ON c.sport_id = s.id "
-                        "WHERE s.code = 'football' AND f.status = 'completed' AND f.home_score IS NOT NULL"
+                        "WHERE s.code = 'football' AND f.status = 'completed' AND f.home_score IS NOT NULL "
+                        + already_covered_clause
                     )
                 )
             ).all()
@@ -568,6 +589,7 @@ def backfill_venue_strength_for_completed_fixtures_task(self, now_iso: str | Non
             return {
                 "completed_football_fixtures_checked": len(rows),
                 "venue_strength_backfilled": backfilled,
+                "already_covered_excluded": not force,
             }
 
     return asyncio.run(asyncio.wait_for(_do(), timeout=_VENUE_STRENGTH_BACKFILL_TASK_TIMEOUT_SECONDS))

@@ -2333,6 +2333,7 @@ async def trigger_correct_score_feature_repair(_admin: _AuthUser = Depends(requi
 
 @app.post("/api/v1/admin/system/venue-strength-backfill/completed-fixtures")
 async def trigger_venue_strength_backfill_for_completed_fixtures(
+    force: bool = Query(default=False),
     _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
 ):
     """Enqueues `predictions.backfill_venue_strength_for_completed_fixtures` on the worker (same
@@ -2341,10 +2342,12 @@ async def trigger_venue_strength_backfill_for_completed_fixtures(
     fixtures that haven't kicked off yet, so it does nothing for football.correct_score's actual
     training data — every completed fixture a retrain's samples come from was reconciled before
     `FixtureVenueStrengthCalculator` existed, so all four venue-strength features have 0%
-    coverage there. See the task's own docstring for the full trace."""
+    coverage there. See the task's own docstring for the full trace, including the 2026-08-31
+    already-covered-exclusion fix `force=true` bypasses (e.g. to force a genuine re-registration
+    change to reach every fixture again, not just ones still missing the feature)."""
     from modules.predictions.infrastructure.celery.tasks import backfill_venue_strength_for_completed_fixtures_task
 
-    result = backfill_venue_strength_for_completed_fixtures_task.delay(now_iso=_now().isoformat())
+    result = backfill_venue_strength_for_completed_fixtures_task.delay(now_iso=_now().isoformat(), force=force)
     return envelope(data={"task_id": result.id, "status": "queued"})
 
 

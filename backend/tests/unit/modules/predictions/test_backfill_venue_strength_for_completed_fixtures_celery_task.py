@@ -50,8 +50,10 @@ class _FakeSession:
     committed: bool = False
     closed: bool = False
     commit_count: int = 0
+    last_discovery_query: str = ""
 
-    async def execute(self, _stmt):
+    async def execute(self, stmt):
+        self.last_discovery_query = str(stmt)
         return _FakeResult(self.rows)
 
     async def commit(self):
@@ -121,6 +123,23 @@ def test_backfills_every_completed_fixture_using_its_own_kickoff_as_cutoff(
 
     assert result["completed_football_fixtures_checked"] == len(completed_rows)
     assert result["venue_strength_backfilled"] == len(completed_rows)
+    assert result["already_covered_excluded"] is True
+
+
+def test_excludes_already_covered_fixtures_by_default_but_not_when_forced(fake_calculator, fake_session):
+    """Real production incident (2026-08-31): the discovery query had no ORDER BY and no
+    already-covered filter, so every run re-scanned and re-computed the same ~1000
+    already-backfilled fixtures before ever reaching new ground — live-verified coverage sitting
+    unchanged for 9+ minutes straight across a real run. Default behavior must exclude a fixture
+    that already has home_attack_strength recorded; force=True must not."""
+    tasks_module.backfill_venue_strength_for_completed_fixtures_task.apply(kwargs={"now_iso": T0.isoformat()}).get()
+    assert "NOT EXISTS" in fake_session.last_discovery_query
+    assert "home_attack_strength" in fake_session.last_discovery_query
+
+    tasks_module.backfill_venue_strength_for_completed_fixtures_task.apply(
+        kwargs={"now_iso": T0.isoformat(), "force": True}
+    ).get()
+    assert "NOT EXISTS" not in fake_session.last_discovery_query
 
 
 def test_commits_in_batches_instead_of_only_once_at_the_end(fake_calculator):
