@@ -2348,6 +2348,23 @@ async def trigger_venue_strength_backfill_for_completed_fixtures(
     return envelope(data={"task_id": result.id, "status": "queued"})
 
 
+@app.post("/api/v1/admin/system/venue-strength-backfill/training-snapshots")
+async def trigger_refresh_correct_score_training_feature_snapshots(
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    """Enqueues `predictions.refresh_correct_score_training_feature_snapshots` on the worker
+    (same delegate-to-worker shape as the other admin repair/backfill triggers above). Real
+    production incident, 2026-08-30/31: backfilling raw venue-strength feature values alone
+    doesn't unblock football.correct_score's repair — its preflight coverage check reads from
+    the training predictions' own feature_snapshot rows, which this task is what actually
+    updates. Run the raw backfill (venue-strength-backfill/completed-fixtures) first, or this
+    will honestly find nothing to add."""
+    from modules.predictions.infrastructure.celery.tasks import refresh_correct_score_training_feature_snapshots_task
+
+    result = refresh_correct_score_training_feature_snapshots_task.delay(now_iso=_now().isoformat())
+    return envelope(data={"task_id": result.id, "status": "queued"})
+
+
 @app.post("/api/v1/admin/system/retraining/check-all")
 async def trigger_retraining_check_all(_admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
     """Runs `predictions.check_scheduled_retraining` on demand instead of waiting for its Beat

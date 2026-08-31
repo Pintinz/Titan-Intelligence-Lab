@@ -34,6 +34,7 @@ from modules.predictions.application.scheduled_prediction_generation_orchestrato
 from modules.predictions.application.scheduled_retraining_orchestrator import ScheduledRetrainingOrchestrator
 from modules.predictions.application.windowed_feature_engineering_service import FixtureVenueStrengthCalculator
 from modules.predictions.football.market_seeding import FootballMarketSeeder
+from modules.predictions.infrastructure.persistence.models import PredictionModel
 from modules.sports.domain.value_objects import SeasonId, SportId, TeamId
 
 logger = logging.getLogger("titaniq.predictions.tasks")
@@ -570,6 +571,104 @@ def backfill_venue_strength_for_completed_fixtures_task(self, now_iso: str | Non
             }
 
     return asyncio.run(asyncio.wait_for(_do(), timeout=_VENUE_STRENGTH_BACKFILL_TASK_TIMEOUT_SECONDS))
+
+
+_CORRECT_SCORE_BACKFILL_MODEL_KEY = "football.correct_score.historical-backfill"
+_VENUE_STRENGTH_FEATURE_KEYS = (
+    "football.fixture.home_attack_strength",
+    "football.fixture.home_defence_strength",
+    "football.fixture.away_attack_strength",
+    "football.fixture.away_defence_strength",
+)
+_TRAINING_SNAPSHOT_REFRESH_TASK_TIMEOUT_SECONDS = 1800
+_TRAINING_SNAPSHOT_REFRESH_COMMIT_BATCH_SIZE = 100
+
+
+@celery_app.task(name="predictions.refresh_correct_score_training_feature_snapshots", bind=True, **_RETRY_KWARGS)
+@_logged("predictions.refresh_correct_score_training_feature_snapshots")
+def refresh_correct_score_training_feature_snapshots_task(self, now_iso: str | None = None) -> dict:
+    """On-demand only. Real production incident (2026-08-30/31): `backfill_venue_strength_for_
+    completed_fixtures_task` above writes real venue-strength values into `feature_values_
+    offline` — but `football.correct_score`'s repair kept reporting 0.0% coverage for all four
+    features even once that backfill had covered most completed fixtures. Root cause: the
+    repair's preflight check reads required-feature coverage from the *training* `Prediction`
+    rows' own `feature_snapshot` JSON (the `football.correct_score.historical-backfill` anchor
+    predictions `backfill_correct_score_training_data.py` created), not from the raw feature
+    store directly — backfilling the raw store alone never reaches those training snapshots.
+    This is the missing second step: for every backfilled training prediction, reads each
+    venue-strength feature's real value as of that fixture's own kickoff (point-in-time safe,
+    same as the calculator itself) and merges it into the snapshot.
+
+    Production-safe counterpart to the local-only `scripts/refresh_correct_score_training_
+    feature_snapshots.py` (SQLite-specific raw-hex UUID handling, and calls a `predictions.
+    update()` repository method removed by this session's own forensic-audit hardening —
+    `PredictionRepositoryPort` now only allows `update_status()`, deliberately no method that can
+    rewrite a served prediction's value/probability). This task never touches `value`/
+    `probability`/`status` — only `feature_snapshot` on already-DRAFT/historical backfill
+    training rows, mutated directly via the ORM session rather than through a port method, same
+    "ad-hoc raw-SQL historical-data repair" posture `repair_correct_score_feature_requirements_
+    task` above already uses for this exact class of one-off correction.
+
+    Additive, not destructive: existing feature_snapshot keys are kept — a sample missing a given
+    venue-strength key (below `min_league_sample`/`window` threshold, the same honest partial-
+    coverage shape the calculator itself has) simply doesn't gain that key, never a fabricated
+    placeholder. Idempotent: re-running just re-reads the same values and re-writes the same
+    merged dict."""
+
+    async def _do() -> dict:
+        async with _get_market_feature_repair_context() as ctx:
+            rows = (
+                await ctx.session.execute(
+                    text(
+                        "SELECT p.id, p.subject_ref, f.scheduled_at "
+                        "FROM predictions.predictions p "
+                        "JOIN predictions.models m ON m.id = p.model_id "
+                        "JOIN predictions.prediction_markets mk ON mk.id = p.market_id "
+                        "JOIN sports.fixtures f ON f.id = p.subject_ref::uuid "
+                        "WHERE mk.market_key = 'football.correct_score' AND m.model_key = :model_key"
+                    ),
+                    {"model_key": _CORRECT_SCORE_BACKFILL_MODEL_KEY},
+                )
+            ).all()
+
+            updated = 0
+            values_added = 0
+            for i, (prediction_id, subject_ref, scheduled_at) in enumerate(rows, start=1):
+                addition: dict[str, float] = {}
+                for feature_key in _VENUE_STRENGTH_FEATURE_KEYS:
+                    value_row = (
+                        await ctx.session.execute(
+                            text(
+                                "SELECT (v.value->>'v')::float FROM features.feature_values_offline v "
+                                "WHERE v.feature_key = :feature_key AND v.entity_id = :entity_id AND v.as_of <= :cutoff "
+                                "ORDER BY v.as_of DESC LIMIT 1"
+                            ),
+                            {"feature_key": feature_key, "entity_id": subject_ref, "cutoff": scheduled_at},
+                        )
+                    ).first()
+                    if value_row is not None and value_row[0] is not None:
+                        addition[feature_key] = value_row[0]
+
+                if not addition:
+                    continue
+
+                model = await ctx.session.get(PredictionModel, prediction_id)
+                if model is None:
+                    continue
+                model.feature_snapshot = {**(model.feature_snapshot or {}), **addition}
+                updated += 1
+                values_added += len(addition)
+                if i % _TRAINING_SNAPSHOT_REFRESH_COMMIT_BATCH_SIZE == 0:
+                    await ctx.session.commit()
+
+            await ctx.session.commit()  # final, possibly-partial batch
+            return {
+                "training_predictions_checked": len(rows),
+                "training_predictions_updated": updated,
+                "venue_strength_values_added": values_added,
+            }
+
+    return asyncio.run(asyncio.wait_for(_do(), timeout=_TRAINING_SNAPSHOT_REFRESH_TASK_TIMEOUT_SECONDS))
 
 
 @celery_app.task(name="predictions.check_scheduled_calibration", bind=True, **_RETRY_KWARGS)
