@@ -208,6 +208,26 @@ class TestBoostingAdapters:
         assert sum(result.distribution.values()) == pytest.approx(1.0, abs=1e-6)
 
 
+class TestCatBoostAdapterWorkingDirectory:
+    """Real production incident, 2026-09-01: CatBoostAdapter.fit() left CatBoost's `train_dir`
+    at its default (relative "catboost_info" under the process CWD), which failed outright on the
+    deployed worker with "Can't create train working dir: catboost_info" — the CWD there isn't
+    writable. Every football.correct_score repair attempt failed this way, unrelated to the actual
+    training data. fit() must never depend on the CWD being writable."""
+
+    async def test_fit_never_creates_catboost_info_in_the_current_working_directory(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        adapter = CatBoostAdapter(target_type=TargetType.CLASSIFICATION)
+        await adapter.fit(_classification_samples())
+        assert not (tmp_path / "catboost_info").exists()
+
+    async def test_fit_honors_an_explicit_train_dir_override(self, tmp_path):
+        explicit_dir = tmp_path / "custom_catboost_dir"
+        adapter = CatBoostAdapter(target_type=TargetType.CLASSIFICATION, params={"train_dir": str(explicit_dir)})
+        await adapter.fit(_classification_samples())
+        assert explicit_dir.exists()
+
+
 CLASSIFICATION_ALGORITHMS = [
     MLAlgorithm.RANDOM_FOREST,
     MLAlgorithm.EXTRA_TREES,

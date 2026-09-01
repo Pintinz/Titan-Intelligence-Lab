@@ -10,6 +10,7 @@ Passing ``validation_samples`` to `fit()` enables CatBoost's native early stoppi
 from __future__ import annotations
 
 import pickle
+import tempfile
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -53,13 +54,20 @@ class CatBoostAdapter:
             y_val = np.array([s.label for s in validation_samples])
             fit_kwargs = {"eval_set": (X_val, y_val), "early_stopping_rounds": self.early_stopping_rounds}
 
+        # CatBoost defaults train_dir to a relative "catboost_info" directory under the process's
+        # CWD. Real incident, 2026-09-01: on the deployed worker (Render) that directory isn't
+        # writable, so every fit() failed with "Can't create train working dir: catboost_info"
+        # regardless of the actual data/features — not a training-data problem. Point it at a
+        # fresh, always-writable temp dir unless the caller explicitly overrides it via params.
+        catboost_kwargs = {"train_dir": tempfile.mkdtemp(prefix="catboost_"), **self.params}
+
         if self.target_type is TargetType.CLASSIFICATION:
-            model = CatBoostClassifier(verbose=False, **self.params)
+            model = CatBoostClassifier(verbose=False, **catboost_kwargs)
             model.fit(X, y, **fit_kwargs)
             predictions = model.predict(X)
             metric_name, metric_value = "train_accuracy", float(np.mean(predictions.flatten() == y))
         else:
-            model = CatBoostRegressor(verbose=False, **self.params)
+            model = CatBoostRegressor(verbose=False, **catboost_kwargs)
             model.fit(X, y, **fit_kwargs)
             predictions = model.predict(X)
             metric_name, metric_value = "train_mae", float(np.mean(np.abs(predictions - y)))
