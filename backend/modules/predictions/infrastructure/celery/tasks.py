@@ -380,7 +380,12 @@ def repair_broken_champions_task(self, now_iso: str | None = None) -> dict:
     return asyncio.run(asyncio.wait_for(_do(), timeout=_AUDIT_ONLY_TIMEOUT_SECONDS))
 
 
-_REPAIR_ONE_MARKET_TIMEOUT_SECONDS = 300  # one market's dataset build + candidate training
+_REPAIR_ONE_MARKET_TIMEOUT_SECONDS = 900  # one market's dataset build + candidate training
+# Real incident, 2026-09-01: football.correct_score's repair repeatedly hit a bare TimeoutError
+# (asyncpg query cancelled) on all 3 retries at the old 300s budget once its training-feature
+# snapshot backfill (3014 venue-strength values across 761 predictions) landed — the dataset-build
+# query legitimately takes longer now that correct_score's own feature coverage is far denser than
+# it was when 300s was tuned. 900s matches the sibling _FEATURE_REPAIR_TASK_TIMEOUT_SECONDS budget.
 
 
 @celery_app.task(name="predictions.repair_one_champion", bind=True, **_RETRY_KWARGS)
