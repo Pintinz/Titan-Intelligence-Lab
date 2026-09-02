@@ -2368,6 +2368,45 @@ async def trigger_refresh_correct_score_training_feature_snapshots(
     return envelope(data={"task_id": result.id, "status": "queued"})
 
 
+@app.post("/api/v1/admin/system/expected-goals-backfill/completed-fixtures")
+async def trigger_expected_goals_backfill_for_completed_fixtures(
+    force: bool = Query(default=False),
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    """Enqueues `predictions.backfill_expected_goals_for_completed_fixtures` on the worker (same
+    delegate-to-worker shape as `trigger_venue_strength_backfill_for_completed_fixtures` above).
+    ML rebuild Phase 2 audit, 2026-09-02: `football.correct_score`'s training-anchor script has
+    always required `expected_home_goals`/`expected_away_goals` before it will create a training
+    anchor — real production audit found only 830 of 2,380 completed football fixtures (34.9%)
+    have these features at all, capping the training set at ~823 samples regardless of how many
+    real completed fixtures exist. Same already-covered-exclusion default with a `force=true`
+    escape hatch as every sibling backfill endpoint above. Run this before
+    training-anchors/backfill (below) — that task only anchors fixtures this one already gave real
+    expected-goals features to."""
+    from modules.predictions.infrastructure.celery.tasks import backfill_expected_goals_for_completed_fixtures_task
+
+    result = backfill_expected_goals_for_completed_fixtures_task.delay(now_iso=_now().isoformat(), force=force)
+    return envelope(data={"task_id": result.id, "status": "queued"})
+
+
+@app.post("/api/v1/admin/system/correct-score-training-anchors/backfill")
+async def trigger_correct_score_training_anchors_backfill(
+    _admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR)),
+):
+    """Enqueues `predictions.backfill_correct_score_training_anchors` on the worker (same
+    delegate-to-worker shape as the other admin backfill triggers above). Production-safe
+    counterpart to the local-only `scripts/backfill_correct_score_training_data.py` — creates real
+    `Prediction`/`PredictionOutcome` training-anchor rows for every completed fixture that now has
+    real `expected_home_goals`/`expected_away_goals` features but doesn't have an anchor yet. Run
+    expected-goals-backfill/completed-fixtures (above) first, or this will honestly find nothing
+    new to anchor. After this, re-run venue-strength-backfill/training-snapshots to merge
+    venue-strength values into the newly-created anchors too."""
+    from modules.predictions.infrastructure.celery.tasks import backfill_correct_score_training_anchors_task
+
+    result = backfill_correct_score_training_anchors_task.delay(now_iso=_now().isoformat())
+    return envelope(data={"task_id": result.id, "status": "queued"})
+
+
 @app.post("/api/v1/admin/system/retraining/check-all")
 async def trigger_retraining_check_all(_admin: _AuthUser = Depends(require_role(_Role.ADMINISTRATOR))):
     """Runs `predictions.check_scheduled_retraining` on demand instead of waiting for its Beat

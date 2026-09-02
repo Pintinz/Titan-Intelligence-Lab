@@ -24,17 +24,32 @@ from uuid import UUID
 from sqlalchemy import text
 
 from modules.ingestion.infrastructure.celery.celery_app import celery_app
+from uuid import uuid4
+
 from modules.predictions.application.calibration_fitting_service import CalibrationFittingService
 from modules.predictions.application.calibration_validation_service import CalibrationValidationService
 from modules.predictions.application.feature_market_mapping_service import FeatureMarketMappingService
 from modules.predictions.application.model_health_audit_service import REPAIRABLE_STATUSES, ModelHealthAuditService
+from modules.predictions.application.model_registry_service import ModelAlreadyRegisteredError, ModelRegistryService
 from modules.predictions.application.scheduled_prediction_generation_orchestrator import (
     ScheduledPredictionGenerationOrchestrator,
 )
 from modules.predictions.application.scheduled_retraining_orchestrator import ScheduledRetrainingOrchestrator
-from modules.predictions.application.windowed_feature_engineering_service import FixtureVenueStrengthCalculator
+from modules.predictions.application.windowed_feature_engineering_service import (
+    FixtureExpectedGoalsCalculator,
+    FixtureVenueStrengthCalculator,
+)
+from modules.predictions.domain.entities import ConfidenceBreakdown, ExplanationBundle, Prediction, PredictionOutcome
+from modules.predictions.domain.market_outcome_registry import MARKET_OUTCOME_CATALOG
+from modules.predictions.domain.value_objects import PredictionId, PredictionOutcomeId, PredictionStatus
 from modules.predictions.football.market_seeding import FootballMarketSeeder
 from modules.predictions.infrastructure.persistence.models import PredictionModel
+from modules.predictions.infrastructure.persistence.repositories import (
+    SqlAlchemyMarketRepository,
+    SqlAlchemyModelRepository,
+    SqlAlchemyPredictionOutcomeRepository,
+    SqlAlchemyPredictionRepository,
+)
 from modules.sports.domain.value_objects import SeasonId, SportId, TeamId
 
 logger = logging.getLogger("titaniq.predictions.tasks")
@@ -110,6 +125,7 @@ class MarketFeatureRepairContext:
     seeder: FootballMarketSeeder
     mappings: FeatureMarketMappingService
     venue_strength_calculator: FixtureVenueStrengthCalculator
+    expected_goals_calculator: FixtureExpectedGoalsCalculator
     session: Any
 
 
@@ -696,6 +712,235 @@ def refresh_correct_score_training_feature_snapshots_task(self, now_iso: str | N
             }
 
     return asyncio.run(asyncio.wait_for(_do(), timeout=_TRAINING_SNAPSHOT_REFRESH_TASK_TIMEOUT_SECONDS))
+
+
+_EXPECTED_GOALS_BACKFILL_TASK_TIMEOUT_SECONDS = 1800
+_EXPECTED_GOALS_BACKFILL_COMMIT_BATCH_SIZE = 50
+
+
+@celery_app.task(name="predictions.backfill_expected_goals_for_completed_fixtures", bind=True, **_RETRY_KWARGS)
+@_logged("predictions.backfill_expected_goals_for_completed_fixtures")
+def backfill_expected_goals_for_completed_fixtures_task(self, now_iso: str | None = None, force: bool = False) -> dict:
+    """ML rebuild Phase 2 (2026-09-02): `football.correct_score`'s training-anchor script
+    (`scripts/backfill_correct_score_training_data.py`, and its production-safe counterpart
+    `backfill_correct_score_training_anchors_task` below) has always required a fixture to already
+    have `football.fixture.expected_home_goals`/`expected_away_goals` before it will create a
+    training anchor for it. Real production audit (2026-09-02): only 830 of 2,380 completed
+    football fixtures (34.9%) have these features at all, capping the correct_score training set
+    at ~823 samples regardless of how many real completed fixtures exist — a real, measured
+    contributor to that model's weak held-out log loss (barely better than uniform-random guessing
+    across the correct-score grid) and its "every fixture predicts 1-1" collapse. Nothing had ever
+    backfilled this feature at scale: `FixtureExpectedGoalsCalculator` only ever ran as a side
+    effect of live/historical reconciliation, so any fixture reconciled before this calculator
+    existed never got it — the same class of gap `backfill_venue_strength_for_completed_fixtures_
+    task` above already closed for the venue-strength features.
+
+    Same shape as that task for the same reasons: point-in-time-safe cutoff (a completed fixture's
+    own `scheduled_at`, never `now`), batched commits so a timeout keeps whatever full batches
+    already completed, default-excludes-already-covered with a `force` escape hatch."""
+
+    async def _do() -> dict:
+        async with _get_market_feature_repair_context() as ctx:
+            now = datetime.fromisoformat(now_iso) if now_iso else datetime.now(timezone.utc)
+            await ctx.expected_goals_calculator.ensure_registered(now)
+
+            already_covered_clause = (
+                ""
+                if force
+                else (
+                    "AND NOT EXISTS ("
+                    "SELECT 1 FROM features.feature_values_offline v "
+                    "WHERE v.feature_key = 'football.fixture.expected_home_goals' AND v.entity_id = f.id::text"
+                    ") "
+                )
+            )
+            rows = (
+                await ctx.session.execute(
+                    text(
+                        "SELECT f.id, f.home_team_id, f.away_team_id, f.scheduled_at "
+                        "FROM sports.fixtures f "
+                        "JOIN sports.seasons se ON f.season_id = se.id "
+                        "JOIN sports.competitions c ON se.competition_id = c.id "
+                        "JOIN sports.sports s ON c.sport_id = s.id "
+                        "WHERE s.code = 'football' AND f.status = 'completed' AND f.home_score IS NOT NULL "
+                        + already_covered_clause
+                    )
+                )
+            ).all()
+
+            backfilled = 0
+            for i, (raw_fixture_id, raw_home_team_id, raw_away_team_id, raw_scheduled_at) in enumerate(rows, start=1):
+                cutoff = raw_scheduled_at if raw_scheduled_at.tzinfo else raw_scheduled_at.replace(tzinfo=timezone.utc)
+                home_value, _away_value = await ctx.expected_goals_calculator.compute_and_write(
+                    str(UUID(str(raw_fixture_id))),
+                    TeamId(UUID(str(raw_home_team_id))),
+                    TeamId(UUID(str(raw_away_team_id))),
+                    cutoff,
+                )
+                if home_value is not None:
+                    backfilled += 1
+                if i % _EXPECTED_GOALS_BACKFILL_COMMIT_BATCH_SIZE == 0:
+                    await ctx.session.commit()
+
+            await ctx.session.commit()  # final, possibly-partial batch
+            return {
+                "completed_football_fixtures_checked": len(rows),
+                "expected_goals_backfilled": backfilled,
+                "already_covered_excluded": not force,
+            }
+
+    return asyncio.run(asyncio.wait_for(_do(), timeout=_EXPECTED_GOALS_BACKFILL_TASK_TIMEOUT_SECONDS))
+
+
+_TRAINING_ANCHOR_BACKFILL_TASK_TIMEOUT_SECONDS = 1800
+_TRAINING_ANCHOR_BACKFILL_COMMIT_BATCH_SIZE = 50
+_TRAINING_ANCHOR_INERT_CONFIDENCE = ConfidenceBreakdown(
+    feature_quality=0.0, feature_freshness=0.0, historical_accuracy=0.0, knowledge_graph_completeness=0.0,
+    news_reliability=0.0, community_reliability=0.0, data_completeness=0.0, model_reliability=0.0,
+    prediction_stability=0.0,
+)
+
+
+def _bucket_scoreline(home_score: int, away_score: int, allowed_values: tuple[str, ...]) -> str:
+    scoreline = f"{home_score}-{away_score}"
+    return scoreline if scoreline in allowed_values else "OTHER"
+
+
+@celery_app.task(name="predictions.backfill_correct_score_training_anchors", bind=True, **_RETRY_KWARGS)
+@_logged("predictions.backfill_correct_score_training_anchors")
+def backfill_correct_score_training_anchors_task(self, now_iso: str | None = None) -> dict:
+    """ML rebuild Phase 2 (2026-09-02): production-safe counterpart to the local-only `scripts/
+    backfill_correct_score_training_data.py` (SQLite/dev.db-only — `TITANIQ_DB_URL=sqlite+aiosqlite
+    :///./dev.db`) — the script that originally created `football.correct_score`'s training-anchor
+    `Prediction`/`PredictionOutcome` rows. Runs the identical construction against the real
+    deployed worker's own Supabase credentials, so it can pick up every completed fixture that
+    `backfill_expected_goals_for_completed_fixtures_task` (above) newly gave real
+    `expected_home_goals`/`expected_away_goals` features to — not just the ~823 fixtures that
+    happened to have them before today.
+
+    Every backfilled `Prediction.value`/`probability`/`confidence`/`explanation` is the same
+    honest inert placeholder the original script used — no real predictor ever ran for these
+    fixture+market pairs, so claiming otherwise would misrepresent what happened. Only
+    `feature_snapshot` (real, from the Feature Store) and `PredictionOutcome.actual_value`/
+    `raw_home_goals`/`raw_away_goals` (the real final score) are real.
+
+    Real gap this closes versus the original script: it never set `raw_home_goals`/
+    `raw_away_goals` on the outcome it created (confirmed by reading it — those two kwargs never
+    appear in its `PredictionOutcome(...)` call), even though `FootballGoalsPoissonAdapter.fit()`
+    filters training samples on exactly those two fields being non-`None`
+    (`football_goals_poisson_adapter.py`) and `DatasetBuilder` copies them straight from the
+    outcome row, never re-deriving from `actual_value`. Production's existing 823 anchors do have
+    them populated (verified directly against Supabase, 2026-09-02) — by some other, no-longer-
+    present code path — but a new anchor created without them would silently never reach Poisson
+    training at all, the exact class of "looks backfilled, contributes nothing" bug this whole ML
+    rebuild pass exists to catch. Every anchor this task creates sets both fields from the same
+    real `fixtures.home_score`/`away_score` the bucketed `actual_value` itself comes from.
+
+    Idempotent: the discovery query excludes any fixture that already has a prediction from this
+    anchor model, so re-running only backfills newly-eligible fixtures. Batched commits, own
+    timeout — same class of "don't lose everything on a timeout" fix every sibling backfill task
+    in this file already has."""
+
+    MARKET_KEY = "football.correct_score"
+    BACKFILL_MODEL_KEY = "football.correct_score.historical-backfill"
+
+    async def _do() -> dict:
+        async with _get_market_feature_repair_context() as ctx:
+            now = datetime.fromisoformat(now_iso) if now_iso else datetime.now(timezone.utc)
+            markets = SqlAlchemyMarketRepository(session=ctx.session)
+            model_registry = ModelRegistryService(models=SqlAlchemyModelRepository(session=ctx.session))
+            predictions = SqlAlchemyPredictionRepository(session=ctx.session)
+            outcomes = SqlAlchemyPredictionOutcomeRepository(session=ctx.session)
+
+            market = await markets.get_by_key(MARKET_KEY)
+            if market is None:
+                raise RuntimeError(f"market '{MARKET_KEY}' not found — seed football markets before running this")
+            allowed_values = tuple(MARKET_OUTCOME_CATALOG[MARKET_KEY].allowed_values)
+
+            try:
+                anchor = await model_registry.register(
+                    market_id=market.id, model_key=BACKFILL_MODEL_KEY, version=1, algorithm="backfill-anchor",
+                    now=now,
+                )
+            except ModelAlreadyRegisteredError:
+                anchor = await model_registry.models.get_by_key_version(BACKFILL_MODEL_KEY, 1)
+
+            rows = (
+                await ctx.session.execute(
+                    text(
+                        "SELECT f.id, f.home_score, f.away_score, f.scheduled_at, "
+                        "(SELECT (v.value->>'v')::float FROM features.feature_values_offline v "
+                        " WHERE v.feature_key = 'football.fixture.expected_home_goals' AND v.entity_id = f.id::text "
+                        " AND v.as_of <= f.scheduled_at ORDER BY v.as_of DESC LIMIT 1) AS eh, "
+                        "(SELECT (v.value->>'v')::float FROM features.feature_values_offline v "
+                        " WHERE v.feature_key = 'football.fixture.expected_away_goals' AND v.entity_id = f.id::text "
+                        " AND v.as_of <= f.scheduled_at ORDER BY v.as_of DESC LIMIT 1) AS ea "
+                        "FROM sports.fixtures f "
+                        "JOIN sports.seasons se ON f.season_id = se.id "
+                        "JOIN sports.competitions c ON se.competition_id = c.id "
+                        "JOIN sports.sports s ON c.sport_id = s.id "
+                        "WHERE s.code = 'football' AND f.status = 'completed' AND f.home_score IS NOT NULL "
+                        "AND NOT EXISTS ("
+                        "  SELECT 1 FROM predictions.predictions p "
+                        "  WHERE p.subject_ref = f.id::text AND p.model_id = :anchor_model_id"
+                        ")"
+                    ),
+                    {"anchor_model_id": anchor.id.value},
+                )
+            ).all()
+
+            created = 0
+            skipped_missing_features = 0
+            for i, (raw_fixture_id, home_score, away_score, scheduled_at, eh, ea) in enumerate(rows, start=1):
+                if eh is None or ea is None:
+                    skipped_missing_features += 1
+                    continue
+                subject_ref = str(UUID(str(raw_fixture_id)))
+                evaluated_at = scheduled_at if scheduled_at.tzinfo else scheduled_at.replace(tzinfo=timezone.utc)
+
+                prediction = await predictions.record(
+                    Prediction(
+                        id=PredictionId(uuid4()),
+                        market_id=market.id,
+                        model_id=anchor.id,
+                        subject_ref=subject_ref,
+                        value="insufficient_historical_data",
+                        probability=0.0,
+                        confidence=_TRAINING_ANCHOR_INERT_CONFIDENCE,
+                        explanation=ExplanationBundle(),
+                        feature_snapshot={
+                            "football.fixture.expected_home_goals": eh,
+                            "football.fixture.expected_away_goals": ea,
+                        },
+                        model_version="backfill-anchor.v1",
+                        status=PredictionStatus.DRAFT,
+                        generated_at=now,
+                        data_freshness=evaluated_at,
+                    )
+                )
+                await outcomes.record(
+                    PredictionOutcome(
+                        id=PredictionOutcomeId(uuid4()),
+                        prediction_id=prediction.id,
+                        actual_value=_bucket_scoreline(home_score, away_score, allowed_values),
+                        error=None,
+                        evaluated_at=evaluated_at,
+                        raw_home_goals=home_score,
+                        raw_away_goals=away_score,
+                    )
+                )
+                created += 1
+                if i % _TRAINING_ANCHOR_BACKFILL_COMMIT_BATCH_SIZE == 0:
+                    await ctx.session.commit()
+
+            await ctx.session.commit()  # final, possibly-partial batch
+            return {
+                "completed_football_fixtures_checked": len(rows),
+                "training_anchors_created": created,
+                "skipped_missing_expected_goals": skipped_missing_features,
+            }
+
+    return asyncio.run(asyncio.wait_for(_do(), timeout=_TRAINING_ANCHOR_BACKFILL_TASK_TIMEOUT_SECONDS))
 
 
 @celery_app.task(name="predictions.check_scheduled_calibration", bind=True, **_RETRY_KWARGS)

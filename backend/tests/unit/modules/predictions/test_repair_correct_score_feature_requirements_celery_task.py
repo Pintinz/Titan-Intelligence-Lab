@@ -107,7 +107,7 @@ def fake_session(upcoming_rows):
 @pytest.fixture
 def fake_context(fake_seeder, fake_mappings, fake_calculator, fake_session):
     return tasks_module.MarketFeatureRepairContext(
-        seeder=fake_seeder, mappings=fake_mappings, venue_strength_calculator=fake_calculator, session=fake_session,
+        seeder=fake_seeder, mappings=fake_mappings, venue_strength_calculator=fake_calculator, expected_goals_calculator=None, session=fake_session,
     )
 
 
@@ -191,7 +191,7 @@ def test_task_times_out_instead_of_hanging_forever(monkeypatch, fake_seeder, fak
 
     async def factory():
         return tasks_module.MarketFeatureRepairContext(
-            seeder=fake_seeder, mappings=fake_mappings, venue_strength_calculator=fake_calculator,
+            seeder=fake_seeder, mappings=fake_mappings, venue_strength_calculator=fake_calculator, expected_goals_calculator=None,
             session=_HangingSession(),
         )
 

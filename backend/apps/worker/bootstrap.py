@@ -46,6 +46,7 @@ from apps.api.composition import (
     build_calibration_validation_service,
     build_engine,
     build_feature_market_mapping_service,
+    build_football_expected_goals_calculator,
     build_football_market_seeder,
     build_football_venue_strength_calculator,
     build_health_intelligence_engine,
@@ -141,7 +142,13 @@ def _fresh_registry() -> dict[str, FactoryRecord]:
         "market_feature_repair": FactoryRecord(
             name="market_feature_repair", module="modules.predictions.infrastructure.celery.tasks",
             service="MarketFeatureRepairContext",
-            task_names=("predictions.repair_correct_score_feature_requirements",),
+            task_names=(
+                "predictions.repair_correct_score_feature_requirements",
+                "predictions.backfill_venue_strength_for_completed_fixtures",
+                "predictions.refresh_correct_score_training_feature_snapshots",
+                "predictions.backfill_expected_goals_for_completed_fixtures",
+                "predictions.backfill_correct_score_training_anchors",
+            ),
         ),
         "prediction_generation_orchestrator": FactoryRecord(
             name="prediction_generation_orchestrator", module="modules.predictions.infrastructure.celery.tasks",
@@ -297,12 +304,14 @@ def register_factories(session_factory: async_sessionmaker[AsyncSession]) -> Non
 
     async def market_feature_repair_context_factory():
         # No redis client — MarketFeatureRepairContext's work (seeding, set_required, a plain
-        # SQL query + FixtureVenueStrengthCalculator.compute_and_write) touches only the DB.
+        # SQL query + FixtureVenueStrengthCalculator/FixtureExpectedGoalsCalculator.compute_and_write)
+        # touches only the DB.
         session = session_factory()
         return MarketFeatureRepairContext(
             seeder=build_football_market_seeder(session),
             mappings=build_feature_market_mapping_service(session),
             venue_strength_calculator=build_football_venue_strength_calculator(session),
+            expected_goals_calculator=build_football_expected_goals_calculator(session),
             session=session,
         )
 

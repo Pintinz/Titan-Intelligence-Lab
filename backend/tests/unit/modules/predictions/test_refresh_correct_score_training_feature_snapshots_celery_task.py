@@ -89,7 +89,7 @@ def fake_context_factory():
     def _build(session):
         async def factory():
             return tasks_module.MarketFeatureRepairContext(
-                seeder=None, mappings=None, venue_strength_calculator=None, session=session,
+                seeder=None, mappings=None, venue_strength_calculator=None, expected_goals_calculator=None, session=session,
             )
         return factory
     return _build
@@ -233,7 +233,7 @@ def test_task_times_out_instead_of_hanging_forever(monkeypatch):
 
     async def factory():
         return tasks_module.MarketFeatureRepairContext(
-            seeder=None, mappings=None, venue_strength_calculator=None, session=_HangingSession(),
+            seeder=None, mappings=None, venue_strength_calculator=None, expected_goals_calculator=None, session=_HangingSession(),
         )
 
     tasks_module.set_market_feature_repair_context_factory(factory)
